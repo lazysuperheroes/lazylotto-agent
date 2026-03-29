@@ -242,6 +242,22 @@ export class NegotiationHandler {
   }
 
   /**
+   * Calculate the rake based on the intended deposit/play volume.
+   * Larger commitments get lower rates. Returns the best tier the
+   * user qualifies for, clamped to the configured band.
+   */
+  rakeForVolume(intendedAmount: number): number {
+    const tiers = this.config.rake.volumeTiers;
+    // Tiers are sorted highest minDeposit first
+    for (const tier of tiers) {
+      if (intendedAmount >= tier.minDeposit) {
+        return this.validateRake(tier.rakePercent);
+      }
+    }
+    return this.config.rake.defaultPercent;
+  }
+
+  /**
    * Generate a unique deposit memo in the format "ll-<12 hex chars>".
    */
   generateDepositMemo(): string {

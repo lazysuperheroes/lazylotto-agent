@@ -1,18 +1,18 @@
 {
   "name": "balanced",
   "version": "1.0.0",
-  "description": "Mixed pools, moderate entries, reasonable budget",
+  "description": "Moderate risk. Plays all pool types with a reasonable EV threshold. Good default for most users and deposit sizes.",
   "poolFilter": {
     "type": "all",
     "feeToken": "any",
     "minPrizeCount": 1
   },
   "budget": {
-    "maxSpendPerSession": 50,
-    "maxSpendPerPool": 25,
+    "maxSpendPerSession": 100,
+    "maxSpendPerPool": 40,
     "maxEntriesPerPool": 5,
-    "reserveBalance": 5,
-    "currency": "LAZY"
+    "reserveBalance": 10,
+    "currency": "HBAR"
   },
   "playStyle": {
     "action": "buy_and_roll",

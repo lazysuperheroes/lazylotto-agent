@@ -1,18 +1,18 @@
 {
   "name": "aggressive",
   "version": "1.0.0",
-  "description": "High-value pools, more entries, bigger budget — maximizes upside",
+  "description": "Higher risk. Targets prize-rich pools (2+ prizes), larger batches, looser EV threshold. For users with larger balances chasing big wins.",
   "poolFilter": {
     "type": "all",
     "feeToken": "any",
     "minPrizeCount": 2
   },
   "budget": {
-    "maxSpendPerSession": 200,
-    "maxSpendPerPool": 100,
+    "maxSpendPerSession": 500,
+    "maxSpendPerPool": 200,
     "maxEntriesPerPool": 20,
-    "reserveBalance": 2,
-    "currency": "LAZY"
+    "reserveBalance": 5,
+    "currency": "HBAR"
   },
   "playStyle": {
     "action": "buy_and_roll",

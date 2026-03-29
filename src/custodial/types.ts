@@ -116,6 +116,13 @@ export interface RakeConfig {
   defaultPercent: number;
   minPercent: number;
   maxPercent: number;
+  /** Volume-based tiers: deposit above threshold gets the lower rate */
+  volumeTiers: VolumeTier[];
+}
+
+export interface VolumeTier {
+  minDeposit: number;   // Deposit amount threshold (in budget currency)
+  rakePercent: number;  // Rate offered at this tier
 }
 
 export interface CustodialConfig {
@@ -133,9 +140,15 @@ export interface CustodialConfig {
 export function loadCustodialConfig(): CustodialConfig {
   return {
     rake: {
-      defaultPercent: Number(process.env.RAKE_DEFAULT_PERCENT ?? 1.0),
-      minPercent: Number(process.env.RAKE_MIN_PERCENT ?? 0.5),
-      maxPercent: Number(process.env.RAKE_MAX_PERCENT ?? 3.0),
+      defaultPercent: Number(process.env.RAKE_DEFAULT_PERCENT ?? 5.0),
+      minPercent: Number(process.env.RAKE_MIN_PERCENT ?? 2.0),
+      maxPercent: Number(process.env.RAKE_MAX_PERCENT ?? 5.0),
+      volumeTiers: [
+        { minDeposit: 1000, rakePercent: 3.0 },
+        { minDeposit: 500, rakePercent: 3.5 },
+        { minDeposit: 200, rakePercent: 4.0 },
+        { minDeposit: 50, rakePercent: 5.0 },
+      ],
     },
     depositPollIntervalMs: Number(process.env.DEPOSIT_POLL_INTERVAL_MS ?? 10_000),
     hcs10PollIntervalMs: 15_000,

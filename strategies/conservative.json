@@ -1,7 +1,7 @@
 {
   "name": "conservative",
   "version": "1.0.0",
-  "description": "High win rate pools, small entries, low budget — minimizes losses",
+  "description": "Low risk. Targets high win rate pools only (10%+). Small batches, tight budget, generous reserve. Suitable for cautious users or smaller balances.",
   "poolFilter": {
     "type": "all",
     "minWinRate": 10,
@@ -9,11 +9,11 @@
     "minPrizeCount": 1
   },
   "budget": {
-    "maxSpendPerSession": 20,
-    "maxSpendPerPool": 10,
+    "maxSpendPerSession": 50,
+    "maxSpendPerPool": 20,
     "maxEntriesPerPool": 3,
-    "reserveBalance": 10,
-    "currency": "LAZY"
+    "reserveBalance": 20,
+    "currency": "HBAR"
   },
   "playStyle": {
     "action": "buy_and_roll",
