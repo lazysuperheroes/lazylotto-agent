@@ -90,5 +90,10 @@ export async function setupApprovals(
   console.log(`Approving ${lazyAmount} LAZY to GasStation (${gasStationId})...`);
   await approveFungibleToken(client, lazyTokenId, gasStationId, lazyAmount);
 
+  if (storageId) {
+    console.log(`Approving ${lazyAmount} LAZY to Storage (${storageId})...`);
+    await approveFungibleToken(client, lazyTokenId, storageId, lazyAmount);
+  }
+
   console.log('Approvals complete.');
 }

@@ -24,15 +24,56 @@ function loadStrategy(name: string): Strategy {
   return StrategySchema.parse(raw);
 }
 
+function printHelp(): void {
+  console.log(`
+lazylotto-agent — Autonomous LazyLotto lottery player on Hedera
+
+Usage:
+  lazylotto-agent [options]
+
+Options:
+  --help                Show this help message
+  --wizard              Interactive setup wizard (creates .env)
+  --setup               First-time wallet setup (associations, approvals)
+  --register [--force]  Register/update agent with HOL registry
+  --status              Check wallet balances and state
+  --audit               Comprehensive configuration audit
+  --mcp-server          Start MCP server (for Claude Desktop)
+  --scheduled           Run play sessions on cron schedule
+  --multi-user          Start multi-user custodial agent
+    --deploy-accounting   Deploy HCS-20 accounting topic
+    --mcp-server          MCP server with multi-user tools
+
+With no options, runs a single play session.
+
+Environment:
+  HEDERA_NETWORK        testnet or mainnet
+  HEDERA_ACCOUNT_ID     Agent's Hedera account
+  HEDERA_PRIVATE_KEY    Agent's private key (DER hex)
+  STRATEGY              balanced (default), conservative, aggressive, or file path
+  OWNER_EOA             Owner wallet for prize transfers
+
+See README.md for full documentation.
+`);
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+
+  if (args.includes('--help') || args.includes('-h')) {
+    printHelp();
+    return;
+  }
+
   const strategyName = process.env.STRATEGY ?? 'balanced';
 
   let strategy: Strategy;
   try {
     strategy = loadStrategy(strategyName);
-  } catch {
-    console.log(`Strategy "${strategyName}" not found or invalid, using defaults.`);
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    console.warn(`Strategy "${strategyName}" failed to load: ${detail}`);
+    console.warn('Falling back to default strategy.');
     strategy = DEFAULT_STRATEGY;
   }
 
@@ -40,6 +81,15 @@ async function main(): Promise<void> {
     const { runWizard } = await import('./cli/wizard.js');
     await runWizard();
     return;
+  }
+
+  // Mainnet safety check — warn before spending real money
+  if (process.env.HEDERA_NETWORK === 'mainnet') {
+    const playModes = !args.length || args.includes('--scheduled') || args.includes('--multi-user');
+    if (playModes && !args.includes('--mcp-server')) {
+      console.log('\n  *** WARNING: Running on MAINNET with real funds ***');
+      console.log('  Ensure agent wallet has limited funding.\n');
+    }
   }
 
   const agent = new LottoAgent(strategy);
@@ -87,7 +137,6 @@ async function main(): Promise<void> {
       return;
     }
 
-    // Start custodial agent with deposit watching + scheduled plays
     multiAgent.start();
 
     const cronExpr = strategy.schedule.cron;
@@ -136,12 +185,17 @@ async function main(): Promise<void> {
       }
     });
 
-    // Reset daily counter at midnight
     cron.schedule('0 0 * * *', () => {
       sessionsToday = 0;
     });
 
     console.log('Agent running. Press Ctrl+C to stop.');
+
+    process.on('SIGINT', () => {
+      console.log('\nStopping...');
+      process.exit(0);
+    });
+
     return;
   }
 

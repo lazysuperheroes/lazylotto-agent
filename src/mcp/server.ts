@@ -121,41 +121,21 @@ export async function startMcpServer(
         .positive()
         .optional()
         .describe('Override maxSpendPerSession for this run'),
-      poolId: z
-        .number()
-        .int()
-        .positive()
-        .optional()
-        .describe('Play only this specific pool (skip discovery/evaluation)'),
     },
-    async ({ budget, poolId }) => {
+    async ({ budget }) => {
       if (activeSession) {
         return errorResult('A session is already running. Use agent_stop to cancel it.');
       }
 
+      const originalStrategy = agent.getStrategy();
       try {
         activeSession = new AbortController();
 
-        // Apply budget override if provided
+        // Apply budget override (temporary — restored in finally)
         if (budget !== undefined) {
-          const current = agent.getStrategy();
           agent.setStrategy({
-            ...current,
-            budget: { ...current.budget, maxSpendPerSession: budget },
-          });
-        }
-
-        // Apply pool filter override if specific pool requested
-        if (poolId !== undefined) {
-          const current = agent.getStrategy();
-          agent.setStrategy({
-            ...current,
-            poolFilter: {
-              ...current.poolFilter,
-              // The agent will discover all pools then filter — we narrow
-              // the filter so only this pool survives evaluation.
-              // The pool scoring/play loop handles the rest.
-            },
+            ...originalStrategy,
+            budget: { ...originalStrategy.budget, maxSpendPerSession: budget },
           });
         }
 
@@ -191,6 +171,7 @@ export async function startMcpServer(
       } catch (e) {
         return errorResult(`Play session failed: ${errorMsg(e)}`);
       } finally {
+        agent.setStrategy(originalStrategy);
         activeSession = null;
       }
     }
@@ -280,8 +261,8 @@ export async function startMcpServer(
           MaxUint256,
         ]);
 
-        const contractId =
-          process.env.LAZYLOTTO_CONTRACT_ID ?? '0.0.8399255';
+        const contractId = process.env.LAZYLOTTO_CONTRACT_ID;
+        if (!contractId) return errorResult('LAZYLOTTO_CONTRACT_ID not set in environment');
         const txResult = await executeEncodedCall(
           client,
           contractId,
@@ -437,7 +418,7 @@ export async function startMcpServer(
             .addHbarTransfer(recipientAccountId, new Hbar(amount));
 
           const response = await tx.execute(client);
-          const receipt = await response.getReceipt(client);
+          await response.getReceipt(client);
           transactionId = response.transactionId.toString();
         } else {
           // LAZY transfer
@@ -455,7 +436,7 @@ export async function startMcpServer(
             .addTokenTransfer(tokenIdObj, recipientAccountId, baseUnits);
 
           const response = await tx.execute(client);
-          const receipt = await response.getReceipt(client);
+          await response.getReceipt(client);
           transactionId = response.transactionId.toString();
         }
 
@@ -511,8 +492,8 @@ export async function startMcpServer(
               [ownerEvmAddress, MaxUint256]
             );
 
-            const contractId =
-              process.env.LAZYLOTTO_CONTRACT_ID ?? '0.0.8399255';
+            const contractId = process.env.LAZYLOTTO_CONTRACT_ID;
+            if (!contractId) return errorResult('LAZYLOTTO_CONTRACT_ID not set in environment');
             const txResult = await executeEncodedCall(
               client,
               contractId,

@@ -140,9 +140,9 @@ Three built-in strategies ship in `strategies/`:
 
 | Strategy | Budget | Entries/Pool | Risk | Approach |
 |----------|--------|-------------|------|----------|
-| **conservative** | 20 LAZY/session | 3 | Low | High win rate pools only (>10%), small bets |
-| **balanced** | 50 LAZY/session | 5 | Medium | All pools, moderate EV threshold |
-| **aggressive** | 200 LAZY/session | 20 | High | Pools with 2+ prizes, large batches |
+| **conservative** | 50 HBAR/session | 3 | Low | High win rate pools only (>10%), small bets |
+| **balanced** | 100 HBAR/session | 5 | Moderate | All pools, moderate EV threshold |
+| **aggressive** | 500 HBAR/session | 20 | Higher | Pools with 2+ prizes, large batches |
 
 Select via `STRATEGY=conservative` in `.env` or pass a path to a custom JSON file.
 

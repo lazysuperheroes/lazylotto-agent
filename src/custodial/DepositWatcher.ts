@@ -142,6 +142,14 @@ export class DepositWatcher {
       return false;
     }
 
+    // Reject deposits to deregistered users
+    if (!user.active) {
+      console.warn(
+        `[DepositWatcher] Deposit rejected: user ${user.userId} is deregistered (memo: ${memo})`,
+      );
+      return false;
+    }
+
     // Determine credit amount — try token transfers first, fall back to HBAR
     const creditAmount = this.extractCreditAmount(tx);
     if (creditAmount <= 0) return false;

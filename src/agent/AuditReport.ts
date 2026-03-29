@@ -12,13 +12,16 @@ import {
 } from '../hedera/mirror.js';
 import { getDelegatedNfts, getSerialsDelegatedTo } from '../hedera/delegates.js';
 
-// MCP client is optional — audit works without it
-let getUserStateFn: typeof import('../mcp/client.js').getUserState | null = null;
-try {
-  const mod = await import('../mcp/client.js');
-  getUserStateFn = mod.getUserState;
-} catch {
-  /* MCP client unavailable */
+// MCP client is optional — loaded lazily to avoid blocking module init
+async function tryGetUserState(
+  accountId: string
+): Promise<{ pendingPrizesCount: number; boost: number } | null> {
+  try {
+    const { getUserState } = await import('../mcp/client.js');
+    return await getUserState(accountId);
+  } catch {
+    return null;
+  }
 }
 
 // ── Types ─────────────────────────────────────────────────────
@@ -163,8 +166,8 @@ export class AuditReport {
     // ── Boost ───────────────────────────────────────────────
     let boost: AuditResult['boost'] = null;
     try {
-      if (getUserStateFn) {
-        const state = await getUserStateFn(accountId);
+      const state = await tryGetUserState(accountId);
+      if (state) {
         boost = { totalBps: state.boost };
         if (state.boost === 0) {
           recommendations.push(
@@ -288,11 +291,17 @@ export class AuditReport {
       );
     }
 
+    if (ownerEoa && ownerEoa === accountId) {
+      warnings.push(
+        'OWNER_EOA is the same as the agent wallet. Prize transfers would send to self (wasting gas).'
+      );
+    }
+
     // ── Prizes ──────────────────────────────────────────────
     let prizes: AuditResult['prizes'] = null;
     try {
-      if (getUserStateFn) {
-        const state = await getUserStateFn(accountId);
+      const state = await tryGetUserState(accountId);
+      if (state) {
         prizes = { pendingCount: state.pendingPrizesCount };
         if (state.pendingPrizesCount > 0) {
           recommendations.push(

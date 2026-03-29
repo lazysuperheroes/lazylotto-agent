@@ -293,13 +293,15 @@ The rake is a percentage deducted from each deposit before crediting the user's 
 
 | Parameter          | Default | Range         | Description                              |
 |--------------------|---------|---------------|------------------------------------------|
-| Default rake       | 1.0%    | --            | Applied unless overridden                |
-| Minimum rake       | 0.5%    | --            | Floor for negotiation                    |
-| Maximum rake       | 3.0%    | --            | Ceiling for negotiation                  |
-| Negotiated rake    | Varies  | [min, max]    | Per-user override during registration    |
+| Default rake       | 5.0%    | --            | Applied for small deposits               |
+| Minimum rake       | 2.0%    | --            | Floor (for large-volume users)           |
+| Maximum rake       | 5.0%    | --            | Ceiling                                  |
+| Negotiated rake    | Varies  | [min, max]    | Volume-based or per-user override        |
 
-**Example**: A user deposits 100 LAZY with a 1% rake. The rake amount is 1 LAZY. The user's
-ledger is credited with 99 LAZY. The operator's platform balance increases by 1 LAZY.
+Volume-based tiers (automatic): 1000+ HBAR = 3%, 500+ = 3.5%, 200+ = 4%, under 50 = 5%.
+
+**Example**: A user deposits 100 HBAR with a 5% rake. The rake amount is 5 HBAR. The user's
+ledger is credited with 95 HBAR. The operator's platform balance increases by 5 HBAR.
 
 ### Negotiation
 

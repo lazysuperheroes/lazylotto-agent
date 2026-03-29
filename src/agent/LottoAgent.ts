@@ -462,7 +462,7 @@ export class LottoAgent {
 
     result.entriesBought = batchSize;
     result.amountSpent = pool.entryFee * batchSize;
-    this.budgetManager.recordSpend(pool.poolId, result.amountSpent);
+    this.budgetManager.recordSpend(pool.poolId, result.amountSpent, batchSize);
 
     // buy_and_roll and buy_and_redeem include the roll in the same tx
     if (action === 'buy_and_roll' || action === 'buy_and_redeem') {

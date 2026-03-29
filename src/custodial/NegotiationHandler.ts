@@ -261,7 +261,7 @@ export class NegotiationHandler {
    * Generate a unique deposit memo in the format "ll-<12 hex chars>".
    */
   generateDepositMemo(): string {
-    return 'll-' + randomBytes(6).toString('hex');
+    return 'll-' + randomBytes(16).toString('hex');
   }
 
   // ── Private Helpers ─────────────────────────────────────────

@@ -379,46 +379,67 @@ export class MultiUserAgent {
       const user = this.store.getUser(userId);
       if (!user) throw new UserNotFoundError(userId);
 
-      // Deduct from ledger first (throws if insufficient)
-      const newBalance = await this.ledger.processWithdrawal(userId, amount);
+      // Reserve funds first — safe to release if transfer fails
+      this.ledger.reserve(userId, amount);
 
-      // Execute TransferTransaction to user
-      const recipientId = AccountId.fromString(user.hederaAccountId);
-      const senderId = AccountId.fromString(getOperatorAccountId(this.client));
-
-      // Determine if HBAR or LAZY based on strategy currency
-      const currency = user.strategySnapshot.budget.currency;
       let transactionId: string;
+      try {
+        // Execute TransferTransaction to user
+        const recipientId = AccountId.fromString(user.hederaAccountId);
+        const senderId = AccountId.fromString(getOperatorAccountId(this.client));
+        const currency = user.strategySnapshot.budget.currency;
 
-      if (currency === 'HBAR') {
-        const tx = new TransferTransaction()
-          .addHbarTransfer(senderId, new Hbar(-amount))
-          .addHbarTransfer(recipientId, new Hbar(amount));
-        const response = await tx.execute(this.client);
-        await response.getReceipt(this.client);
-        transactionId = response.transactionId.toString();
-      } else {
-        const lazyTokenId = process.env.LAZY_TOKEN_ID;
-        if (!lazyTokenId) throw new Error('LAZY_TOKEN_ID not configured');
-        const baseUnits = Math.round(amount * Math.pow(10, HEDERA_DEFAULTS.lazyDecimals));
-        const tx = new TransferTransaction()
-          .addTokenTransfer(TokenId.fromString(lazyTokenId), senderId, -baseUnits)
-          .addTokenTransfer(TokenId.fromString(lazyTokenId), recipientId, baseUnits);
-        const response = await tx.execute(this.client);
-        await response.getReceipt(this.client);
-        transactionId = response.transactionId.toString();
+        if (currency === 'HBAR') {
+          const tx = new TransferTransaction()
+            .addHbarTransfer(senderId, new Hbar(-amount))
+            .addHbarTransfer(recipientId, new Hbar(amount));
+          const response = await tx.execute(this.client);
+          await response.getReceipt(this.client);
+          transactionId = response.transactionId.toString();
+        } else {
+          const lazyTokenId = process.env.LAZY_TOKEN_ID;
+          if (!lazyTokenId) throw new Error('LAZY_TOKEN_ID not configured');
+          const baseUnits = Math.round(amount * Math.pow(10, HEDERA_DEFAULTS.lazyDecimals));
+          const tx = new TransferTransaction()
+            .addTokenTransfer(TokenId.fromString(lazyTokenId), senderId, -baseUnits)
+            .addTokenTransfer(TokenId.fromString(lazyTokenId), recipientId, baseUnits);
+          const response = await tx.execute(this.client);
+          await response.getReceipt(this.client);
+          transactionId = response.transactionId.toString();
+        }
+      } catch (transferError) {
+        // CRITICAL: release reserved funds on transfer failure
+        this.ledger.releaseReserve(userId, amount);
+        throw transferError;
       }
 
+      // Transfer succeeded — settle the withdrawal (deduct from reserved, update totals)
+      this.ledger.settleSpend(userId, amount);
+      this.store.updateBalance(userId, (b) => ({
+        ...b,
+        totalWithdrawn: b.totalWithdrawn + amount,
+      }));
+
+      // Record via HCS-20 (non-blocking)
+      try {
+        await this.accounting.recordWithdrawal(user.hederaAccountId, amount);
+      } catch {
+        /* accounting failure is not blocking */
+      }
+
+      const currency = user.strategySnapshot.budget.currency;
       const record: WithdrawalRecord = {
         userId,
         amount,
-        tokenId: currency === 'HBAR' ? null : process.env.LAZY_TOKEN_ID!,
+        tokenId: currency === 'HBAR' ? null : process.env.LAZY_TOKEN_ID ?? null,
         recipientAccountId: user.hederaAccountId,
         transactionId,
         timestamp: new Date().toISOString(),
       };
 
       this.store.recordWithdrawal(record);
+
+      const newBalance = this.ledger.getBalance(userId);
 
       // Notify user
       try {
@@ -445,6 +466,7 @@ export class MultiUserAgent {
   async operatorWithdrawFees(
     amount: number,
     recipientAccountId: string,
+    token: 'HBAR' | 'LAZY' = 'HBAR',
   ): Promise<string> {
     const operator = this.store.getOperator();
     if (operator.platformBalance < amount) {
@@ -454,12 +476,26 @@ export class MultiUserAgent {
     const senderId = AccountId.fromString(getOperatorAccountId(this.client));
     const recipientId = AccountId.fromString(recipientAccountId);
 
-    const tx = new TransferTransaction()
-      .addHbarTransfer(senderId, new Hbar(-amount))
-      .addHbarTransfer(recipientId, new Hbar(amount));
-    const response = await tx.execute(this.client);
-    await response.getReceipt(this.client);
-    const transactionId = response.transactionId.toString();
+    let transactionId: string;
+
+    if (token === 'HBAR') {
+      const tx = new TransferTransaction()
+        .addHbarTransfer(senderId, new Hbar(-amount))
+        .addHbarTransfer(recipientId, new Hbar(amount));
+      const response = await tx.execute(this.client);
+      await response.getReceipt(this.client);
+      transactionId = response.transactionId.toString();
+    } else {
+      const lazyTokenId = process.env.LAZY_TOKEN_ID;
+      if (!lazyTokenId) throw new Error('LAZY_TOKEN_ID not configured');
+      const baseUnits = Math.round(amount * Math.pow(10, HEDERA_DEFAULTS.lazyDecimals));
+      const tx = new TransferTransaction()
+        .addTokenTransfer(TokenId.fromString(lazyTokenId), senderId, -baseUnits)
+        .addTokenTransfer(TokenId.fromString(lazyTokenId), recipientId, baseUnits);
+      const response = await tx.execute(this.client);
+      await response.getReceipt(this.client);
+      transactionId = response.transactionId.toString();
+    }
 
     // Update operator state
     this.store.updateOperator((op) => ({
@@ -542,9 +578,16 @@ export class MultiUserAgent {
   // Different users do NOT block each other (though playForAllEligible
   // is inherently sequential for prize disambiguation reasons).
 
+  private static readonly LOCK_TIMEOUT_MS = 300_000; // 5 minutes
+
   private async acquireLock(userId: string): Promise<void> {
-    // Spin-wait if another operation holds the lock for this user
+    const deadline = Date.now() + MultiUserAgent.LOCK_TIMEOUT_MS;
     while (this.userLocks.has(userId)) {
+      if (Date.now() > deadline) {
+        throw new Error(
+          `Lock timeout for user ${userId} — a previous operation may be hung`
+        );
+      }
       await this.userLocks.get(userId);
     }
     // Install a new lock

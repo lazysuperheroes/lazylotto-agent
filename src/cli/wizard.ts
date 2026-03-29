@@ -111,6 +111,8 @@ export async function runWizard(): Promise<void> {
     validate: isValidAccountId,
   });
 
+  console.log('\n  NOTE: The key will be visible as you type.');
+  console.log('  Alternatively, edit .env manually after the wizard completes.\n');
   const privateKey = await ask('Agent Private Key (DER hex, starts with 302e)', {
     validate: isValidPrivateKey,
   });

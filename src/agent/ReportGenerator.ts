@@ -86,9 +86,11 @@ export class ReportGenerator {
       );
     }
 
-    const net = report.totalPrizesClaimed - report.totalSpent;
     console.log('───────────────────────────────────────');
-    console.log(`Net:         ${net >= 0 ? '+' : ''}${net} ${report.currency}`);
+    console.log(`Spent:       -${report.totalSpent} ${report.currency}`);
+    if (report.totalWins > 0) {
+      console.log(`Prizes:      ${report.totalWins} won (transferred to owner, claim from dApp)`);
+    }
     console.log('═══════════════════════════════════════\n');
   }
 }

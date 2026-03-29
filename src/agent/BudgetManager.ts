@@ -3,6 +3,7 @@ import type { Budget } from '../config/strategy.js';
 export interface SpendRecord {
   poolId: number;
   amount: number;
+  entries: number;
   currency: string;
   timestamp: number;
 }
@@ -45,10 +46,11 @@ export class BudgetManager {
     return Math.max(0, Math.min(bySession, byPool, byLimit));
   }
 
-  recordSpend(poolId: number, amount: number): void {
+  recordSpend(poolId: number, amount: number, entries = 1): void {
     this.spent.push({
       poolId,
       amount,
+      entries,
       currency: this.budget.currency,
       timestamp: Date.now(),
     });
@@ -63,7 +65,9 @@ export class BudgetManager {
   }
 
   private entriesForPool(poolId: number): number {
-    return this.spent.filter((r) => r.poolId === poolId).length;
+    return this.spent
+      .filter((r) => r.poolId === poolId)
+      .reduce((sum, r) => sum + r.entries, 0);
   }
 
   getSummary() {
