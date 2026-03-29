@@ -68,6 +68,49 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args.includes('--multi-user')) {
+    const { MultiUserAgent } = await import('./custodial/MultiUserAgent.js');
+    const { loadCustodialConfig } = await import('./custodial/types.js');
+    const config = loadCustodialConfig();
+    const multiAgent = new MultiUserAgent(config);
+    await multiAgent.initialize();
+
+    if (args.includes('--deploy-accounting')) {
+      const topicId = await multiAgent.deployAccounting();
+      console.log(`HCS-20 deployed. Topic: ${topicId}`);
+      console.log(`Add to .env: HCS20_TOPIC_ID=${topicId}`);
+      return;
+    }
+
+    if (args.includes('--mcp-server')) {
+      await startMcpServer(agent, multiAgent);
+      return;
+    }
+
+    // Start custodial agent with deposit watching + scheduled plays
+    multiAgent.start();
+
+    const cronExpr = strategy.schedule.cron;
+    cron.schedule(cronExpr, async () => {
+      try {
+        const results = await multiAgent.playForAllEligible();
+        console.log(`Played for ${results.length} user(s)`);
+      } catch (e) {
+        console.error('Scheduled play cycle failed:', e);
+      }
+    });
+
+    console.log('Multi-user agent running. Ctrl+C to stop.');
+
+    process.on('SIGINT', async () => {
+      console.log('\nShutting down...');
+      await multiAgent.stop();
+      process.exit(0);
+    });
+
+    return;
+  }
+
   if (args.includes('--mcp-server')) {
     await startMcpServer(agent);
     return;

@@ -1,5 +1,6 @@
 {
   "name": "conservative",
+  "version": "1.0.0",
   "description": "High win rate pools, small entries, low budget — minimizes losses",
   "poolFilter": {
     "type": "all",

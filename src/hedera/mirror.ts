@@ -80,6 +80,35 @@ export async function getTokenAllowances(
   return data.allowances ?? [];
 }
 
+export interface MirrorTransaction {
+  transaction_id: string;
+  consensus_timestamp: string;
+  memo_base64: string;
+  result: string;
+  transfers: { account: string; amount: number }[];
+  token_transfers: { token_id: string; account: string; amount: number }[];
+}
+
+export async function getTransactionsByAccount(
+  accountId: string,
+  options?: {
+    timestampGt?: string;
+    transactionType?: string;
+    limit?: number;
+    order?: 'asc' | 'desc';
+  }
+): Promise<MirrorTransaction[]> {
+  let path = `/transactions?account.id=${accountId}`;
+  if (options?.timestampGt) path += `&timestamp=gt:${options.timestampGt}`;
+  if (options?.transactionType)
+    path += `&transactiontype=${options.transactionType}`;
+  path += `&limit=${options?.limit ?? 25}`;
+  path += `&order=${options?.order ?? 'asc'}`;
+
+  const data = await mirrorGet<{ transactions: MirrorTransaction[] }>(path);
+  return data.transactions ?? [];
+}
+
 export async function waitForMirrorNode(): Promise<void> {
   await new Promise((resolve) =>
     setTimeout(resolve, HEDERA_DEFAULTS.mirrorNodeDelay)

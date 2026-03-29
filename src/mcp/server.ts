@@ -99,7 +99,10 @@ let activeSession: AbortController | null = null;
 //  MCP Server
 // ══════════════════════════════════════════════════════════════
 
-export async function startMcpServer(agent: LottoAgent): Promise<void> {
+export async function startMcpServer(
+  agent: LottoAgent,
+  multiUser?: import('../custodial/MultiUserAgent.js').MultiUserAgent
+): Promise<void> {
   const client = createClient();
 
   const server = new McpServer({
@@ -728,6 +731,217 @@ export async function startMcpServer(agent: LottoAgent): Promise<void> {
       }
     }
   );
+
+  // ══════════════════════════════════════════════════════════
+  //  Multi-User Tools (only registered when multiUser agent provided)
+  // ══════════════════════════════════════════════════════════
+
+  if (multiUser) {
+    server.tool(
+      'multi_user_status',
+      'List all registered users with balances and last activity.',
+      {},
+      async () => {
+        try {
+          const users = multiUser.getAllUsersStatus();
+          return json({
+            totalUsers: users.length,
+            activeUsers: users.filter((u) => u.active).length,
+            users: users.map((u) => ({
+              userId: u.userId,
+              hederaAccountId: u.hederaAccountId,
+              eoaAddress: u.eoaAddress,
+              strategy: u.strategyName,
+              rakePercent: u.rakePercent,
+              balances: u.balances,
+              active: u.active,
+              lastPlayedAt: u.lastPlayedAt,
+            })),
+          });
+        } catch (e) {
+          return errorResult(`Status failed: ${errorMsg(e)}`);
+        }
+      }
+    );
+
+    server.tool(
+      'multi_user_register',
+      'Register a new user. Returns their unique deposit memo for funding.',
+      {
+        accountId: z.string().describe('User Hedera account ID (0.0.XXXXX)'),
+        eoaAddress: z.string().describe('User EOA for prize delivery (0.0.XXXXX or 0x...)'),
+        strategy: z.enum(['conservative', 'balanced', 'aggressive']).default('balanced')
+          .describe('Strategy name'),
+        rakePercent: z.number().optional()
+          .describe('Optional negotiated rake (must be within configured band)'),
+      },
+      async ({ accountId, eoaAddress, strategy: strat, rakePercent }) => {
+        try {
+          const user = await multiUser.registerUser(accountId, eoaAddress, strat, rakePercent);
+          return json({
+            userId: user.userId,
+            depositMemo: user.depositMemo,
+            agentWallet: getOperatorAccountId(client),
+            rakePercent: user.rakePercent,
+            strategy: user.strategyName,
+            instructions:
+              `Send HBAR or LAZY to ${getOperatorAccountId(client)} ` +
+              `with memo "${user.depositMemo}" to fund your account.`,
+          });
+        } catch (e) {
+          return errorResult(`Registration failed: ${errorMsg(e)}`);
+        }
+      }
+    );
+
+    server.tool(
+      'multi_user_deposit_info',
+      'Get deposit memo and funding instructions for an existing user.',
+      { userId: z.string().describe('User ID') },
+      async ({ userId }) => {
+        try {
+          const user = multiUser.getUserStatus(userId);
+          if (!user) return errorResult('User not found');
+          return json({
+            depositMemo: user.depositMemo,
+            agentWallet: getOperatorAccountId(client),
+            balances: user.balances,
+            instructions:
+              `Send HBAR or LAZY to ${getOperatorAccountId(client)} ` +
+              `with memo "${user.depositMemo}"`,
+          });
+        } catch (e) {
+          return errorResult(`Failed: ${errorMsg(e)}`);
+        }
+      }
+    );
+
+    server.tool(
+      'multi_user_play',
+      'Trigger a play session for a specific user or all eligible users.',
+      { userId: z.string().optional().describe('Specific user ID, or omit for all eligible') },
+      async ({ userId }) => {
+        try {
+          if (userId) {
+            const result = await multiUser.playForUser(userId);
+            return json({ sessions: [result] });
+          } else {
+            const results = await multiUser.playForAllEligible();
+            return json({ sessions: results });
+          }
+        } catch (e) {
+          return errorResult(`Play failed: ${errorMsg(e)}`);
+        }
+      }
+    );
+
+    server.tool(
+      'multi_user_withdraw',
+      'Process a withdrawal for a user. Sends funds to their Hedera account.',
+      {
+        userId: z.string().describe('User ID'),
+        amount: z.number().positive().describe('Amount to withdraw'),
+      },
+      async ({ userId, amount }) => {
+        try {
+          const record = await multiUser.processWithdrawal(userId, amount);
+          return json(record);
+        } catch (e) {
+          return errorResult(`Withdrawal failed: ${errorMsg(e)}`);
+        }
+      }
+    );
+
+    server.tool(
+      'multi_user_deregister',
+      'Deactivate a user account. User can only withdraw remaining balance after this.',
+      { userId: z.string().describe('User ID') },
+      async ({ userId }) => {
+        try {
+          multiUser.deregisterUser(userId);
+          const user = multiUser.getUserStatus(userId);
+          return json({
+            deregistered: true,
+            userId,
+            remainingBalance: user?.balances.available ?? 0,
+            message: 'User deactivated. They can still withdraw remaining funds.',
+          });
+        } catch (e) {
+          return errorResult(`Deregistration failed: ${errorMsg(e)}`);
+        }
+      }
+    );
+
+    server.tool(
+      'multi_user_play_history',
+      'View play session history for a user.',
+      {
+        userId: z.string().describe('User ID'),
+        limit: z.number().int().positive().default(20).describe('Max sessions to return'),
+      },
+      async ({ userId, limit }) => {
+        try {
+          const sessions = multiUser.getPlayHistory(userId);
+          return json({ userId, sessions: sessions.slice(-limit) });
+        } catch (e) {
+          return errorResult(`History failed: ${errorMsg(e)}`);
+        }
+      }
+    );
+
+    server.tool(
+      'operator_balance',
+      'View operator platform balance: rake collected, gas spent, net profit.',
+      {},
+      async () => {
+        try {
+          const op = multiUser.getOperatorBalance();
+          return json({
+            ...op,
+            netProfit: op.totalRakeCollected - op.totalGasSpent - op.totalWithdrawnByOperator,
+          });
+        } catch (e) {
+          return errorResult(`Failed: ${errorMsg(e)}`);
+        }
+      }
+    );
+
+    server.tool(
+      'operator_withdraw_fees',
+      'Withdraw accumulated rake fees from the operator platform balance.',
+      {
+        amount: z.number().positive().describe('Amount in HBAR to withdraw'),
+        to: z.string().describe('Recipient Hedera account ID'),
+      },
+      async ({ amount, to }) => {
+        try {
+          const txId = await multiUser.operatorWithdrawFees(amount, to);
+          const op = multiUser.getOperatorBalance();
+          return json({
+            withdrawn: amount,
+            to,
+            transactionId: txId,
+            remainingPlatformBalance: op.platformBalance,
+          });
+        } catch (e) {
+          return errorResult(`Withdrawal failed: ${errorMsg(e)}`);
+        }
+      }
+    );
+
+    server.tool(
+      'operator_health',
+      'Health check: uptime, deposit watcher status, error count, active users, pending reserves.',
+      {},
+      async () => {
+        try {
+          return json(multiUser.getHealth());
+        } catch (e) {
+          return errorResult(`Health check failed: ${errorMsg(e)}`);
+        }
+      }
+    );
+  }
 
   // ── Start server ──────────────────────────────────────────
 

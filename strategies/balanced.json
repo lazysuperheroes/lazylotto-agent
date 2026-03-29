@@ -1,5 +1,6 @@
 {
   "name": "balanced",
+  "version": "1.0.0",
   "description": "Mixed pools, moderate entries, reasonable budget",
   "poolFilter": {
     "type": "all",

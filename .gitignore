@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 .agent-config.json
+.custodial-data/
 *.tsbuildinfo
 
 # Claude Code frameworks (exclude all)

@@ -62,21 +62,33 @@ function saveAgentConfig(config: AgentConfig): void {
 
 function buildAgentProfile(network: string) {
   const builder = new AgentBuilder();
+  const isMultiUser = process.env.MULTI_USER_ENABLED === 'true';
+
+  const capabilities = [
+    AIAgentCapability.TRANSACTION_ANALYTICS,
+    AIAgentCapability.WORKFLOW_AUTOMATION,
+    AIAgentCapability.MARKET_INTELLIGENCE,
+  ];
+
+  if (isMultiUser) {
+    capabilities.push(AIAgentCapability.MULTI_AGENT_COORDINATION);
+  }
+
+  const bio = isMultiUser
+    ? 'Multi-user custodial agent that plays LazyLotto on Hedera on behalf of multiple users. ' +
+      'Accepts deposits via memo-tagged transfers, plays with configurable strategies, ' +
+      'routes prizes to user EOAs, and provides full on-chain HCS-20 accounting. ' +
+      'Negotiable rake fee. Shared NFT boost benefits all users.'
+    : 'Autonomous agent that plays LazyLotto on Hedera. Evaluates pools by expected value, ' +
+      'buys entries, rolls for prizes, and transfers winnings to the owner wallet. ' +
+      'Configurable strategy with budget controls and win rate boost via NFT delegation.';
 
   builder
     .setName('LazyLotto Player Agent')
     .setAlias('lazylotto-player')
-    .setBio(
-      'Autonomous agent that plays LazyLotto on Hedera. Evaluates pools by expected value, ' +
-        'buys entries, rolls for prizes, and transfers winnings to the owner wallet. ' +
-        'Configurable strategy with budget controls and win rate boost via NFT delegation.'
-    )
+    .setBio(bio)
     .setType('autonomous')
-    .setCapabilities([
-      AIAgentCapability.TRANSACTION_ANALYTICS,
-      AIAgentCapability.WORKFLOW_AUTOMATION,
-      AIAgentCapability.MARKET_INTELLIGENCE,
-    ])
+    .setCapabilities(capabilities)
     .setModel('claude-opus-4')
     .setCreator('Lazy Superheroes')
     .addSocial('website', 'https://lazylotto.app')
@@ -84,8 +96,15 @@ function buildAgentProfile(network: string) {
     .addProperty('game', 'LazyLotto')
     .addProperty('chain', 'hedera')
     .addProperty('protocol', 'HCS-10')
-    .setNetwork(network)
-    .setInboundTopicType(InboundTopicType.PUBLIC);
+    .setNetwork(network);
+
+  if (isMultiUser) {
+    builder.setInboundTopicType(InboundTopicType.FEE_BASED);
+    builder.addProperty('multiUser', true);
+    builder.addProperty('rakePercent', Number(process.env.RAKE_DEFAULT_PERCENT ?? 1));
+  } else {
+    builder.setInboundTopicType(InboundTopicType.PUBLIC);
+  }
 
   // Use existing account (the agent's wallet)
   const accountId = process.env.HEDERA_ACCOUNT_ID;

@@ -7,6 +7,7 @@ import type { PoolSummary, EvCalculation } from '../mcp/client.js';
 function makeStrategy(overrides: Partial<Strategy> = {}): Strategy {
   return {
     name: 'test',
+    version: '1.0.0',
     poolFilter: {
       type: 'all',
       feeToken: 'any',

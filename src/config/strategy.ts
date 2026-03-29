@@ -33,6 +33,7 @@ export const ScheduleSchema = z.object({
 
 export const StrategySchema = z.object({
   name: z.string(),
+  version: z.string().default('1.0.0'),
   description: z.string().optional(),
   poolFilter: PoolFilterSchema,
   budget: BudgetSchema,

@@ -26,6 +26,7 @@ export const WIN_RATE_DIVISOR = 1_000_000;
 
 export const DEFAULT_STRATEGY: Strategy = {
   name: 'balanced',
+  version: '1.0.0',
   description: 'Mixed pools, moderate entries, reasonable budget',
   poolFilter: {
     type: 'all',

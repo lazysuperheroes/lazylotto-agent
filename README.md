@@ -318,6 +318,23 @@ Or if installed locally during development:
 | `agent_stop` | Stop active session, transfer prizes, return summary |
 | `agent_audit` | Full config audit with warnings and recommendations |
 
+**Multi-user tools** (available when running with `--multi-user --mcp-server`):
+
+| Tool | Description |
+|------|-------------|
+| `multi_user_status` | List all users with balances and activity |
+| `multi_user_register` | Register a user, get deposit memo |
+| `multi_user_deposit_info` | Get deposit instructions for existing user |
+| `multi_user_play` | Play for a specific user or all eligible |
+| `multi_user_withdraw` | Process user withdrawal |
+| `multi_user_deregister` | Deactivate user (withdraw-only) |
+| `multi_user_play_history` | View play session results for a user |
+| `operator_balance` | Operator rake collected, gas spent, net profit |
+| `operator_withdraw_fees` | Withdraw operator earnings |
+| `operator_health` | Uptime, watcher status, error count |
+
+See [Multi-User Documentation](docs/MULTI_USER.md) for the full custodial mode guide.
+
 ---
 
 ## CLI Commands
@@ -332,6 +349,9 @@ lazylotto-agent --status         Check wallet balances and state
 lazylotto-agent --audit          Comprehensive configuration audit
 lazylotto-agent --mcp-server     Start MCP server (for Claude Desktop)
 lazylotto-agent --scheduled      Run play sessions on cron schedule
+lazylotto-agent --multi-user     Start multi-user custodial agent
+lazylotto-agent --multi-user --deploy-accounting  Deploy HCS-20 topic
+lazylotto-agent --multi-user --mcp-server         MCP server with multi-user tools
 ```
 
 Development equivalents:
