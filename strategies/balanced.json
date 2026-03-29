@@ -1,0 +1,28 @@
+{
+  "name": "balanced",
+  "description": "Mixed pools, moderate entries, reasonable budget",
+  "poolFilter": {
+    "type": "all",
+    "feeToken": "any",
+    "minPrizeCount": 1
+  },
+  "budget": {
+    "maxSpendPerSession": 50,
+    "maxSpendPerPool": 25,
+    "maxEntriesPerPool": 5,
+    "reserveBalance": 5,
+    "currency": "LAZY"
+  },
+  "playStyle": {
+    "action": "buy_and_roll",
+    "entriesPerBatch": 2,
+    "minExpectedValue": -20,
+    "claimImmediately": true,
+    "transferToOwner": true
+  },
+  "schedule": {
+    "enabled": false,
+    "cron": "0 */6 * * *",
+    "maxSessionsPerDay": 4
+  }
+}

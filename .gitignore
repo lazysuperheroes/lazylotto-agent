@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.agent-config.json
+*.tsbuildinfo
+
+# Claude Code frameworks (exclude all)
+.claude/

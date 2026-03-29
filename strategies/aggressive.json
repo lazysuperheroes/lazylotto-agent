@@ -1,0 +1,28 @@
+{
+  "name": "aggressive",
+  "description": "High-value pools, more entries, bigger budget — maximizes upside",
+  "poolFilter": {
+    "type": "all",
+    "feeToken": "any",
+    "minPrizeCount": 2
+  },
+  "budget": {
+    "maxSpendPerSession": 200,
+    "maxSpendPerPool": 100,
+    "maxEntriesPerPool": 20,
+    "reserveBalance": 2,
+    "currency": "LAZY"
+  },
+  "playStyle": {
+    "action": "buy_and_roll",
+    "entriesPerBatch": 5,
+    "minExpectedValue": -100,
+    "claimImmediately": true,
+    "transferToOwner": true
+  },
+  "schedule": {
+    "enabled": false,
+    "cron": "0 */4 * * *",
+    "maxSessionsPerDay": 6
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "name": "@lazysuperheroes/lazylotto-agent",
+  "version": "0.1.0",
+  "description": "Autonomous AI agent that plays the LazyLotto lottery on Hedera",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "lazylotto-agent": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "strategies",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc && node -e \"const fs=require('fs'),f='dist/index.js',c=fs.readFileSync(f,'utf8');if(!c.startsWith('#!'))fs.writeFileSync(f,'#!/usr/bin/env node\\n'+c)\"",
+    "dev": "node --import tsx src/index.ts",
+    "dev:scheduled": "node --import tsx src/index.ts --scheduled",
+    "dev:mcp": "node --import tsx src/index.ts --mcp-server",
+    "dev:audit": "node --import tsx src/index.ts --audit",
+    "start": "node dist/index.js",
+    "start:scheduled": "node dist/index.js --scheduled",
+    "setup": "node --import tsx src/index.ts --setup",
+    "status": "node --import tsx src/index.ts --status",
+    "audit": "node --import tsx src/index.ts --audit",
+    "wizard": "node --import tsx src/index.ts --wizard",
+    "test": "node --test --import tsx src/**/*.test.ts src/__tests__/*.test.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "hedera",
+    "lottery",
+    "agent",
+    "mcp",
+    "lazylotto"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@hashgraph/sdk": "^2.81.0",
+    "@hashgraphonline/standards-sdk": "^0.1.171",
+    "@lazysuperheroes/lazy-lotto": "^1.4.0",
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "dotenv": "^17.3.1",
+    "node-cron": "^4.2.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@types/node-cron": "^3.0.11",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
