@@ -213,12 +213,12 @@ export class MultiUserAgent {
       throw new UserInactiveError(userId);
     }
 
-    // Determine how much to reserve: the lesser of the user's
-    // configured session budget and their available balance
-    const sessionBudget = Math.min(
-      user.strategySnapshot.budget.maxSpendPerSession,
-      user.balances.available,
-    );
+    // Determine how much to reserve from user's available balance.
+    // Use the first token budget's maxPerSession as a cap.
+    // TODO: Phase 4 will replace this with per-token reserve logic.
+    const firstTokenBudget = Object.values(user.strategySnapshot.budget.tokenBudgets)[0];
+    const maxSession = firstTokenBudget?.maxPerSession ?? user.balances.available;
+    const sessionBudget = Math.min(maxSession, user.balances.available);
 
     if (sessionBudget < this.config.minDepositAmount) {
       this.releaseLock(userId);
@@ -382,14 +382,15 @@ export class MultiUserAgent {
       // Reserve funds first — safe to release if transfer fails
       this.ledger.reserve(userId, amount);
 
+      // Determine currency for this withdrawal
+      const firstKey = Object.keys(user.strategySnapshot.budget.tokenBudgets)[0] ?? 'hbar';
+      const withdrawCurrency = firstKey === 'hbar' ? 'HBAR' : 'LAZY';
       let transactionId: string;
       try {
         // Execute TransferTransaction to user
         const recipientId = AccountId.fromString(user.hederaAccountId);
         const senderId = AccountId.fromString(getOperatorAccountId(this.client));
-        const currency = user.strategySnapshot.budget.currency;
-
-        if (currency === 'HBAR') {
+        if (withdrawCurrency === 'HBAR') {
           const tx = new TransferTransaction()
             .addHbarTransfer(senderId, new Hbar(-amount))
             .addHbarTransfer(recipientId, new Hbar(amount));
@@ -427,11 +428,10 @@ export class MultiUserAgent {
         /* accounting failure is not blocking */
       }
 
-      const currency = user.strategySnapshot.budget.currency;
       const record: WithdrawalRecord = {
         userId,
         amount,
-        tokenId: currency === 'HBAR' ? null : process.env.LAZY_TOKEN_ID ?? null,
+        tokenId: withdrawCurrency === 'HBAR' ? null : process.env.LAZY_TOKEN_ID ?? null,
         recipientAccountId: user.hederaAccountId,
         transactionId,
         timestamp: new Date().toISOString(),

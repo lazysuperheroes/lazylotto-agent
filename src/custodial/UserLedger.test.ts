@@ -12,7 +12,7 @@ import {
   UserNotFoundError,
 } from './types.js';
 
-// ── Mock helpers ───────────────────────────────────────────────
+// -- Mock helpers -----------------------------------------------------------
 
 function makeUser(overrides: Partial<UserAccount> = {}): UserAccount {
   return {
@@ -27,17 +27,16 @@ function makeUser(overrides: Partial<UserAccount> = {}): UserAccount {
       version: '1.0.0',
       poolFilter: { type: 'all', feeToken: 'any', minPrizeCount: 1 },
       budget: {
-        maxSpendPerSession: 50,
-        maxSpendPerPool: 10,
+        tokenBudgets: {
+          hbar: { maxPerSession: 50, maxPerPool: 10, reserve: 5 },
+        },
         maxEntriesPerPool: 10,
-        reserveBalance: 5,
-        currency: 'LAZY',
       },
       playStyle: {
         action: 'buy_and_roll',
         entriesPerBatch: 1,
         minExpectedValue: -Infinity,
-        claimImmediately: true,
+        preferNftPrizes: false,
         transferToOwner: true,
       },
       schedule: { enabled: false, cron: '0 */6 * * *', maxSessionsPerDay: 4 },
@@ -116,7 +115,7 @@ function createMockAccounting(): AccountingService & { calls: AccountingCall[] }
   } as unknown as AccountingService & { calls: AccountingCall[] };
 }
 
-// ── Tests ──────────────────────────────────────────────────────
+// -- Tests ------------------------------------------------------------------
 
 describe('UserLedger', () => {
   const AGENT_ACCOUNT = '0.0.9999';
@@ -136,7 +135,7 @@ describe('UserLedger', () => {
     ledger = new UserLedger(store, accounting, AGENT_ACCOUNT);
   });
 
-  // ── creditDeposit ──────────────────────────────────────────
+  // -- creditDeposit ----------------------------------------------------------
 
   it('creditDeposit deducts rake and credits net amount', async () => {
     const balances = await ledger.creditDeposit('user-1', 100, 'tx-001', 1);
@@ -163,7 +162,7 @@ describe('UserLedger', () => {
     assert.equal(first.available, 100 + 99);
   });
 
-  // ── reserve ────────────────────────────────────────────────
+  // -- reserve ----------------------------------------------------------------
 
   it('reserve moves available to reserved', () => {
     const balances = ledger.reserve('user-1', 30);
@@ -188,7 +187,7 @@ describe('UserLedger', () => {
     );
   });
 
-  // ── settleSpend ────────────────────────────────────────────
+  // -- settleSpend ------------------------------------------------------------
 
   it('settleSpend deducts from reserved', () => {
     ledger.reserve('user-1', 50);
@@ -197,7 +196,7 @@ describe('UserLedger', () => {
     assert.equal(balances.available, 50); // unchanged from after reserve
   });
 
-  // ── releaseReserve ─────────────────────────────────────────
+  // -- releaseReserve ---------------------------------------------------------
 
   it('releaseReserve moves reserved back to available', () => {
     ledger.reserve('user-1', 40);
@@ -206,7 +205,7 @@ describe('UserLedger', () => {
     assert.equal(balances.reserved, 0);
   });
 
-  // ── Full cycle ─────────────────────────────────────────────
+  // -- Full cycle -------------------------------------------------------------
 
   it('full cycle: deposit -> reserve -> settle -> release unused', async () => {
     // Deposit 100 LAZY at 1% rake => net 99
@@ -231,7 +230,7 @@ describe('UserLedger', () => {
     assert.equal(bal.reserved, 0);
   });
 
-  // ── processWithdrawal ──────────────────────────────────────
+  // -- processWithdrawal ------------------------------------------------------
 
   it('processWithdrawal deducts from available', async () => {
     const balances = await ledger.processWithdrawal('user-1', 60);
@@ -246,7 +245,7 @@ describe('UserLedger', () => {
     );
   });
 
-  // ── canAfford ──────────────────────────────────────────────
+  // -- canAfford --------------------------------------------------------------
 
   it('canAfford returns correct boolean', () => {
     assert.equal(ledger.canAfford('user-1', 100), true);

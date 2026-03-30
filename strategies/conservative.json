@@ -1,6 +1,6 @@
 {
   "name": "conservative",
-  "version": "1.0.0",
+  "version": "0.2",
   "description": "Low risk. Targets high win rate pools only (10%+). Small batches, tight budget, generous reserve. Suitable for cautious users or smaller balances.",
   "poolFilter": {
     "type": "all",
@@ -9,18 +9,18 @@
     "minPrizeCount": 1
   },
   "budget": {
-    "maxSpendPerSession": 50,
-    "maxSpendPerPool": 20,
-    "maxEntriesPerPool": 3,
-    "reserveBalance": 20,
-    "currency": "HBAR"
+    "tokenBudgets": {
+      "hbar": { "maxPerSession": 25, "maxPerPool": 10, "reserve": 20 },
+      "0.0.8011209": { "maxPerSession": 100, "maxPerPool": 40, "reserve": 30 }
+    },
+    "maxEntriesPerPool": 3
   },
   "playStyle": {
     "action": "buy_and_roll",
     "entriesPerBatch": 1,
     "minExpectedValue": -5,
-    "claimImmediately": true,
-    "transferToOwner": true
+    "transferToOwner": true,
+    "preferNftPrizes": false
   },
   "schedule": {
     "enabled": false,

@@ -24,9 +24,12 @@ export const GAS_ESTIMATES = {
 /** Win rates are stored as thousandths of basis points. Divide by 1_000_000 to get percentage. */
 export const WIN_RATE_DIVISOR = 1_000_000;
 
+/** LAZY token ID on testnet. Override via LAZY_TOKEN_ID env var. */
+export const LAZY_TOKEN_ID_TESTNET = '0.0.8011209';
+
 export const DEFAULT_STRATEGY: Strategy = {
   name: 'balanced',
-  version: '1.0.0',
+  version: '0.2',
   description: 'Mixed pools, moderate entries, reasonable budget',
   poolFilter: {
     type: 'all',
@@ -34,18 +37,17 @@ export const DEFAULT_STRATEGY: Strategy = {
     minPrizeCount: 1,
   },
   budget: {
-    maxSpendPerSession: 50,
-    maxSpendPerPool: 25,
+    tokenBudgets: {
+      hbar: { maxPerSession: 100, maxPerPool: 40, reserve: 10 },
+    },
     maxEntriesPerPool: 5,
-    reserveBalance: 5,
-    currency: 'LAZY',
   },
   playStyle: {
     action: 'buy_and_roll',
     entriesPerBatch: 1,
     minExpectedValue: -Infinity,
-    claimImmediately: true,
     transferToOwner: true,
+    preferNftPrizes: false,
   },
   schedule: {
     enabled: false,

@@ -115,29 +115,14 @@ export async function startMcpServer(
   server.tool(
     'agent_play',
     'Run a lottery play session. Returns pools played, results, and net P&L.',
-    {
-      budget: z
-        .number()
-        .positive()
-        .optional()
-        .describe('Override maxSpendPerSession for this run'),
-    },
-    async ({ budget }) => {
+    {},
+    async () => {
       if (activeSession) {
         return errorResult('A session is already running. Use agent_stop to cancel it.');
       }
 
-      const originalStrategy = agent.getStrategy();
       try {
         activeSession = new AbortController();
-
-        // Apply budget override (temporary — restored in finally)
-        if (budget !== undefined) {
-          agent.setStrategy({
-            ...originalStrategy,
-            budget: { ...originalStrategy.budget, maxSpendPerSession: budget },
-          });
-        }
 
         const report = await agent.play();
 
@@ -171,7 +156,6 @@ export async function startMcpServer(
       } catch (e) {
         return errorResult(`Play session failed: ${errorMsg(e)}`);
       } finally {
-        agent.setStrategy(originalStrategy);
         activeSession = null;
       }
     }

@@ -6,13 +6,13 @@
  *  - MCP client (pool queries, EV, prerequisites, buy intents)
  *  - Mirror node (balances)
  *
- * Tests the full 6-phase orchestration: preflight → discover → evaluate → play → transfer → report
+ * Tests the full 6-phase orchestration: preflight -> discover -> evaluate -> play -> transfer -> report
  */
 
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 
-// ── Mock MCP client ───────────────────────────────────────────
+// -- Mock MCP client -----------------------------------------------------------
 
 const mockPools = [
   {
@@ -113,17 +113,14 @@ const testStrategy: Strategy = {
   version: '1.0.0',
   poolFilter: { type: 'all', feeToken: 'any', minPrizeCount: 1 },
   budget: {
-    maxSpendPerSession: 50,
-    maxSpendPerPool: 25,
+    tokenBudgets: { hbar: { maxPerSession: 50, maxPerPool: 25, reserve: 5 } },
     maxEntriesPerPool: 5,
-    reserveBalance: 5,
-    currency: 'LAZY',
   },
   playStyle: {
     action: 'buy_and_roll',
     entriesPerBatch: 2,
     minExpectedValue: -10,
-    claimImmediately: true,
+    preferNftPrizes: false,
     transferToOwner: true,
     ownerAddress: '0.0.99999',
   },
@@ -141,7 +138,7 @@ describe('Agent Play Loop (integration)', () => {
     reportGenerator = new ReportGenerator();
   });
 
-  describe('Phase 2: Discover → Phase 3: Evaluate', () => {
+  describe('Phase 2: Discover -> Phase 3: Evaluate', () => {
     it('filters paused pools and scores remaining by EV', () => {
       const filtered = strategyEngine.filterPools(mockPools as PoolSummary[]);
       assert.equal(filtered.length, 1); // pool 2 is paused
@@ -174,15 +171,15 @@ describe('Agent Play Loop (integration)', () => {
       // Simulate playing until budget runs out
       let poolsPlayed = 0;
       for (const sp of scored) {
-        if (budgetManager.isExhausted()) break;
+        if (budgetManager.isExhaustedFor('hbar')) break;
 
-        const entries = budgetManager.maxEntriesForPool(sp.pool.poolId, sp.pool.entryFee);
+        const entries = budgetManager.maxEntriesForPool('hbar', sp.pool.poolId, sp.pool.entryFee);
         const batch = Math.min(entries, strategyEngine.getEntriesPerBatch());
 
         if (batch <= 0) break;
 
         // Simulate buying entries
-        budgetManager.recordSpend(sp.pool.poolId, sp.pool.entryFee * batch);
+        budgetManager.recordSpend(sp.pool.poolId, sp.pool.entryFee * batch, 'hbar', batch);
         poolsPlayed++;
 
         const result: PoolResult = {
@@ -199,19 +196,19 @@ describe('Agent Play Loop (integration)', () => {
       }
 
       assert.equal(poolsPlayed, 1);
-      assert.equal(budgetManager.totalSpent, 10); // 2 entries x 5 LAZY
-      assert.equal(budgetManager.remaining, 40);
+      assert.equal(budgetManager.totalSpentFor('hbar'), 10); // 2 entries x 5
+      assert.equal(budgetManager.remainingFor('hbar'), 40);
     });
 
     it('respects reserve balance', () => {
       // Balance = 15, reserve = 5, so can spend 10 max
       const currentBalance = 15;
 
-      budgetManager.recordSpend(1, 8);
-      assert.equal(budgetManager.checkReserve(currentBalance), true); // 15-8=7 >= 5
+      budgetManager.recordSpend(1, 8, 'hbar', 1);
+      assert.equal(budgetManager.checkReserve('hbar', currentBalance), true); // 15-8=7 >= 5
 
-      budgetManager.recordSpend(1, 3);
-      assert.equal(budgetManager.checkReserve(currentBalance), false); // 15-11=4 < 5
+      budgetManager.recordSpend(1, 3, 'hbar', 1);
+      assert.equal(budgetManager.checkReserve('hbar', currentBalance), false); // 15-11=4 < 5
     });
   });
 
@@ -322,21 +319,21 @@ describe('Agent Play Loop (integration)', () => {
 
     it('reports partial results when budget is hit mid-session', () => {
       const smallBudget = new BudgetManager({
-        ...testStrategy.budget,
-        maxSpendPerSession: 12,
+        tokenBudgets: { hbar: { maxPerSession: 12, maxPerPool: 25, reserve: 5 } },
+        maxEntriesPerPool: 5,
       });
 
       reportGenerator.begin('test', 'LAZY');
 
       // Pool 1: 2 entries x 5 = 10 spent
-      smallBudget.recordSpend(1, 10);
+      smallBudget.recordSpend(1, 10, 'hbar', 2);
       reportGenerator.addPoolResult({
         poolId: 1, poolName: 'Pool 1', entriesBought: 2,
         amountSpent: 10, rolled: true, wins: 0, prizesClaimed: 0, prizesTransferred: 0,
       });
 
       // Pool 2: budget only has 2 left, can't afford entryFee=5
-      const canAffordPool2 = smallBudget.maxEntriesForPool(2, 5);
+      const canAffordPool2 = smallBudget.maxEntriesForPool('hbar', 2, 5);
       assert.equal(canAffordPool2, 0);
 
       const report = reportGenerator.generate();

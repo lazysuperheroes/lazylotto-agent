@@ -15,18 +15,15 @@ function makeStrategy(overrides: Partial<Strategy> = {}): Strategy {
       ...overrides.poolFilter,
     },
     budget: {
-      maxSpendPerSession: 100,
-      maxSpendPerPool: 50,
+      tokenBudgets: { hbar: { maxPerSession: 100, maxPerPool: 50, reserve: 5 } },
       maxEntriesPerPool: 10,
-      reserveBalance: 5,
-      currency: 'LAZY',
       ...overrides.budget,
     },
     playStyle: {
       action: 'buy_and_roll',
       entriesPerBatch: 2,
       minExpectedValue: -10,
-      claimImmediately: true,
+      preferNftPrizes: false,
       transferToOwner: true,
       ownerAddress: '0.0.99999',
       ...overrides.playStyle,
@@ -150,7 +147,7 @@ describe('StrategyEngine', () => {
 
     it('filters out pools below minExpectedValue', () => {
       const engine = new StrategyEngine(
-        makeStrategy({ playStyle: { action: 'buy_and_roll', entriesPerBatch: 1, minExpectedValue: 0, claimImmediately: true, transferToOwner: true } })
+        makeStrategy({ playStyle: { action: 'buy_and_roll', entriesPerBatch: 1, minExpectedValue: 0, preferNftPrizes: false, transferToOwner: true } })
       );
       const pools = [makePool({ poolId: 1 }), makePool({ poolId: 2 })];
       const evs = [makeEv(1, -5), makeEv(2, 10)];
@@ -179,7 +176,7 @@ describe('StrategyEngine', () => {
             action: 'buy',
             entriesPerBatch: 3,
             minExpectedValue: 0,
-            claimImmediately: false,
+            preferNftPrizes: true,
             transferToOwner: true,
             ownerAddress: '0.0.12345',
           },
@@ -187,9 +184,14 @@ describe('StrategyEngine', () => {
       );
       assert.equal(engine.getAction(), 'buy');
       assert.equal(engine.getEntriesPerBatch(), 3);
-      assert.equal(engine.shouldClaimImmediately(), false);
+      assert.equal(engine.shouldPreferNftPrizes(), true);
       assert.equal(engine.shouldTransferToOwner(), true);
       assert.equal(engine.getOwnerAddress(), '0.0.12345');
+    });
+
+    it('preferNftPrizes defaults to false', () => {
+      const engine = new StrategyEngine(makeStrategy());
+      assert.equal(engine.shouldPreferNftPrizes(), false);
     });
   });
 });

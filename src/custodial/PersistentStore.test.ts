@@ -7,7 +7,7 @@ import { PersistentStore } from './PersistentStore.js';
 import type { UserAccount } from './types.js';
 import { emptyBalances, emptyOperatorState } from './types.js';
 
-// ── Helpers ────────────────────────────────────────────────────
+// -- Helpers ----------------------------------------------------------------
 
 function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), 'ps-test-'));
@@ -26,17 +26,16 @@ function makeUser(overrides: Partial<UserAccount> = {}): UserAccount {
       version: '1.0.0',
       poolFilter: { type: 'all', feeToken: 'any', minPrizeCount: 1 },
       budget: {
-        maxSpendPerSession: 50,
-        maxSpendPerPool: 10,
+        tokenBudgets: {
+          hbar: { maxPerSession: 50, maxPerPool: 10, reserve: 5 },
+        },
         maxEntriesPerPool: 10,
-        reserveBalance: 5,
-        currency: 'LAZY',
       },
       playStyle: {
         action: 'buy_and_roll',
         entriesPerBatch: 1,
         minExpectedValue: -Infinity,
-        claimImmediately: true,
+        preferNftPrizes: false,
         transferToOwner: true,
       },
       schedule: { enabled: false, cron: '0 */6 * * *', maxSessionsPerDay: 4 },
@@ -51,7 +50,7 @@ function makeUser(overrides: Partial<UserAccount> = {}): UserAccount {
   };
 }
 
-// ── Tests ──────────────────────────────────────────────────────
+// -- Tests ------------------------------------------------------------------
 
 describe('PersistentStore', () => {
   let dir: string;

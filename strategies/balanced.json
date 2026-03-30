@@ -1,6 +1,6 @@
 {
   "name": "balanced",
-  "version": "1.0.0",
+  "version": "0.2",
   "description": "Moderate risk. Plays all pool types with a reasonable EV threshold. Good default for most users and deposit sizes.",
   "poolFilter": {
     "type": "all",
@@ -8,18 +8,18 @@
     "minPrizeCount": 1
   },
   "budget": {
-    "maxSpendPerSession": 100,
-    "maxSpendPerPool": 40,
-    "maxEntriesPerPool": 5,
-    "reserveBalance": 10,
-    "currency": "HBAR"
+    "tokenBudgets": {
+      "hbar": { "maxPerSession": 100, "maxPerPool": 40, "reserve": 10 },
+      "0.0.8011209": { "maxPerSession": 500, "maxPerPool": 200, "reserve": 50 }
+    },
+    "maxEntriesPerPool": 5
   },
   "playStyle": {
     "action": "buy_and_roll",
     "entriesPerBatch": 2,
     "minExpectedValue": -20,
-    "claimImmediately": true,
-    "transferToOwner": true
+    "transferToOwner": true,
+    "preferNftPrizes": false
   },
   "schedule": {
     "enabled": false,

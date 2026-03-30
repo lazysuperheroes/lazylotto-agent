@@ -11,16 +11,12 @@ describe('StrategySchema', () => {
       minPrizeCount: 1,
     },
     budget: {
-      maxSpendPerSession: 50,
-      maxSpendPerPool: 25,
+      tokenBudgets: { hbar: { maxPerSession: 50, maxPerPool: 25 } },
       maxEntriesPerPool: 5,
-      reserveBalance: 5,
-      currency: 'LAZY',
     },
     playStyle: {
       action: 'buy_and_roll',
       entriesPerBatch: 2,
-      claimImmediately: true,
       transferToOwner: true,
     },
   };
@@ -28,7 +24,7 @@ describe('StrategySchema', () => {
   it('parses a valid strategy', () => {
     const result = StrategySchema.parse(validStrategy);
     assert.equal(result.name, 'test');
-    assert.equal(result.budget.maxSpendPerSession, 50);
+    assert.equal(result.budget.tokenBudgets.hbar.maxPerSession, 50);
     assert.equal(result.playStyle.action, 'buy_and_roll');
   });
 
@@ -39,11 +35,26 @@ describe('StrategySchema', () => {
     assert.equal(result.schedule.maxSessionsPerDay, 4);
     assert.equal(result.playStyle.minExpectedValue, -Infinity);
     assert.equal(result.playStyle.ownerAddress, undefined);
+    assert.equal(result.budget.tokenBudgets.hbar.reserve, 0);
+  });
+
+  it('preferNftPrizes defaults to false', () => {
+    const result = StrategySchema.parse(validStrategy);
+    assert.equal(result.playStyle.preferNftPrizes, false);
   });
 
   it('rejects missing required fields', () => {
     assert.throws(() => {
       StrategySchema.parse({ name: 'bad' });
+    });
+  });
+
+  it('rejects budget without tokenBudgets (refine check)', () => {
+    assert.throws(() => {
+      StrategySchema.parse({
+        ...validStrategy,
+        budget: { tokenBudgets: {}, maxEntriesPerPool: 5 },
+      });
     });
   });
 
@@ -60,7 +71,10 @@ describe('StrategySchema', () => {
     assert.throws(() => {
       StrategySchema.parse({
         ...validStrategy,
-        budget: { ...validStrategy.budget, maxSpendPerSession: -10 },
+        budget: {
+          tokenBudgets: { hbar: { maxPerSession: -10, maxPerPool: 25 } },
+          maxEntriesPerPool: 5,
+        },
       });
     });
   });
@@ -75,14 +89,19 @@ describe('StrategySchema', () => {
     }
   });
 
-  it('accepts both currency options', () => {
-    for (const currency of ['HBAR', 'LAZY']) {
-      const result = StrategySchema.parse({
-        ...validStrategy,
-        budget: { ...validStrategy.budget, currency },
-      });
-      assert.equal(result.budget.currency, currency);
-    }
+  it('accepts multi-token budgets', () => {
+    const result = StrategySchema.parse({
+      ...validStrategy,
+      budget: {
+        tokenBudgets: {
+          hbar: { maxPerSession: 100, maxPerPool: 50, reserve: 10 },
+          '0.0.8011209': { maxPerSession: 500, maxPerPool: 200, reserve: 50 },
+        },
+        maxEntriesPerPool: 10,
+      },
+    });
+    assert.equal(result.budget.tokenBudgets.hbar.maxPerSession, 100);
+    assert.equal(result.budget.tokenBudgets['0.0.8011209'].maxPerSession, 500);
   });
 
   it('parses strategy files from disk', async () => {

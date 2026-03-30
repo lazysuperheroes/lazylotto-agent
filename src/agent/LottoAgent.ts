@@ -2,6 +2,7 @@ import { Client, AccountId } from '@hashgraph/sdk';
 import { Interface, MaxUint256 } from 'ethers';
 import { createRequire } from 'node:module';
 import type { Strategy } from '../config/strategy.js';
+import { resolveBudgetKey, HBAR_TOKEN_KEY } from '../config/strategy.js';
 import { GAS_ESTIMATES } from '../config/defaults.js';
 import {
   createClient,
@@ -25,6 +26,7 @@ import {
 } from '../hedera/mirror.js';
 import {
   listPools,
+  getPool,
   calculateEv,
   getUserState,
   getSystemInfo,
@@ -33,6 +35,7 @@ import {
   roll as mcpRoll,
   closeMcpClient,
   type PoolSummary,
+  type PoolDetail,
   type EvCalculation,
   type SystemInfo,
 } from '../mcp/client.js';
@@ -152,17 +155,17 @@ export class LottoAgent {
     this.budgetManager = new BudgetManager(this.strategy.budget);
     this.reportGenerator.begin(
       this.strategy.name,
-      this.strategy.budget.currency
+      'multi' // multi-currency; per-token details in budget summary
     );
     let accountId = '';
-    let balance = 0;
+    let balances = new Map<string, number>();
 
     try {
       // ── Phase 1: Preflight ────────────────────────────────────
       console.log('\n[1/6] Preflight');
       const preflight = await this.preflight();
       accountId = preflight.accountId;
-      balance = preflight.balance;
+      balances = preflight.balances;
 
       // ── Phase 2: Discover ─────────────────────────────────────
       console.log('\n[2/6] Discovering pools');
@@ -185,21 +188,44 @@ export class LottoAgent {
 
       // ── Phase 4: Play ─────────────────────────────────────────
       console.log('\n[4/6] Playing');
+      let sessionWins = 0;
       for (const sp of scored) {
-        if (this.budgetManager.isExhausted()) {
-          console.log('  Session budget exhausted.');
+        if (!this.budgetManager.hasAnyBudgetRemaining()) {
+          console.log('  All token budgets exhausted.');
           break;
         }
-        if (!this.budgetManager.checkReserve(balance)) {
-          console.log(
-            `  Reserve (${this.strategy.budget.reserveBalance} ` +
-              `${this.strategy.budget.currency}) reached. Stopping.`
-          );
+        if (this.budgetManager.usdCapExceeded()) {
+          console.log('  USD session cap reached. Stopping.');
           break;
         }
 
-        const result = await this.safePlayPool(sp, accountId);
+        // Resolve the budget key for this pool's fee token
+        const poolDetail = sp.pool as PoolDetail;
+        const budgetKey = resolveBudgetKey(poolDetail.feeTokenId);
+
+        if (this.budgetManager.isExhaustedFor(budgetKey)) {
+          console.log(
+            `  Budget for ${budgetKey} exhausted. Skipping pool #${sp.pool.poolId}.`
+          );
+          continue;
+        }
+        if (!this.budgetManager.checkReserve(budgetKey, balances.get(budgetKey) ?? 0)) {
+          console.log(
+            `  Reserve for ${budgetKey} reached. Skipping pool #${sp.pool.poolId}.`
+          );
+          continue;
+        }
+
+        const result = await this.safePlayPool(sp, accountId, budgetKey);
         this.reportGenerator.addPoolResult(result);
+
+        // Track wins for stopOnWins
+        sessionWins += result.wins;
+        const stopOnWins = this.strategy.playStyle.stopOnWins;
+        if (stopOnWins && sessionWins >= stopOnWins) {
+          console.log(`  Won ${sessionWins} prize(s) — stopOnWins threshold reached.`);
+          break;
+        }
       }
     } catch (e) {
       console.error('\nSession error:', errorMsg(e));
@@ -257,7 +283,7 @@ export class LottoAgent {
 
   private async preflight(): Promise<{
     accountId: string;
-    balance: number;
+    balances: Map<string, number>;
   }> {
     const info = await getWalletInfo(this.client);
     const accountId = info.accountId.toString();
@@ -267,40 +293,53 @@ export class LottoAgent {
     console.log(`  Network: ${info.network}`);
     console.log(`  HBAR:    ${hbar.toFixed(4)}`);
 
-    // Resolve balance in budget currency
-    let balance: number;
-    if (this.strategy.budget.currency === 'HBAR') {
-      balance = hbar;
-    } else {
-      const lazyTokenId =
-        process.env.LAZY_TOKEN_ID ?? (await this.loadSystemInfo()).lazyToken;
-      const tokens = await getTokenBalances(accountId);
-      balance = this.tokenBalance(tokens, lazyTokenId);
-      console.log(`  LAZY:    ${balance}`);
+    // Fetch all token balances from mirror node
+    const tokenBalances = await getTokenBalances(accountId);
+
+    // Build balance map for all budgeted tokens
+    const balances = new Map<string, number>();
+    const budgetedTokens = this.budgetManager.budgetedTokens;
+
+    for (const tokenKey of budgetedTokens) {
+      if (tokenKey === HBAR_TOKEN_KEY) {
+        balances.set(HBAR_TOKEN_KEY, hbar);
+      } else {
+        balances.set(tokenKey, this.tokenBalance(tokenBalances, tokenKey));
+      }
     }
 
-    // Check reserve
-    if (balance < this.strategy.budget.reserveBalance) {
+    // Log each budgeted token's balance and budget
+    let allBelowReserve = true;
+    for (const tokenKey of budgetedTokens) {
+      const bal = balances.get(tokenKey) ?? 0;
+      const tb = this.strategy.budget.tokenBudgets[tokenKey];
+      console.log(
+        `  ${tokenKey}: balance=${bal}, ` +
+          `budget=${tb.maxPerSession} per session, ` +
+          `reserve=${tb.reserve}`
+      );
+
+      if (!this.budgetManager.checkReserve(tokenKey, bal)) {
+        console.warn(`  WARNING: ${tokenKey} balance is below reserve (${tb.reserve})`);
+      } else {
+        allBelowReserve = false;
+      }
+    }
+
+    if (allBelowReserve) {
       throw new Error(
-        `Balance ${balance} ${this.strategy.budget.currency} is below ` +
-          `reserve ${this.strategy.budget.reserveBalance}. Aborting.`
+        'All budgeted tokens are below their reserve thresholds. Aborting.'
       );
     }
 
-    console.log(
-      `  Budget:  ${this.strategy.budget.maxSpendPerSession} ` +
-        `${this.strategy.budget.currency} ` +
-        `(reserve: ${this.strategy.budget.reserveBalance})`
-    );
-
-    return { accountId, balance };
+    return { accountId, balances };
   }
 
   // ══════════════════════════════════════════════════════════════
   //  Phase 2 — Discover
   // ══════════════════════════════════════════════════════════════
 
-  private async discover(): Promise<PoolSummary[]> {
+  private async discover(): Promise<PoolDetail[]> {
     const all: PoolSummary[] = [];
     let offset = 0;
     const pageSize = 50;
@@ -322,7 +361,21 @@ export class LottoAgent {
     console.log(
       `  ${all.length} total pools -> ${filtered.length} match strategy filters`
     );
-    return filtered;
+
+    // Fetch full details for each candidate (needed for feeTokenId)
+    const details: PoolDetail[] = [];
+    for (const pool of filtered) {
+      try {
+        const detail = await getPool(pool.poolId);
+        details.push(detail);
+      } catch (e) {
+        console.warn(
+          `  Pool #${pool.poolId}: failed to fetch details (${errorMsg(e)}), skipping`
+        );
+      }
+    }
+
+    return details;
   }
 
   // ══════════════════════════════════════════════════════════════
@@ -330,7 +383,7 @@ export class LottoAgent {
   // ══════════════════════════════════════════════════════════════
 
   private async evaluate(
-    pools: PoolSummary[],
+    pools: PoolDetail[],
     accountId: string
   ): Promise<ScoredPool[]> {
     const evResults: EvCalculation[] = [];
@@ -363,7 +416,8 @@ export class LottoAgent {
 
   private async safePlayPool(
     sp: ScoredPool,
-    accountId: string
+    accountId: string,
+    budgetKey: string
   ): Promise<PoolResult> {
     const empty: PoolResult = {
       poolId: sp.pool.poolId,
@@ -377,7 +431,7 @@ export class LottoAgent {
     };
 
     try {
-      return await this.playPool(sp.pool, sp.ev, accountId);
+      return await this.playPool(sp.pool, sp.ev, accountId, budgetKey);
     } catch (e) {
       console.error(`  Pool #${sp.pool.poolId} failed: ${errorMsg(e)}`);
       return empty;
@@ -387,7 +441,8 @@ export class LottoAgent {
   private async playPool(
     pool: PoolSummary,
     ev: EvCalculation,
-    accountId: string
+    accountId: string,
+    budgetKey: string
   ): Promise<PoolResult> {
     const result: PoolResult = {
       poolId: pool.poolId,
@@ -402,6 +457,7 @@ export class LottoAgent {
 
     // Calculate how many entries we can buy
     const maxEntries = this.budgetManager.maxEntriesForPool(
+      budgetKey,
       pool.poolId,
       pool.entryFee
     );
@@ -462,7 +518,7 @@ export class LottoAgent {
 
     result.entriesBought = batchSize;
     result.amountSpent = pool.entryFee * batchSize;
-    this.budgetManager.recordSpend(pool.poolId, result.amountSpent, batchSize);
+    this.budgetManager.recordSpend(pool.poolId, result.amountSpent, budgetKey, batchSize);
 
     // buy_and_roll and buy_and_redeem include the roll in the same tx
     if (action === 'buy_and_roll' || action === 'buy_and_redeem') {

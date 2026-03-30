@@ -154,10 +154,14 @@ export class AuditReport {
     if (hbar < 5) {
       warnings.push(`Low HBAR balance (${hbar.toFixed(2)}). Agent may fail on gas fees.`);
     }
-    if (lazy !== null && lazy < this.strategy.budget.reserveBalance) {
-      warnings.push(
-        `LAZY balance (${lazy}) is below strategy reserve (${this.strategy.budget.reserveBalance}).`
-      );
+    // Check reserves for each budgeted token
+    for (const [tokenKey, tb] of Object.entries(this.strategy.budget.tokenBudgets)) {
+      if (tokenKey === 'hbar' && hbar < tb.reserve) {
+        warnings.push(`HBAR balance (${hbar.toFixed(2)}) is below reserve (${tb.reserve}).`);
+      }
+      if (lazy !== null && tokenKey === env('LAZY_TOKEN_ID') && lazy < tb.reserve) {
+        warnings.push(`LAZY balance (${lazy}) is below reserve (${tb.reserve}).`);
+      }
     }
     if (network === 'mainnet') {
       warnings.push('Running on MAINNET. Ensure agent wallet has limited funding.');
@@ -476,8 +480,14 @@ export class AuditReport {
     }
     console.log(`  Action:     ${result.strategy.playStyle.action}`);
     console.log(`  Entries:    ${result.strategy.playStyle.entriesPerBatch} per batch`);
-    console.log(`  Budget:     ${result.strategy.budget.maxSpendPerSession} ${result.strategy.budget.currency}/session`);
-    console.log(`  Reserve:    ${result.strategy.budget.reserveBalance} ${result.strategy.budget.currency}`);
+    console.log('  Budgets:');
+    for (const [token, tb] of Object.entries(result.strategy.budget.tokenBudgets)) {
+      const label = token === 'hbar' ? 'HBAR' : token;
+      console.log(`    ${label}: ${tb.maxPerSession}/session, ${tb.maxPerPool}/pool, reserve ${tb.reserve}`);
+    }
+    if (result.strategy.budget.usd) {
+      console.log(`    USD cap: $${result.strategy.budget.usd.maxPerSession}/session`);
+    }
     console.log(`  Transfer:   ${result.strategy.playStyle.transferToOwner ? 'enabled' : 'disabled'}`);
 
     // Owner

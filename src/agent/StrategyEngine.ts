@@ -59,8 +59,16 @@ export class StrategyEngine {
     return this.strategy.playStyle.action;
   }
 
-  shouldClaimImmediately(): boolean {
-    return this.strategy.playStyle.claimImmediately;
+  shouldPreferNftPrizes(): boolean {
+    return this.strategy.playStyle.preferNftPrizes;
+  }
+
+  getTargetTokenIds(): string[] | undefined {
+    return this.strategy.playStyle.targetTokenIds;
+  }
+
+  getStopOnWins(): number | undefined {
+    return this.strategy.playStyle.stopOnWins;
   }
 
   shouldTransferToOwner(): boolean {

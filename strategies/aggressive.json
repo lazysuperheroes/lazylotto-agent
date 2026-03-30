@@ -1,6 +1,6 @@
 {
   "name": "aggressive",
-  "version": "1.0.0",
+  "version": "0.2",
   "description": "Higher risk. Targets prize-rich pools (2+ prizes), larger batches, looser EV threshold. For users with larger balances chasing big wins.",
   "poolFilter": {
     "type": "all",
@@ -8,18 +8,20 @@
     "minPrizeCount": 2
   },
   "budget": {
-    "maxSpendPerSession": 500,
-    "maxSpendPerPool": 200,
-    "maxEntriesPerPool": 20,
-    "reserveBalance": 5,
-    "currency": "HBAR"
+    "tokenBudgets": {
+      "hbar": { "maxPerSession": 500, "maxPerPool": 200, "reserve": 5 },
+      "0.0.8011209": { "maxPerSession": 2000, "maxPerPool": 800, "reserve": 25 }
+    },
+    "usd": { "maxPerSession": 100 },
+    "maxEntriesPerPool": 20
   },
   "playStyle": {
     "action": "buy_and_roll",
     "entriesPerBatch": 5,
     "minExpectedValue": -100,
-    "claimImmediately": true,
-    "transferToOwner": true
+    "transferToOwner": true,
+    "preferNftPrizes": false,
+    "stopOnWins": 3
   },
   "schedule": {
     "enabled": false,
