@@ -110,7 +110,7 @@ import type { PoolSummary, EvCalculation } from '../mcp/client.js';
 
 const testStrategy: Strategy = {
   name: 'test',
-  version: '1.0.0',
+  version: '0.2',
   poolFilter: { type: 'all', feeToken: 'any', minPrizeCount: 1 },
   budget: {
     tokenBudgets: { hbar: { maxPerSession: 50, maxPerPool: 25, reserve: 5 } },

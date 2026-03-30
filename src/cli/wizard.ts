@@ -85,7 +85,7 @@ export async function runWizard(): Promise<void> {
   console.log('  Choose testnet for testing or mainnet for real play.');
   console.log('  WARNING: mainnet uses real funds.\n');
 
-  const network = await ask('Network (testnet/mainnet)', {
+  let network = await ask('Network (testnet/mainnet)', {
     default: 'testnet',
     validate: (v) => v === 'testnet' || v === 'mainnet',
   });
@@ -96,7 +96,8 @@ export async function runWizard(): Promise<void> {
     console.log('  with LIMITED funding. Never use your treasury.\n');
     const confirm = await ask('Confirm mainnet? (yes/no)', { default: 'no' });
     if (confirm !== 'yes') {
-      console.log('  Switching to testnet.');
+      network = 'testnet';
+      console.log('  Switched to testnet.');
     }
   }
 
@@ -156,18 +157,23 @@ export async function runWizard(): Promise<void> {
   // ── Step 6: Contract Addresses ──────────────────────────────
 
   console.log('\n--- Step 6: Contract Addresses ---\n');
-  console.log('  These default to testnet addresses. Change for mainnet.\n');
+  const isTestnet = network === 'testnet';
+  if (isTestnet) {
+    console.log('  Defaults are testnet addresses.\n');
+  } else {
+    console.log('  MAINNET: No defaults — you must provide the correct addresses.\n');
+  }
 
   const lazylottoContract = await ask('LazyLotto Contract ID', {
-    default: '0.0.8399255',
+    default: isTestnet ? '0.0.8399255' : undefined,
     validate: isValidAccountId,
   });
   const gasStationId = await ask('GasStation Contract ID', {
-    default: '0.0.8011801',
+    default: isTestnet ? '0.0.8011801' : undefined,
     validate: isValidAccountId,
   });
   const lazyTokenId = await ask('LAZY Token ID', {
-    default: '0.0.8011209',
+    default: isTestnet ? '0.0.8011209' : undefined,
     validate: isValidAccountId,
   });
   const storageId = await ask('Storage Contract ID (optional)', {

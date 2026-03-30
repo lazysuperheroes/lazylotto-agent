@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const AVAILABLE_STRATEGIES = ['conservative', 'balanced', 'aggressive'] as const;
+const MAX_REGISTRATIONS_PER_HOUR = 100;
 
 // ── NegotiationHandler ─────────────────────────────────────────
 
@@ -39,6 +40,20 @@ export class NegotiationHandler {
     private readonly agentAccountId: string,
   ) {}
 
+  private registrationTimestamps: number[] = [];
+
+  private checkRateLimit(): void {
+    const now = Date.now();
+    const oneHourAgo = now - 3600_000;
+    this.registrationTimestamps = this.registrationTimestamps.filter((t) => t > oneHourAgo);
+    if (this.registrationTimestamps.length >= MAX_REGISTRATIONS_PER_HOUR) {
+      throw new Error(
+        `Registration rate limit exceeded (${MAX_REGISTRATIONS_PER_HOUR}/hour). Try again later.`
+      );
+    }
+    this.registrationTimestamps.push(now);
+  }
+
   // ── Registration (MCP / CLI path) ───────────────────────────
 
   /**
@@ -56,6 +71,9 @@ export class NegotiationHandler {
     strategyName: string,
     rakePercent?: number,
   ): Promise<UserAccount> {
+    // 0. Rate limiting
+    this.checkRateLimit();
+
     // 1. Validate EOA format
     if (!this.isValidEoa(eoaAddress)) {
       throw new Error(
@@ -63,13 +81,24 @@ export class NegotiationHandler {
       );
     }
 
-    // 2. Check for existing registration
+    // 2. Verify account exists on Hedera
+    try {
+      const { getTokenBalances } = await import('../hedera/mirror.js');
+      await getTokenBalances(hederaAccountId); // throws on 404
+    } catch {
+      throw new Error(
+        `Hedera account "${hederaAccountId}" not found or not accessible. ` +
+          'Ensure the account exists and is active.',
+      );
+    }
+
+    // 3. Check for existing registration
     const existing = this.store.getUserByAccountId(hederaAccountId);
     if (existing) {
       return existing;
     }
 
-    // 3. Validate and load strategy
+    // 4. Validate and load strategy
     if (!this.isAvailableStrategy(strategyName)) {
       throw new Error(
         `Unknown strategy "${strategyName}". Available: ${AVAILABLE_STRATEGIES.join(', ')}`,
@@ -261,7 +290,11 @@ export class NegotiationHandler {
    * Generate a unique deposit memo in the format "ll-<12 hex chars>".
    */
   generateDepositMemo(): string {
-    return 'll-' + randomBytes(16).toString('hex');
+    let memo: string;
+    do {
+      memo = 'll-' + randomBytes(16).toString('hex');
+    } while (this.store.getUserByMemo(memo));
+    return memo;
   }
 
   // ── Private Helpers ─────────────────────────────────────────

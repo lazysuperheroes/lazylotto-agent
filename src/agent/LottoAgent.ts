@@ -1,13 +1,11 @@
-import { Client, AccountId } from '@hashgraph/sdk';
+import { Client } from '@hashgraph/sdk';
 import { Interface, MaxUint256 } from 'ethers';
-import { createRequire } from 'node:module';
 import type { Strategy } from '../config/strategy.js';
 import { resolveBudgetKey, HBAR_TOKEN_KEY } from '../config/strategy.js';
 import { GAS_ESTIMATES } from '../config/defaults.js';
 import {
   createClient,
   getWalletInfo,
-  getOperatorAccountId,
 } from '../hedera/wallet.js';
 import {
   executeIntent,
@@ -22,7 +20,6 @@ import {
 import {
   getTokenBalances,
   waitForMirrorNode,
-  type TokenBalance,
 } from '../hedera/mirror.js';
 import {
   listPools,
@@ -46,10 +43,8 @@ import {
   type PoolResult,
   type SessionReport,
 } from './ReportGenerator.js';
-
-// CJS interop — @lazysuperheroes/lazy-lotto ships CommonJS
-const esmRequire = createRequire(import.meta.url);
-const { LazyLottoABI } = esmRequire('@lazysuperheroes/lazy-lotto');
+import { errorMsg, hbarToNumber, tokenBalanceToNumber, toEvmAddress } from '../utils/format.js';
+import { LazyLottoABI } from '../utils/abi.js';
 
 // ── Prerequisite shape returned by MCP check_prerequisites ────
 
@@ -70,10 +65,6 @@ interface Prerequisite {
   };
 }
 
-function errorMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
 // ── Agent ─────────────────────────────────────────────────────
 
 export class LottoAgent {
@@ -86,6 +77,13 @@ export class LottoAgent {
 
   constructor(strategy: Strategy) {
     this.client = createClient();
+    // Inject OWNER_EOA from env if strategy doesn't specify an ownerAddress
+    if (!strategy.playStyle.ownerAddress && process.env.OWNER_EOA) {
+      strategy = {
+        ...strategy,
+        playStyle: { ...strategy.playStyle, ownerAddress: process.env.OWNER_EOA },
+      };
+    }
     this.strategy = strategy;
     this.budgetManager = new BudgetManager(strategy.budget);
     this.strategyEngine = new StrategyEngine(strategy);
@@ -287,7 +285,7 @@ export class LottoAgent {
   }> {
     const info = await getWalletInfo(this.client);
     const accountId = info.accountId.toString();
-    const hbar = Number(info.hbarBalance.toTinybars().toString()) / 1e8;
+    const hbar = hbarToNumber(info.hbarBalance);
 
     console.log(`  Wallet:  ${accountId}`);
     console.log(`  Network: ${info.network}`);
@@ -304,7 +302,7 @@ export class LottoAgent {
       if (tokenKey === HBAR_TOKEN_KEY) {
         balances.set(HBAR_TOKEN_KEY, hbar);
       } else {
-        balances.set(tokenKey, this.tokenBalance(tokenBalances, tokenKey));
+        balances.set(tokenKey, tokenBalanceToNumber(tokenBalances, tokenKey));
       }
     }
 
@@ -362,15 +360,18 @@ export class LottoAgent {
       `  ${all.length} total pools -> ${filtered.length} match strategy filters`
     );
 
-    // Fetch full details for each candidate (needed for feeTokenId)
+    // Fetch full details in parallel (needed for feeTokenId)
+    const detailResults = await Promise.allSettled(
+      filtered.map((pool) => getPool(pool.poolId))
+    );
     const details: PoolDetail[] = [];
-    for (const pool of filtered) {
-      try {
-        const detail = await getPool(pool.poolId);
-        details.push(detail);
-      } catch (e) {
+    for (let i = 0; i < detailResults.length; i++) {
+      const result = detailResults[i];
+      if (result.status === 'fulfilled') {
+        details.push(result.value);
+      } else {
         console.warn(
-          `  Pool #${pool.poolId}: failed to fetch details (${errorMsg(e)}), skipping`
+          `  Pool #${filtered[i].poolId}: failed to fetch details, skipping`
         );
       }
     }
@@ -479,12 +480,13 @@ export class LottoAgent {
     );
 
     // ── 4a. Check & auto-fix prerequisites ────────────────────
-    const prereqs = (await checkPrerequisites(
+    const prereqsRaw = await checkPrerequisites(
       accountId,
       pool.poolId,
       action,
       batchSize
-    )) as Prerequisite[];
+    );
+    const prereqs = (Array.isArray(prereqsRaw) ? prereqsRaw : []) as Prerequisite[];
 
     const unsatisfied = prereqs.filter((p) => !p.satisfied);
     if (unsatisfied.length > 0) {
@@ -504,12 +506,16 @@ export class LottoAgent {
     }
 
     // ── 4b. Buy entries via MCP intent → Hedera SDK execution ─
-    const intentResponse = (await buyEntries(
+    const intentRaw = await buyEntries(
       pool.poolId,
       batchSize,
       action,
       accountId
-    )) as IntentResponse;
+    );
+    const intentResponse = intentRaw as IntentResponse;
+    if (!intentResponse?.intent?.contractId || !intentResponse?.encoded) {
+      throw new Error(`Invalid transaction intent from MCP: missing contractId or encoded data`);
+    }
 
     const buyTx = await executeIntent(this.client, intentResponse);
     console.log(
@@ -529,10 +535,8 @@ export class LottoAgent {
     if (action === 'buy') {
       await waitForMirrorNode();
       try {
-        const rollIntent = (await mcpRoll(
-          pool.poolId,
-          accountId
-        )) as IntentResponse;
+        const rollRaw = await mcpRoll(pool.poolId, accountId);
+        const rollIntent = rollRaw as IntentResponse;
         const rollTx = await executeIntent(this.client, rollIntent);
         console.log(`    Rolled: ${rollTx.transactionId} (${rollTx.status})`);
         result.rolled = true;
@@ -635,13 +639,11 @@ export class LottoAgent {
     );
 
     // Convert owner to EVM address for Solidity call
-    const ownerEvmAddress = ownerAddress.startsWith('0x')
-      ? ownerAddress
-      : '0x' + AccountId.fromString(ownerAddress).toSolidityAddress();
+    const ownerEvmAddress = toEvmAddress(ownerAddress);
 
     // Encode transferPendingPrizes(address recipient, uint256 index)
     // with MaxUint256 = type(uint256).max = transfer ALL prizes at once
-    const iface = new Interface(LazyLottoABI as readonly string[]);
+    const iface = new Interface(LazyLottoABI);
     const encoded = iface.encodeFunctionData('transferPendingPrizes', [
       ownerEvmAddress,
       MaxUint256,
@@ -690,9 +692,4 @@ export class LottoAgent {
     return sys.contractAddresses.lazyLotto;
   }
 
-  private tokenBalance(tokens: TokenBalance[], tokenId: string): number {
-    const t = tokens.find((tok) => tok.token_id === tokenId);
-    if (!t) return 0;
-    return t.balance / Math.pow(10, t.decimals);
-  }
 }

@@ -8,7 +8,7 @@ import { emptyOperatorState } from './types.js';
 // ── Mock store ─────────────────────────────────────────────────
 
 function createMockStore(): PersistentStore {
-  let operator: OperatorState = { ...emptyOperatorState(), platformBalance: 100 };
+  let operator: OperatorState = { ...emptyOperatorState(), balances: { hbar: 100 } };
   const gasLog: GasRecord[] = [];
 
   return {
@@ -46,13 +46,13 @@ describe('GasTracker', () => {
     tracker.recordGas('tx-gas-1', 'user-1', 'buyAndRoll', 0.5);
 
     const op = store.getOperator();
-    assert.equal(op.platformBalance, 99.5);  // 100 - 0.5
+    assert.equal(op.balances.hbar, 99.5);  // 100 - 0.5
     assert.equal(op.totalGasSpent, 0.5);
 
     // Record another
     tracker.recordGas('tx-gas-2', 'user-1', 'transferPrizes', 0.3);
     const op2 = store.getOperator();
-    assert.equal(op2.platformBalance, 99.2);  // 99.5 - 0.3
+    assert.equal(op2.balances.hbar, 99.2);  // 99.5 - 0.3
     assert.equal(op2.totalGasSpent, 0.8);     // 0.5 + 0.3
   });
 

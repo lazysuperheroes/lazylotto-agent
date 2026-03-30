@@ -18,7 +18,8 @@ export interface UserAccount {
   active: boolean;
 }
 
-export interface UserBalances {
+/** Per-token balance entry. Each token the user has deposited gets its own entry. */
+export interface TokenBalanceEntry {
   available: number;
   reserved: number;
   totalDeposited: number;
@@ -26,7 +27,16 @@ export interface UserBalances {
   totalRake: number;
 }
 
+/** User balances keyed by token ("hbar" for native, token ID for FTs). */
+export interface UserBalances {
+  tokens: Record<string, TokenBalanceEntry>;
+}
+
 export function emptyBalances(): UserBalances {
+  return { tokens: {} };
+}
+
+export function emptyTokenEntry(): TokenBalanceEntry {
   return {
     available: 0,
     reserved: 0,
@@ -36,21 +46,57 @@ export function emptyBalances(): UserBalances {
   };
 }
 
+/** Get or create a token balance entry for a user. */
+export function getTokenEntry(
+  balances: UserBalances,
+  token: string
+): TokenBalanceEntry {
+  if (!balances.tokens[token]) {
+    balances.tokens[token] = emptyTokenEntry();
+  }
+  return balances.tokens[token];
+}
+
+/** Check if a user has any token with available balance >= threshold. */
+export function hasAvailableToken(
+  balances: UserBalances,
+  minAmount: number
+): boolean {
+  return Object.values(balances.tokens).some(
+    (e) => e.available >= minAmount
+  );
+}
+
+/** Get per-token reserve summary (for display — never sum across currencies). */
+export function reserveSummary(
+  balances: UserBalances
+): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const [token, entry] of Object.entries(balances.tokens)) {
+    if (entry.reserved > 0) result[token] = entry.reserved;
+  }
+  return result;
+}
+
 // ── Operator ──────────────────────────────────────────────────
 
 export interface OperatorState {
-  platformBalance: number;
-  totalRakeCollected: number;
+  /** Per-token platform balance (rake collected minus gas minus withdrawn). */
+  balances: Record<string, number>;
+  /** Per-token cumulative rake collected. */
+  totalRakeCollected: Record<string, number>;
+  /** Gas is always HBAR on Hedera — single number. */
   totalGasSpent: number;
-  totalWithdrawnByOperator: number;
+  /** Per-token operator withdrawals. */
+  totalWithdrawnByOperator: Record<string, number>;
 }
 
 export function emptyOperatorState(): OperatorState {
   return {
-    platformBalance: 0,
-    totalRakeCollected: 0,
+    balances: {},
+    totalRakeCollected: {},
     totalGasSpent: 0,
-    totalWithdrawnByOperator: 0,
+    totalWithdrawnByOperator: {},
   };
 }
 

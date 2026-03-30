@@ -2,20 +2,12 @@ import {
   Client,
   ContractCallQuery,
   ContractId,
-  AccountId,
 } from '@hashgraph/sdk';
 import { Interface } from 'ethers';
-import { createRequire } from 'node:module';
+import { toEvmAddress } from '../utils/format.js';
+import { LazyDelegateRegistryABI } from '../utils/abi.js';
 
-const esmRequire = createRequire(import.meta.url);
-const { LazyDelegateRegistryABI } = esmRequire('@lazysuperheroes/lazy-lotto');
-
-const iface = new Interface(LazyDelegateRegistryABI as readonly string[]);
-
-function toEvmAddress(hederaId: string): string {
-  if (hederaId.startsWith('0x')) return hederaId;
-  return '0x' + AccountId.fromString(hederaId).toSolidityAddress();
-}
+const iface = new Interface(LazyDelegateRegistryABI);
 
 async function contractCall(
   client: Client,

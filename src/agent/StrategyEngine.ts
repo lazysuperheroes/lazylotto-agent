@@ -47,10 +47,6 @@ export class StrategyEngine {
     return scored;
   }
 
-  shouldPlay(scored: ScoredPool): boolean {
-    return scored.score >= this.strategy.playStyle.minExpectedValue;
-  }
-
   getEntriesPerBatch(): number {
     return this.strategy.playStyle.entriesPerBatch;
   }
@@ -61,14 +57,6 @@ export class StrategyEngine {
 
   shouldPreferNftPrizes(): boolean {
     return this.strategy.playStyle.preferNftPrizes;
-  }
-
-  getTargetTokenIds(): string[] | undefined {
-    return this.strategy.playStyle.targetTokenIds;
-  }
-
-  getStopOnWins(): number | undefined {
-    return this.strategy.playStyle.stopOnWins;
   }
 
   shouldTransferToOwner(): boolean {

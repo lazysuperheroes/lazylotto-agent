@@ -2,11 +2,18 @@ import { getTransactionsByAccount, type MirrorTransaction } from '../hedera/mirr
 import type { PersistentStore } from './PersistentStore.js';
 import type { UserLedger } from './UserLedger.js';
 import type { CustodialConfig } from './types.js';
+import { HBAR_TOKEN_KEY } from '../config/strategy.js';
+import { HEDERA_DEFAULTS } from '../config/defaults.js';
+import { getDecimalsSync, getTokenMeta } from '../utils/math.js';
+
+interface CreditInfo {
+  amount: number;
+  token: string; // "hbar" or token ID
+}
 
 // ── Constants ────────────────────────────────────────────────────
 
 const TINYBARS_PER_HBAR = 1e8;
-const LAZY_DECIMALS = 1; // $LAZY uses 1 decimal place: 10 base units = 1 LAZY
 
 // ── DepositWatcher ───────────────────────────────────────────────
 //
@@ -92,9 +99,15 @@ export class DepositWatcher {
           if (credited) processed++;
         } catch (err) {
           console.error(
-            `[DepositWatcher] Error processing transaction ${tx.transaction_id}:`,
+            `[DepositWatcher] FAILED to process transaction ${tx.transaction_id}:`,
             err,
           );
+          // Add to dead-letter queue for operator review
+          this.store.recordDeadLetter({
+            transactionId: tx.transaction_id,
+            timestamp: tx.consensus_timestamp,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
         // Track the last timestamp regardless of processing outcome
         // so we advance past failed/skipped transactions
@@ -142,38 +155,46 @@ export class DepositWatcher {
       return false;
     }
 
-    // Reject deposits to deregistered users
+    // Reject deposits to deregistered users — add to dead-letter for operator review
     if (!user.active) {
       console.warn(
-        `[DepositWatcher] Deposit rejected: user ${user.userId} is deregistered (memo: ${memo})`,
+        `[DepositWatcher] Deposit to inactive user ${user.userId} (memo: ${memo}). Added to dead-letter queue.`,
       );
+      this.store.recordDeadLetter({
+        transactionId: tx.transaction_id,
+        timestamp: tx.consensus_timestamp,
+        error: `Deposit to inactive/deregistered user ${user.userId}. Funds in agent wallet.`,
+      });
       return false;
     }
 
-    // Determine credit amount — try token transfers first, fall back to HBAR
-    const creditAmount = this.extractCreditAmount(tx);
-    if (creditAmount <= 0) return false;
+    // Determine credit amount and token type
+    const credit = this.extractCredit(tx);
+    if (!credit || credit.amount <= 0) return false;
 
-    // Enforce max balance
-    if (user.balances.available + creditAmount > this.config.maxUserBalance) {
+    // Enforce max balance (check the specific token entry)
+    const tokenEntry = user.balances.tokens[credit.token];
+    const currentAvailable = tokenEntry?.available ?? 0;
+    if (currentAvailable + credit.amount > this.config.maxUserBalance) {
       console.warn(
         `[DepositWatcher] Deposit would exceed max balance for user ${user.userId}: ` +
-          `current=${user.balances.available}, deposit=${creditAmount}, ` +
+          `current=${currentAvailable}, deposit=${credit.amount}, token=${credit.token}, ` +
           `max=${this.config.maxUserBalance}`,
       );
       return false;
     }
 
-    // Credit the user's balance via the ledger
+    // Credit the user's balance via the ledger (token-specific)
     await this.ledger.creditDeposit(
       user.userId,
-      creditAmount,
+      credit.amount,
       tx.transaction_id,
       user.rakePercent,
+      credit.token,
     );
 
     console.log(
-      `[DepositWatcher] Deposit detected: ${creditAmount} for user ${user.userId} (memo: ${memo})`,
+      `[DepositWatcher] Deposit: ${credit.amount} ${credit.token} for user ${user.userId} (memo: ${memo})`,
     );
 
     return true;
@@ -193,28 +214,33 @@ export class DepositWatcher {
   }
 
   /**
-   * Extract the credit amount from a transaction.
+   * Extract credit amount and token from a transaction.
    *
-   * Priority:
-   *   1. LAZY token transfer to the agent account
-   *   2. HBAR transfer to the agent account (fallback)
-   *
-   * Returns 0 if no positive inbound transfer is found.
+   * Checks all token transfers first (any FT to agent), then HBAR.
+   * Returns the token ID (or "hbar") along with the amount.
    */
-  private extractCreditAmount(tx: MirrorTransaction): number {
-    const lazyTokenId = process.env.LAZY_TOKEN_ID;
-
-    // Check token transfers first (LAZY deposits are the primary flow)
-    if (lazyTokenId && tx.token_transfers?.length) {
-      const tokenTransfer = tx.token_transfers.find(
-        (t) =>
-          t.token_id === lazyTokenId &&
-          t.account === this.agentAccountId &&
-          t.amount > 0,
-      );
-      if (tokenTransfer) {
-        // LAZY has 1 decimal place: raw amount / 10
-        return tokenTransfer.amount / Math.pow(10, LAZY_DECIMALS);
+  private extractCredit(tx: MirrorTransaction): CreditInfo | null {
+    // Check token transfers first (any FT deposit)
+    if (tx.token_transfers?.length) {
+      for (const tt of tx.token_transfers) {
+        if (tt.account === this.agentAccountId && tt.amount > 0) {
+          // Look up decimals from token registry
+          let decimals = getDecimalsSync(tt.token_id);
+          if (decimals === 0 && tt.token_id !== 'hbar') {
+            // Unknown token — try async lookup and reject this deposit
+            // The next deposit of this token will use the cached decimals
+            void getTokenMeta(tt.token_id);
+            console.warn(
+              `[DepositWatcher] Unknown token ${tt.token_id} — decimals not cached. ` +
+                'Deposit will be added to dead-letter queue. Retry on next poll.',
+            );
+            return null; // reject — caller adds to dead-letter
+          }
+          return {
+            amount: tt.amount / Math.pow(10, decimals),
+            token: tt.token_id,
+          };
+        }
       }
     }
 
@@ -224,10 +250,13 @@ export class DepositWatcher {
         (t) => t.account === this.agentAccountId && t.amount > 0,
       );
       if (hbarTransfer) {
-        return hbarTransfer.amount / TINYBARS_PER_HBAR;
+        return {
+          amount: hbarTransfer.amount / TINYBARS_PER_HBAR,
+          token: HBAR_TOKEN_KEY,
+        };
       }
     }
 
-    return 0;
+    return null;
   }
 }

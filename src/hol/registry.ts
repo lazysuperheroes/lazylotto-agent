@@ -285,11 +285,3 @@ async function updateRegistration(
   return config;
 }
 
-// ── Lookup ────────────────────────────────────────────────────
-
-export async function resolveAgent(uaid: string): Promise<unknown> {
-  const brokerClient = new RegistryBrokerClient({
-    apiKey: process.env.HOL_API_KEY,
-  });
-  return brokerClient.resolveUaid(uaid);
-}

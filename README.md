@@ -47,6 +47,10 @@ your wallet, and manages its budget — all without human intervention.
 6. **Keep NFTs in your owner wallet.** Delegate them to the agent for win rate
    bonuses — don't transfer them. See [Delegation & Bonuses](#delegation--bonuses).
 
+7. **Set `MCP_AUTH_TOKEN`** in `.env` for production deployments. When set, all
+   fund-moving MCP tools require `auth_token` to execute. Without it, any MCP
+   client can trigger plays, withdrawals, and prize transfers.
+
 ---
 
 ## Getting Started
@@ -100,6 +104,20 @@ lazylotto-agent --audit
 lazylotto-agent
 ```
 
+### Getting Testnet Tokens
+
+To play on testnet you need HBAR and optionally LAZY tokens:
+
+1. **Create a testnet account**: Visit [Hedera Portal](https://portal.hedera.com/) to create a testnet account and get your account ID + private key
+2. **Get testnet HBAR**: Use the [Hedera Faucet](https://portal.hedera.com/faucet) to fund your testnet account with HBAR
+3. **Get testnet LAZY**: The LazyLotto testnet uses LAZY token `0.0.8011209`. Contact the LazyLotto team or use the testnet faucet if available
+
+Set `LAZY_TOKEN_ID` in your `.env` to match your network:
+- **Testnet**: `LAZY_TOKEN_ID=0.0.8011209`
+- **Mainnet**: `LAZY_TOKEN_ID=0.0.1311037`
+
+The built-in strategies use `"lazy"` as a portable alias — it automatically resolves to your configured `LAZY_TOKEN_ID`.
+
 ### npx (no install needed)
 
 Every command also works with npx:
@@ -138,13 +156,17 @@ npx @lazysuperheroes/lazylotto-agent
 
 Three built-in strategies ship in `strategies/`:
 
-| Strategy | Budget | Entries/Pool | Risk | Approach |
-|----------|--------|-------------|------|----------|
-| **conservative** | 50 HBAR/session | 3 | Low | High win rate pools only (>10%), small bets |
-| **balanced** | 100 HBAR/session | 5 | Moderate | All pools, moderate EV threshold |
-| **aggressive** | 500 HBAR/session | 20 | Higher | Pools with 2+ prizes, large batches |
+| Strategy | HBAR Budget | LAZY Budget | Entries/Pool | Risk |
+|----------|------------|-------------|-------------|------|
+| **conservative** | 25/session | 100/session | 3 | Low — 10%+ win rate pools |
+| **balanced** | 100/session | 500/session | 5 | Moderate — all pools |
+| **aggressive** | 500/session | 2000/session | 20 | Higher — prize-rich + $100 USD cap |
 
 Select via `STRATEGY=conservative` in `.env` or pass a path to a custom JSON file.
+
+**Note:** The built-in strategy files use testnet token IDs (e.g., `0.0.8011209` for LAZY).
+For mainnet deployment, update the `tokenBudgets` keys in your strategy files to match
+mainnet token IDs, or set `LAZY_TOKEN_ID` in `.env` and use that value as the budget key.
 
 ### Custom Strategies
 
@@ -153,28 +175,29 @@ Create a JSON file matching this schema:
 ```json
 {
   "name": "my-strategy",
+  "version": "0.2",
   "description": "My custom strategy",
   "poolFilter": {
     "type": "all",
     "minWinRate": 5,
-    "maxEntryFee": 100,
-    "feeToken": "LAZY",
+    "feeToken": "any",
     "minPrizeCount": 1
   },
   "budget": {
-    "maxSpendPerSession": 100,
-    "maxSpendPerPool": 50,
-    "maxEntriesPerPool": 10,
-    "reserveBalance": 10,
-    "currency": "LAZY"
+    "tokenBudgets": {
+      "hbar": { "maxPerSession": 100, "maxPerPool": 50, "reserve": 10 },
+      "lazy": { "maxPerSession": 500, "maxPerPool": 200, "reserve": 50 }
+    },
+    "maxEntriesPerPool": 10
   },
   "playStyle": {
     "action": "buy_and_roll",
     "entriesPerBatch": 3,
     "minExpectedValue": -10,
-    "claimImmediately": true,
     "transferToOwner": true,
-    "ownerAddress": "0.0.67890"
+    "ownerAddress": "0.0.67890",
+    "preferNftPrizes": false,
+    "stopOnWins": 5
   },
   "schedule": {
     "enabled": false,
@@ -309,7 +332,7 @@ Or if installed locally during development:
 | Tool | Description |
 |------|-------------|
 | `agent_onboard` | Step-by-step onboarding checklist — Claude uses this to guide you |
-| `agent_play` | Run a play session (optional budget/poolId override) |
+| `agent_play` | Run a lottery play session (requires `auth_token` when configured) |
 | `agent_status` | Wallet balances, pending prizes, session history, cumulative stats |
 | `agent_transfer_prizes` | Transfer all pending prizes to OWNER_EOA |
 | `agent_set_strategy` | Switch strategy (built-in name or full JSON) |
@@ -347,6 +370,8 @@ lazylotto-agent --register       Register agent with HOL registry (HCS-11)
 lazylotto-agent --register --force   Update existing HOL registration
 lazylotto-agent --status         Check wallet balances and state
 lazylotto-agent --audit          Comprehensive configuration audit
+lazylotto-agent --dry-run        Show what would be played (no transactions)
+lazylotto-agent --export-history Export play history to CSV
 lazylotto-agent --mcp-server     Start MCP server (for Claude Desktop)
 lazylotto-agent --scheduled      Run play sessions on cron schedule
 lazylotto-agent --multi-user     Start multi-user custodial agent
@@ -415,7 +440,7 @@ Your `.env` file is missing or has empty values. Copy `.env.example` and fill in
 Harmless — the token is already set up. The `--setup` command handles this gracefully.
 
 **"Balance below reserve"**
-The agent won't play if your balance drops below the strategy's `reserveBalance`.
+The agent won't play if your balance drops below the per-token `reserve` threshold in the strategy's `tokenBudgets`.
 Fund the agent wallet with more HBAR/LAZY.
 
 **"OWNER_EOA not set"**

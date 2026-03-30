@@ -125,16 +125,19 @@ Three built-in strategies are available, and operators can create custom ones.
 |--|-------------|----------|------------|
 | **Risk** | Low | Moderate | Higher |
 | **Pool selection** | High win rate (10%+) | All pools | Prize-rich pools (2+ prizes) |
-| **Budget per session** | 50 HBAR | 100 HBAR | 500 HBAR |
+| **HBAR budget** | 25/session | 100/session | 500/session |
+| **LAZY budget** | 100/session | 500/session | 2000/session |
 | **Entries per pool** | Up to 3 | Up to 5 | Up to 20 |
 | **Batch size** | 1 at a time | 2 at a time | 5 at a time |
 | **EV threshold** | Tight (-5) | Moderate (-20) | Loose (-100) |
-| **Reserve** | 20 HBAR | 10 HBAR | 5 HBAR |
+| **USD cap** | None | None | $100/session |
+| **Stop on wins** | No | No | After 3 prizes |
 | **Best for** | Small balances, cautious play | Most users | Large balances, big swings |
 
-All strategies accept both HBAR and LAZY pools (`feeToken: "any"`). The budget
-amounts are denominated in HBAR but the agent plays whichever pools match the
-filter criteria regardless of fee token.
+All strategies accept both HBAR and LAZY pools (`feeToken: "any"`). Each token
+has its own independent budget — the agent tracks HBAR spend and LAZY spend
+separately. When both are funded, the agent plays pools denominated in either
+token within their respective limits.
 
 **How pool selection works:**
 

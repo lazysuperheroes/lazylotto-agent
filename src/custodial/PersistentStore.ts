@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { writeFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import type {
   UserAccount,
@@ -12,6 +13,8 @@ import type {
 import { emptyOperatorState, UserNotFoundError } from './types.js';
 
 // ── File names ───────────────────────────────────────────────────
+
+const MAX_RECORDS = 10_000; // Rotate arrays when they exceed this size
 
 const FILE_USERS = 'users.json';
 const FILE_OPERATOR = 'operator.json';
@@ -29,13 +32,24 @@ function atomicWriteSync(filePath: string, data: unknown): void {
   renameSync(tmp, filePath);
 }
 
+async function atomicWriteAsync(filePath: string, data: unknown): Promise<void> {
+  const tmp = filePath + '.tmp';
+  await writeFile(tmp, JSON.stringify(data, null, 2), 'utf-8');
+  await rename(tmp, filePath);
+}
+
 function readJsonSync<T>(filePath: string, fallback: T): T {
   if (!existsSync(filePath)) return fallback;
+  const raw = readFileSync(filePath, 'utf-8');
+  if (!raw.trim()) return fallback; // empty file treated as new
   try {
-    const raw = readFileSync(filePath, 'utf-8');
     return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
+  } catch (e) {
+    throw new Error(
+      `Corrupted data file: ${filePath}. ` +
+        `Parse error: ${e instanceof Error ? e.message : e}. ` +
+        `Investigate and fix the file, or delete it to reset (data will be lost).`
+    );
   }
 }
 
@@ -54,6 +68,7 @@ export class PersistentStore {
   private plays: PlaySessionResult[] = [];
   private withdrawals: WithdrawalRecord[] = [];
   private gasLog: GasRecord[] = [];
+  private deadLetters: { transactionId: string; timestamp: string; error: string }[] = [];
   private watermarkTimestamp = '';
 
   // Dirty tracking
@@ -63,6 +78,7 @@ export class PersistentStore {
   private dirtyPlays = false;
   private dirtyWithdrawals = false;
   private dirtyGas = false;
+  private dirtyDeadLetters = false;
   private dirtyWatermark = false;
 
   // Debounce
@@ -103,6 +119,18 @@ export class PersistentStore {
       emptyOperatorState(),
     );
 
+    // Migrate old flat OperatorState to per-token format
+    const opAny = this.operator as any;
+    if (typeof opAny.platformBalance === 'number') {
+      this.operator = {
+        balances: { hbar: opAny.platformBalance },
+        totalRakeCollected: { hbar: opAny.totalRakeCollected ?? 0 },
+        totalGasSpent: opAny.totalGasSpent ?? 0,
+        totalWithdrawnByOperator: { hbar: opAny.totalWithdrawnByOperator ?? 0 },
+      };
+      this.dirtyOperator = true;
+    }
+
     // Deposits
     this.deposits = readJsonSync<DepositRecord[]>(this.path(FILE_DEPOSITS), []);
     this.processedTxIds = new Set(this.deposits.map((d) => d.transactionId));
@@ -119,6 +147,12 @@ export class PersistentStore {
     // Gas
     this.gasLog = readJsonSync<GasRecord[]>(this.path(FILE_GAS_LOG), []);
 
+    // Dead letters
+    this.deadLetters = readJsonSync<typeof this.deadLetters>(
+      this.path('dead-letters.json'),
+      [],
+    );
+
     // Watermark
     const wm = readJsonSync<{ lastTimestamp: string }>(
       this.path(FILE_WATERMARK),
@@ -126,13 +160,36 @@ export class PersistentStore {
     );
     this.watermarkTimestamp = wm.lastTimestamp;
 
-    // Startup recovery: move orphaned reserved balances back to available
+    // Startup recovery: move orphaned reserved balances back to available (per-token)
     let recoveredAny = false;
     for (const user of this.users.values()) {
-      if (user.balances.reserved > 0) {
-        user.balances.available += user.balances.reserved;
-        user.balances.reserved = 0;
+      // Handle both old flat format and new per-token format
+      if (!user.balances.tokens) {
+        // Migrate old flat balances to per-token format
+        const old = user.balances as unknown as {
+          available?: number; reserved?: number;
+          totalDeposited?: number; totalWithdrawn?: number; totalRake?: number;
+        };
+        user.balances = {
+          tokens: {
+            hbar: {
+              available: (old.available ?? 0) + (old.reserved ?? 0),
+              reserved: 0,
+              totalDeposited: old.totalDeposited ?? 0,
+              totalWithdrawn: old.totalWithdrawn ?? 0,
+              totalRake: old.totalRake ?? 0,
+            },
+          },
+        };
         recoveredAny = true;
+      } else {
+        for (const entry of Object.values(user.balances.tokens)) {
+          if (entry.reserved > 0) {
+            entry.available += entry.reserved;
+            entry.reserved = 0;
+            recoveredAny = true;
+          }
+        }
       }
     }
     if (recoveredAny) {
@@ -141,48 +198,67 @@ export class PersistentStore {
     }
   }
 
+  private flushing = false;
+  private flushPromise: Promise<void> | null = null;
+
   async flush(): Promise<void> {
+    // If a flush is in progress, wait for it to complete
+    if (this.flushing && this.flushPromise) {
+      await this.flushPromise;
+      return;
+    }
+    this.flushing = true;
     this.cancelDebounce();
 
-    if (this.dirtyUsers) {
-      const obj: Record<string, UserAccount> = {};
-      for (const [id, user] of this.users) {
-        obj[id] = user;
+    this.flushPromise = this.doFlush();
+    await this.flushPromise;
+  }
+
+  private async doFlush(): Promise<void> {
+    try {
+      const writes: Promise<void>[] = [];
+      // Snapshot dirty flags BEFORE building writes
+      const snap = {
+        users: this.dirtyUsers,
+        operator: this.dirtyOperator,
+        deposits: this.dirtyDeposits,
+        plays: this.dirtyPlays,
+        deadLetters: this.dirtyDeadLetters,
+        withdrawals: this.dirtyWithdrawals,
+        gas: this.dirtyGas,
+        watermark: this.dirtyWatermark,
+      };
+
+      if (snap.users) {
+        const obj: Record<string, UserAccount> = {};
+        for (const [id, user] of this.users) obj[id] = user;
+        writes.push(atomicWriteAsync(this.path(FILE_USERS), obj));
       }
-      atomicWriteSync(this.path(FILE_USERS), obj);
-      this.dirtyUsers = false;
-    }
+      if (snap.operator) writes.push(atomicWriteAsync(this.path(FILE_OPERATOR), this.operator));
+      if (snap.deposits) writes.push(atomicWriteAsync(this.path(FILE_DEPOSITS), this.deposits));
+      if (snap.plays) writes.push(atomicWriteAsync(this.path(FILE_PLAYS), this.plays));
+      if (snap.deadLetters) writes.push(atomicWriteAsync(this.path('dead-letters.json'), this.deadLetters));
+      if (snap.withdrawals) writes.push(atomicWriteAsync(this.path(FILE_WITHDRAWALS), this.withdrawals));
+      if (snap.gas) writes.push(atomicWriteAsync(this.path(FILE_GAS_LOG), this.gasLog));
+      if (snap.watermark) writes.push(atomicWriteAsync(this.path(FILE_WATERMARK), { lastTimestamp: this.watermarkTimestamp }));
 
-    if (this.dirtyOperator) {
-      atomicWriteSync(this.path(FILE_OPERATOR), this.operator);
-      this.dirtyOperator = false;
-    }
+      await Promise.all(writes);
 
-    if (this.dirtyDeposits) {
-      atomicWriteSync(this.path(FILE_DEPOSITS), this.deposits);
-      this.dirtyDeposits = false;
-    }
+      // Clear dirty flags AFTER writes complete — new mutations during write remain dirty
+      if (snap.users) this.dirtyUsers = false;
+      if (snap.operator) this.dirtyOperator = false;
+      if (snap.deposits) this.dirtyDeposits = false;
+      if (snap.plays) this.dirtyPlays = false;
+      if (snap.deadLetters) this.dirtyDeadLetters = false;
+      if (snap.withdrawals) this.dirtyWithdrawals = false;
+      if (snap.gas) this.dirtyGas = false;
+      if (snap.watermark) this.dirtyWatermark = false;
 
-    if (this.dirtyPlays) {
-      atomicWriteSync(this.path(FILE_PLAYS), this.plays);
-      this.dirtyPlays = false;
-    }
-
-    if (this.dirtyWithdrawals) {
-      atomicWriteSync(this.path(FILE_WITHDRAWALS), this.withdrawals);
-      this.dirtyWithdrawals = false;
-    }
-
-    if (this.dirtyGas) {
-      atomicWriteSync(this.path(FILE_GAS_LOG), this.gasLog);
-      this.dirtyGas = false;
-    }
-
-    if (this.dirtyWatermark) {
-      atomicWriteSync(this.path(FILE_WATERMARK), {
-        lastTimestamp: this.watermarkTimestamp,
-      });
-      this.dirtyWatermark = false;
+      // Run record rotation check
+      this.rotateRecords();
+    } finally {
+      this.flushing = false;
+      this.flushPromise = null;
     }
   }
 
@@ -289,6 +365,19 @@ export class PersistentStore {
     this.scheduleDirtyFlush();
   }
 
+  // ── Dead Letters ─────────────────────────────────────────────
+
+  recordDeadLetter(entry: { transactionId: string; timestamp: string; error: string }): void {
+    if (!this.deadLetters) this.deadLetters = [];
+    this.deadLetters.push(entry);
+    this.dirtyDeadLetters = true;
+    this.scheduleDirtyFlush();
+  }
+
+  getDeadLetters(): { transactionId: string; timestamp: string; error: string }[] {
+    return this.deadLetters ?? [];
+  }
+
   // ── Gas ──────────────────────────────────────────────────────
 
   recordGas(record: GasRecord): void {
@@ -338,5 +427,28 @@ export class PersistentStore {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
+  }
+
+  /** Archive old records when an array exceeds MAX_RECORDS. Keeps the latest half. */
+  private rotateIfNeeded<T>(arr: T[], name: string): T[] {
+    if (arr.length <= MAX_RECORDS) return arr;
+    const keep = Math.floor(MAX_RECORDS / 2);
+    const archived = arr.slice(0, arr.length - keep);
+    const archivePath = this.path(`${name}-archive-${Date.now()}.json`);
+    try {
+      writeFileSync(archivePath, JSON.stringify(archived, null, 2), 'utf-8');
+      console.log(`[PersistentStore] Archived ${archived.length} ${name} records to ${archivePath}`);
+    } catch (e) {
+      console.warn(`[PersistentStore] Failed to archive ${name}:`, e);
+    }
+    return arr.slice(arr.length - keep);
+  }
+
+  /** Run rotation check on all record arrays. Call periodically or on flush. */
+  rotateRecords(): void {
+    this.deposits = this.rotateIfNeeded(this.deposits, 'deposits');
+    this.plays = this.rotateIfNeeded(this.plays, 'plays');
+    this.withdrawals = this.rotateIfNeeded(this.withdrawals, 'withdrawals');
+    this.gasLog = this.rotateIfNeeded(this.gasLog, 'gas-log');
   }
 }

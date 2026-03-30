@@ -20,10 +20,10 @@ function makeUser(overrides: Partial<UserAccount> = {}): UserAccount {
     hederaAccountId: '0.0.1234',
     eoaAddress: '0xabc',
     strategyName: 'conservative',
-    strategyVersion: '1.0.0',
+    strategyVersion: '0.2',
     strategySnapshot: {
       name: 'conservative',
-      version: '1.0.0',
+      version: '0.2',
       poolFilter: { type: 'all', feeToken: 'any', minPrizeCount: 1 },
       budget: {
         tokenBudgets: {
@@ -195,11 +195,15 @@ describe('PersistentStore', () => {
     // Save a user with funds in reserved (simulating a crash mid-play)
     const user = makeUser({
       balances: {
-        available: 50,
-        reserved: 30,
-        totalDeposited: 80,
-        totalWithdrawn: 0,
-        totalRake: 0,
+        tokens: {
+          hbar: {
+            available: 50,
+            reserved: 30,
+            totalDeposited: 80,
+            totalWithdrawn: 0,
+            totalRake: 0,
+          },
+        },
       },
     });
     store.saveUser(user);
@@ -212,8 +216,8 @@ describe('PersistentStore', () => {
 
     const recovered = store2.getUser('user-1');
     assert.ok(recovered);
-    assert.equal(recovered.balances.available, 80); // 50 + 30
-    assert.equal(recovered.balances.reserved, 0);
+    assert.equal(recovered.balances.tokens.hbar.available, 80); // 50 + 30
+    assert.equal(recovered.balances.tokens.hbar.reserved, 0);
     await store2.close();
   });
 
@@ -257,8 +261,8 @@ describe('PersistentStore', () => {
     // Modify operator state
     store.updateOperator((op) => ({
       ...op,
-      platformBalance: 42,
-      totalRakeCollected: 42,
+      balances: { hbar: 42 },
+      totalRakeCollected: { hbar: 42 },
       totalGasSpent: 3.5,
     }));
 
@@ -270,10 +274,10 @@ describe('PersistentStore', () => {
     await store2.load();
 
     const reloaded = store2.getOperator();
-    assert.equal(reloaded.platformBalance, 42);
-    assert.equal(reloaded.totalRakeCollected, 42);
+    assert.equal(reloaded.balances.hbar, 42);
+    assert.equal(reloaded.totalRakeCollected.hbar, 42);
     assert.equal(reloaded.totalGasSpent, 3.5);
-    assert.equal(reloaded.totalWithdrawnByOperator, 0);
+    assert.deepStrictEqual(reloaded.totalWithdrawnByOperator, {});
     await store2.close();
   });
 });

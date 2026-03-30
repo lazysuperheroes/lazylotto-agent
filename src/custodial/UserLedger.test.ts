@@ -21,10 +21,10 @@ function makeUser(overrides: Partial<UserAccount> = {}): UserAccount {
     hederaAccountId: '0.0.1234',
     eoaAddress: '0xabc',
     strategyName: 'conservative',
-    strategyVersion: '1.0.0',
+    strategyVersion: '0.2',
     strategySnapshot: {
       name: 'conservative',
-      version: '1.0.0',
+      version: '0.2',
       poolFilter: { type: 'all', feeToken: 'any', minPrizeCount: 1 },
       budget: {
         tokenBudgets: {
@@ -91,6 +91,9 @@ function createMockStore(initial?: Partial<MockStoreData>): PersistentStore {
     getOperator(): OperatorState {
       return operator;
     },
+    async flush(): Promise<void> {
+      // no-op in mock
+    },
   } as unknown as PersistentStore;
 }
 
@@ -125,7 +128,7 @@ describe('UserLedger', () => {
 
   beforeEach(() => {
     const user = makeUser({
-      balances: { ...emptyBalances(), available: 100 },
+      balances: { tokens: { hbar: { available: 100, reserved: 0, totalDeposited: 0, totalWithdrawn: 0, totalRake: 0 } } },
     });
     const users = new Map<string, UserAccount>();
     users.set(user.userId, user);
@@ -138,41 +141,41 @@ describe('UserLedger', () => {
   // -- creditDeposit ----------------------------------------------------------
 
   it('creditDeposit deducts rake and credits net amount', async () => {
-    const balances = await ledger.creditDeposit('user-1', 100, 'tx-001', 1);
+    const balances = await ledger.creditDeposit('user-1', 100, 'tx-001', 1, 'hbar');
     // 1% rake on 100 = 1, net = 99
-    assert.equal(balances.available, 100 + 99); // prior 100 + net 99
-    assert.equal(balances.totalDeposited, 100);
-    assert.equal(balances.totalRake, 1);
+    assert.equal(balances.tokens.hbar.available, 100 + 99); // prior 100 + net 99
+    assert.equal(balances.tokens.hbar.totalDeposited, 100);
+    assert.equal(balances.tokens.hbar.totalRake, 1);
   });
 
   it('creditDeposit credits operator platform balance', async () => {
-    await ledger.creditDeposit('user-1', 200, 'tx-002', 2);
+    await ledger.creditDeposit('user-1', 200, 'tx-002', 2, 'hbar');
     // 2% rake on 200 = 4
     const op = store.getOperator();
-    assert.equal(op.platformBalance, 4);
-    assert.equal(op.totalRakeCollected, 4);
+    assert.equal(op.balances.hbar, 4);
+    assert.equal(op.totalRakeCollected.hbar, 4);
   });
 
   it('creditDeposit is idempotent (duplicate txId ignored)', async () => {
-    const first = await ledger.creditDeposit('user-1', 100, 'tx-dup', 1);
-    const second = await ledger.creditDeposit('user-1', 100, 'tx-dup', 1);
+    const first = await ledger.creditDeposit('user-1', 100, 'tx-dup', 1, 'hbar');
+    const second = await ledger.creditDeposit('user-1', 100, 'tx-dup', 1, 'hbar');
 
     // Balances should be identical -- second call is a no-op.
     assert.deepStrictEqual(first, second);
-    assert.equal(first.available, 100 + 99);
+    assert.equal(first.tokens.hbar.available, 100 + 99);
   });
 
   // -- reserve ----------------------------------------------------------------
 
   it('reserve moves available to reserved', () => {
-    const balances = ledger.reserve('user-1', 30);
-    assert.equal(balances.available, 70);
-    assert.equal(balances.reserved, 30);
+    const balances = ledger.reserve('user-1', 30, 'hbar');
+    assert.equal(balances.tokens.hbar.available, 70);
+    assert.equal(balances.tokens.hbar.reserved, 30);
   });
 
   it('reserve throws InsufficientBalanceError when underfunded', () => {
     assert.throws(
-      () => ledger.reserve('user-1', 200),
+      () => ledger.reserve('user-1', 200, 'hbar'),
       (err: unknown) => err instanceof InsufficientBalanceError,
     );
   });
@@ -182,7 +185,7 @@ describe('UserLedger', () => {
     ledger.deregisterUser('user-1');
 
     assert.throws(
-      () => ledger.reserve('user-1', 10),
+      () => ledger.reserve('user-1', 10, 'hbar'),
       (err: unknown) => err instanceof UserInactiveError,
     );
   });
@@ -190,57 +193,57 @@ describe('UserLedger', () => {
   // -- settleSpend ------------------------------------------------------------
 
   it('settleSpend deducts from reserved', () => {
-    ledger.reserve('user-1', 50);
-    const balances = ledger.settleSpend('user-1', 30);
-    assert.equal(balances.reserved, 20);
-    assert.equal(balances.available, 50); // unchanged from after reserve
+    ledger.reserve('user-1', 50, 'hbar');
+    const balances = ledger.settleSpend('user-1', 30, 'hbar');
+    assert.equal(balances.tokens.hbar.reserved, 20);
+    assert.equal(balances.tokens.hbar.available, 50); // unchanged from after reserve
   });
 
   // -- releaseReserve ---------------------------------------------------------
 
   it('releaseReserve moves reserved back to available', () => {
-    ledger.reserve('user-1', 40);
-    const balances = ledger.releaseReserve('user-1', 40);
-    assert.equal(balances.available, 100); // fully restored
-    assert.equal(balances.reserved, 0);
+    ledger.reserve('user-1', 40, 'hbar');
+    const balances = ledger.releaseReserve('user-1', 40, 'hbar');
+    assert.equal(balances.tokens.hbar.available, 100); // fully restored
+    assert.equal(balances.tokens.hbar.reserved, 0);
   });
 
   // -- Full cycle -------------------------------------------------------------
 
   it('full cycle: deposit -> reserve -> settle -> release unused', async () => {
     // Deposit 100 LAZY at 1% rake => net 99
-    await ledger.creditDeposit('user-1', 100, 'tx-cycle', 1);
+    await ledger.creditDeposit('user-1', 100, 'tx-cycle', 1, 'hbar');
     // available is now 199 (100 initial + 99 net deposit)
 
     // Reserve 80
-    ledger.reserve('user-1', 80);
+    ledger.reserve('user-1', 80, 'hbar');
     let bal = ledger.getBalance('user-1');
-    assert.equal(bal.available, 119);
-    assert.equal(bal.reserved, 80);
+    assert.equal(bal.tokens.hbar.available, 119);
+    assert.equal(bal.tokens.hbar.reserved, 80);
 
     // Settle 50 (actually spent)
-    ledger.settleSpend('user-1', 50);
+    ledger.settleSpend('user-1', 50, 'hbar');
     bal = ledger.getBalance('user-1');
-    assert.equal(bal.reserved, 30);
+    assert.equal(bal.tokens.hbar.reserved, 30);
 
     // Release remaining 30 reservation
-    ledger.releaseReserve('user-1', 30);
+    ledger.releaseReserve('user-1', 30, 'hbar');
     bal = ledger.getBalance('user-1');
-    assert.equal(bal.available, 149);
-    assert.equal(bal.reserved, 0);
+    assert.equal(bal.tokens.hbar.available, 149);
+    assert.equal(bal.tokens.hbar.reserved, 0);
   });
 
   // -- processWithdrawal ------------------------------------------------------
 
   it('processWithdrawal deducts from available', async () => {
-    const balances = await ledger.processWithdrawal('user-1', 60);
-    assert.equal(balances.available, 40);
-    assert.equal(balances.totalWithdrawn, 60);
+    const balances = await ledger.processWithdrawal('user-1', 60, 'hbar');
+    assert.equal(balances.tokens.hbar.available, 40);
+    assert.equal(balances.tokens.hbar.totalWithdrawn, 60);
   });
 
   it('processWithdrawal throws InsufficientBalanceError', async () => {
     await assert.rejects(
-      () => ledger.processWithdrawal('user-1', 999),
+      () => ledger.processWithdrawal('user-1', 999, 'hbar'),
       (err: unknown) => err instanceof InsufficientBalanceError,
     );
   });
@@ -248,10 +251,10 @@ describe('UserLedger', () => {
   // -- canAfford --------------------------------------------------------------
 
   it('canAfford returns correct boolean', () => {
-    assert.equal(ledger.canAfford('user-1', 100), true);
-    assert.equal(ledger.canAfford('user-1', 101), false);
-    assert.equal(ledger.canAfford('user-1', 0), true);
+    assert.equal(ledger.canAfford('user-1', 100, 'hbar'), true);
+    assert.equal(ledger.canAfford('user-1', 101, 'hbar'), false);
+    assert.equal(ledger.canAfford('user-1', 0, 'hbar'), true);
     // Non-existent user
-    assert.equal(ledger.canAfford('no-such-user', 1), false);
+    assert.equal(ledger.canAfford('no-such-user', 1, 'hbar'), false);
   });
 });

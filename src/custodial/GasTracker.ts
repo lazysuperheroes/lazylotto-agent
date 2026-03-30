@@ -32,7 +32,7 @@ export class GasTracker {
   private deductFromOperator(gasCostHbar: number): void {
     this.store.updateOperator((op: OperatorState) => ({
       ...op,
-      platformBalance: op.platformBalance - gasCostHbar,
+      balances: { ...op.balances, hbar: (op.balances['hbar'] ?? 0) - gasCostHbar },
       totalGasSpent: op.totalGasSpent + gasCostHbar,
     }));
   }

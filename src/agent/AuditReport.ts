@@ -1,4 +1,4 @@
-import { Client, AccountId } from '@hashgraph/sdk';
+import { Client } from '@hashgraph/sdk';
 import type { Strategy } from '../config/strategy.js';
 import { HEDERA_DEFAULTS } from '../config/defaults.js';
 import { getWalletInfo, getOperatorAccountId } from '../hedera/wallet.js';
@@ -11,6 +11,7 @@ import {
   type TokenAllowance,
 } from '../hedera/mirror.js';
 import { getDelegatedNfts, getSerialsDelegatedTo } from '../hedera/delegates.js';
+import { hbarToNumber, tokenBalanceToNumber } from '../utils/format.js';
 
 // MCP client is optional — loaded lazily to avoid blocking module init
 async function tryGetUserState(
@@ -106,12 +107,6 @@ function env(key: string): string | null {
   return process.env[key] || null;
 }
 
-function tokenBalance(tokens: TokenBalance[], tokenId: string): number {
-  const t = tokens.find((tok) => tok.token_id === tokenId);
-  if (!t) return 0;
-  return t.balance / Math.pow(10, t.decimals);
-}
-
 // ── AuditReport ───────────────────────────────────────────────
 
 export class AuditReport {
@@ -138,13 +133,13 @@ export class AuditReport {
 
     try {
       const info = await getWalletInfo(this.client);
-      hbar = Number(info.hbarBalance.toTinybars().toString()) / 1e8;
+      hbar = hbarToNumber(info.hbarBalance);
       tokens = await getTokenBalances(accountId);
       nfts = await getNfts(accountId);
 
       const lazyTokenId = env('LAZY_TOKEN_ID');
       if (lazyTokenId) {
-        lazy = tokenBalance(tokens, lazyTokenId);
+        lazy = tokenBalanceToNumber(tokens, lazyTokenId);
       }
     } catch (e) {
       warnings.push(`Failed to query wallet: ${e instanceof Error ? e.message : e}`);
@@ -167,20 +162,18 @@ export class AuditReport {
       warnings.push('Running on MAINNET. Ensure agent wallet has limited funding.');
     }
 
+    // ── User State (cached for boost + prizes) ───────────────
+    const userState = await tryGetUserState(accountId);
+
     // ── Boost ───────────────────────────────────────────────
     let boost: AuditResult['boost'] = null;
-    try {
-      const state = await tryGetUserState(accountId);
-      if (state) {
-        boost = { totalBps: state.boost };
-        if (state.boost === 0) {
-          recommendations.push(
-            'Win rate boost is 0. Delegate LSH NFTs to this agent for bonus win rate.'
-          );
-        }
+    if (userState) {
+      boost = { totalBps: userState.boost };
+      if (userState.boost === 0) {
+        recommendations.push(
+          'Win rate boost is 0. Delegate LSH NFTs to this agent for bonus win rate.'
+        );
       }
-    } catch {
-      // MCP unavailable — not a hard failure
     }
 
     // ── Delegation ──────────────────────────────────────────
@@ -303,18 +296,13 @@ export class AuditReport {
 
     // ── Prizes ──────────────────────────────────────────────
     let prizes: AuditResult['prizes'] = null;
-    try {
-      const state = await tryGetUserState(accountId);
-      if (state) {
-        prizes = { pendingCount: state.pendingPrizesCount };
-        if (state.pendingPrizesCount > 0) {
-          recommendations.push(
-            `${state.pendingPrizesCount} pending prize(s). Run agent_transfer_prizes or --audit to claim.`
-          );
-        }
+    if (userState) {
+      prizes = { pendingCount: userState.pendingPrizesCount };
+      if (userState.pendingPrizesCount > 0) {
+        recommendations.push(
+          `${userState.pendingPrizesCount} pending prize(s). Run agent_transfer_prizes or --audit to claim.`
+        );
       }
-    } catch {
-      /* MCP unavailable */
     }
 
     // ── HOL Registration ──────────────────────────────────────

@@ -10,7 +10,7 @@
   "budget": {
     "tokenBudgets": {
       "hbar": { "maxPerSession": 500, "maxPerPool": 200, "reserve": 5 },
-      "0.0.8011209": { "maxPerSession": 2000, "maxPerPool": 800, "reserve": 25 }
+      "lazy": { "maxPerSession": 2000, "maxPerPool": 800, "reserve": 25 }
     },
     "usd": { "maxPerSession": 100 },
     "maxEntriesPerPool": 20

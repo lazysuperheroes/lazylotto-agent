@@ -14,8 +14,12 @@ export const BudgetSchema = z
   .object({
     /** Token ID → budget limits. "hbar" for native HBAR, token IDs for FTs. */
     tokenBudgets: z.record(z.string(), TokenBudgetSchema),
-    /** Optional USD session cap. Requires price oracle. Skipped when prices unavailable. */
-    usd: z.object({ maxPerSession: z.number().positive() }).optional(),
+    /** Optional USD session cap. Requires price oracle. */
+    usd: z.object({
+      maxPerSession: z.number().positive(),
+      /** If true, block play when price is unavailable. Default false (fail-open). */
+      failClosed: z.boolean().default(false),
+    }).optional(),
     maxEntriesPerPool: z.number().int().positive().default(10),
   })
   .refine((d) => Object.keys(d.tokenBudgets).length > 0, {

@@ -21,12 +21,6 @@ export const GAS_ESTIMATES = {
   maxGas: 14_500_000,
 } as const;
 
-/** Win rates are stored as thousandths of basis points. Divide by 1_000_000 to get percentage. */
-export const WIN_RATE_DIVISOR = 1_000_000;
-
-/** LAZY token ID on testnet. Override via LAZY_TOKEN_ID env var. */
-export const LAZY_TOKEN_ID_TESTNET = '0.0.8011209';
-
 export const DEFAULT_STRATEGY: Strategy = {
   name: 'balanced',
   version: '0.2',

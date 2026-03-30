@@ -145,10 +145,18 @@ export class BudgetManager {
     return currentBalance - this.totalSpentFor(token) >= tb.reserve;
   }
 
-  /** Whether the USD cap has been exceeded (if configured). */
+  /** Whether the USD cap has been exceeded (if configured).
+   *  When usd.failClosed is true AND no prices are cached, returns true (blocks play).
+   *  When usd.failClosed is false (default), missing prices = cap not enforced. */
   usdCapExceeded(): boolean {
     if (!this.budget.usd) return false;
-    return this.usdAccumulator >= this.budget.usd.maxPerSession;
+    if (this.usdAccumulator >= this.budget.usd.maxPerSession) return true;
+    // If fail-closed and we have no price data yet, block
+    if (this.budget.usd.failClosed && this.usdAccumulator === 0 && this.spent.length > 0) {
+      // We've spent tokens but accumulated $0 USD — means no prices were available
+      return true;
+    }
+    return false;
   }
 
   /** Total USD spent (0 if no oracle or no USD cap). */

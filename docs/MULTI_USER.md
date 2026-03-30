@@ -134,9 +134,9 @@ Required additions to `.env`:
 MULTI_USER_ENABLED=true
 
 # Rake configuration (percentage of each deposit)
-RAKE_DEFAULT_PERCENT=1.0
-RAKE_MIN_PERCENT=0.5
-RAKE_MAX_PERCENT=3.0
+RAKE_DEFAULT_PERCENT=5.0
+RAKE_MIN_PERCENT=2.0
+RAKE_MAX_PERCENT=5.0
 
 # Deposit watcher polling interval (milliseconds)
 DEPOSIT_POLL_INTERVAL_MS=10000
@@ -331,7 +331,7 @@ Use the `operator_balance` MCP tool to view full accounting:
 
 ```json
 {
-  "platformBalance": 45.2,
+  "balances": { "hbar": 45.2 },
   "totalRakeCollected": 52.0,
   "totalGasSpent": 3.8,
   "totalWithdrawnByOperator": 3.0,
@@ -554,23 +554,25 @@ enabling cross-reference with on-chain token transfers.
 
 These tools are registered when the agent starts with `--multi-user --mcp-server`.
 
-| Tool                        | Parameters                                                        | Description                                                                 |
-|-----------------------------|-------------------------------------------------------------------|-----------------------------------------------------------------------------|
-| `multi_user_status`         | (none)                                                            | List all registered users with balances, strategy, rake, and last activity |
-| `multi_user_register`       | `accountId`, `eoaAddress`, `strategy`, `rakePercent?`             | Register a new user; returns deposit memo and funding instructions          |
-| `multi_user_deposit_info`   | `userId`                                                          | Get deposit memo and current balances for an existing user                  |
-| `multi_user_play`           | `userId?`                                                         | Play for a specific user, or all eligible users if omitted                  |
-| `multi_user_withdraw`       | `userId`, `amount`                                                | Withdraw funds to the user's Hedera account                                 |
-| `multi_user_deregister`     | `userId`                                                          | Deactivate a user; withdrawal-only after this                               |
-| `multi_user_play_history`   | `userId`, `limit?` (default 20)                                   | View play session history with pool-level results                           |
+Tools marked with (auth) require `auth_token` parameter when `MCP_AUTH_TOKEN` is set in `.env`.
+
+| Tool                        | Parameters                                                                 | Description                                                                 |
+|-----------------------------|---------------------------------------------------------------------------|-----------------------------------------------------------------------------|
+| `multi_user_status`         | (none)                                                                    | List all registered users with balances, strategy, rake, and last activity |
+| `multi_user_register` (auth)| `accountId`, `eoaAddress`, `strategy`, `rakePercent?`, `auth_token?`      | Register a new user; returns deposit memo and funding instructions          |
+| `multi_user_deposit_info`   | `userId`                                                                  | Get deposit memo and current balances for an existing user                  |
+| `multi_user_play` (auth)    | `userId?`, `auth_token?`                                                  | Play for a specific user, or all eligible users if omitted                  |
+| `multi_user_withdraw` (auth)| `userId`, `amount`, `token?` (default 'hbar'), `auth_token?`              | Withdraw funds to the user's Hedera account                                 |
+| `multi_user_deregister` (auth)| `userId`, `auth_token?`                                                 | Deactivate a user; withdrawal-only after this                               |
+| `multi_user_play_history`   | `userId`, `limit?` (default 20)                                           | View play session history with pool-level results                           |
 
 ### Operator Tools
 
-| Tool                        | Parameters                   | Description                                                          |
-|-----------------------------|------------------------------|----------------------------------------------------------------------|
-| `operator_balance`          | (none)                       | Platform balance, total rake, gas spent, net profit                  |
-| `operator_withdraw_fees`    | `amount`, `to`               | Withdraw HBAR from platform balance to a recipient account           |
-| `operator_health`           | (none)                       | Health snapshot: uptime, watcher status, errors, reserves            |
+| Tool                        | Parameters                                        | Description                                                          |
+|-----------------------------|---------------------------------------------------|----------------------------------------------------------------------|
+| `operator_balance`          | (none)                                            | Per-token platform balance, rake, gas, net profit                    |
+| `operator_withdraw_fees` (auth)| `amount`, `to`, `token?` (HBAR/LAZY), `auth_token?`| Withdraw rake fees to a recipient account                          |
+| `operator_health`           | (none)                                            | Health snapshot: uptime, watcher status, errors, reserves            |
 
 ### Parameter Details
 
@@ -585,7 +587,9 @@ These tools are registered when the agent starts with `--multi-user --mcp-server
 
 **`multi_user_withdraw`**:
 - `userId` (string, required): The user's internal ID (returned at registration).
-- `amount` (number, required): Must be positive and not exceed the user's available balance. The currency (HBAR or LAZY) is determined by the user's strategy configuration.
+- `amount` (number, required): Must be positive and not exceed the user's available balance for the specified token.
+- `token` (string, optional, default `'hbar'`): Token to withdraw — `"hbar"` for native HBAR, or a token ID (e.g., `"0.0.8011209"`) for fungible tokens.
+- `auth_token` (string, optional): Required when `MCP_AUTH_TOKEN` is set.
 
 ---
 
@@ -617,17 +621,23 @@ All multi-user environment variables, their defaults, and descriptions:
 | Variable                  | Default     | Required | Description                                                         |
 |---------------------------|-------------|----------|---------------------------------------------------------------------|
 | `MULTI_USER_ENABLED`      | `false`     | Yes      | Set to `true` to enable custodial mode                              |
-| `RAKE_DEFAULT_PERCENT`    | `1.0`       | No       | Default rake percentage applied to deposits                         |
-| `RAKE_MIN_PERCENT`        | `0.5`       | No       | Minimum allowed rake (floor for negotiation)                        |
-| `RAKE_MAX_PERCENT`        | `3.0`       | No       | Maximum allowed rake (ceiling for negotiation)                      |
+| `RAKE_DEFAULT_PERCENT`    | `5.0`       | No       | Default rake percentage applied to deposits                         |
+| `RAKE_MIN_PERCENT`        | `2.0`       | No       | Minimum allowed rake (floor for negotiation)                        |
+| `RAKE_MAX_PERCENT`        | `5.0`       | No       | Maximum allowed rake (ceiling for negotiation)                      |
 | `DEPOSIT_POLL_INTERVAL_MS`| `10000`     | No       | Mirror node polling interval in milliseconds                        |
 | `MAX_USER_BALANCE`        | `10000`     | No       | Maximum allowed balance per user (deposits above this are rejected) |
 | `HCS20_TOPIC_ID`          | (empty)     | No*      | HCS-20 accounting topic ID (set after `--deploy-accounting`)        |
 | `HCS20_TICK`              | `LLCRED`    | No       | HCS-20 token ticker symbol                                         |
+| `MCP_AUTH_TOKEN`          | (empty)     | No*      | Auth token for fund-moving MCP tools (strongly recommended)         |
+| `OPERATOR_WITHDRAW_ADDRESS`| (empty)    | No       | Restrict operator fee withdrawals to this address                   |
 | `HOL_API_KEY`             | (empty)     | No       | API key for HOL registry (needed for `--register`)                  |
 
 *`HCS20_TOPIC_ID` is not required for the agent to run, but without it, on-chain accounting
 is disabled and all `AccountingService` calls become no-ops with a warning log.
+
+*`MCP_AUTH_TOKEN`: When set, all fund-moving tools (play, withdraw, transfer, register,
+deregister) require an `auth_token` parameter matching this value. Without it, any
+connected MCP client can trigger financial operations. **Strongly recommended for production.**
 
 ### Internal Defaults (Not Configurable via Environment)
 
@@ -672,7 +682,7 @@ The `operator_health` MCP tool returns a structured health snapshot:
   "pendingReserves": 0,
   "errorCount": 0,
   "operator": {
-    "platformBalance": 45.2,
+    "balances": { "hbar": 45.2 },
     "totalRakeCollected": 52.0,
     "totalGasSpent": 3.8,
     "totalWithdrawnByOperator": 3.0
@@ -700,7 +710,7 @@ Deregistered users with remaining balances should be monitored until they withdr
 should be `0` when no play sessions are active. A non-zero value during idle periods
 indicates an incomplete session. On restart, orphaned reserves are automatically released.
 
-**Platform Balance**: `operator.platformBalance` is the operator's accumulated rake minus gas
+**Platform Balance**: `operator.balances` is the operator's accumulated rake minus gas
 costs minus withdrawals. If this goes negative, gas costs are exceeding rake income and the
 operator should adjust the rake or reduce play frequency.
 
@@ -728,11 +738,11 @@ wait 10-15 seconds and check again. The watcher polls at `DEPOSIT_POLL_INTERVAL_
 
 **Check**:
 1. User's `available` balance via `multi_user_status`.
-2. The strategy's `maxSpendPerSession` (from the frozen snapshot).
+2. The strategy's `tokenBudgets[token].maxPerSession` (from the frozen snapshot).
 3. The `minDepositAmount` configuration (default: 1).
 
 **Cause**: The user's available balance is below the minimum required for a play session.
-The agent reserves `min(maxSpendPerSession, available)` but requires at least
+The agent reserves `min(tokenBudgets[token].maxPerSession, available)` but requires at least
 `minDepositAmount` to proceed.
 
 ### User Cannot Deposit After Deregistration
@@ -761,7 +771,7 @@ is unaffected. However, no third-party verification is possible.
 
 ### Gas Costs Exceeding Rake Income
 
-**Symptom**: `operator.platformBalance` trending toward zero or negative.
+**Symptom**: `operator.balances` trending toward zero or negative.
 
 **Resolution**:
 1. Increase the default rake percentage (`RAKE_DEFAULT_PERCENT`).

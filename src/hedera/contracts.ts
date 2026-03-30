@@ -43,6 +43,8 @@ export interface TxResult {
   transactionId: string;
   receipt: TransactionReceipt;
   status: Status;
+  /** Estimated gas cost in HBAR (from gas parameter, not actual receipt fee). */
+  estimatedGasHbar: number;
 }
 
 export async function executeIntent(
@@ -63,10 +65,14 @@ export async function executeIntent(
   const txResponse: TransactionResponse = await tx.execute(client);
   const receipt = await txResponse.getReceipt(client);
 
+  // Estimate gas cost (Hedera charges ~0.000000082 HBAR per gas unit)
+  const estimatedGasHbar = intent.gas * 0.000000082;
+
   return {
     transactionId: txResponse.transactionId.toString(),
     receipt,
     status: receipt.status,
+    estimatedGasHbar,
   };
 }
 
@@ -89,10 +95,13 @@ export async function executeEncodedCall(
   const txResponse: TransactionResponse = await tx.execute(client);
   const receipt = await txResponse.getReceipt(client);
 
+  const estimatedGasHbar = gas * 0.000000082;
+
   return {
     transactionId: txResponse.transactionId.toString(),
     receipt,
     status: receipt.status,
+    estimatedGasHbar,
   };
 }
 

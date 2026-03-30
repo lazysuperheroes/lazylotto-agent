@@ -10,7 +10,9 @@
   "files": [
     "dist",
     "strategies",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    ".env.example"
   ],
   "scripts": {
     "build": "tsc && node -e \"const fs=require('fs'),f='dist/index.js',c=fs.readFileSync(f,'utf8');if(!c.startsWith('#!'))fs.writeFileSync(f,'#!/usr/bin/env node\\n'+c)\"",
@@ -44,6 +46,7 @@
     "@lazysuperheroes/lazy-lotto": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.28.0",
     "dotenv": "^17.3.1",
+    "ethers": "^6.16.0",
     "node-cron": "^4.2.1",
     "zod": "^4.3.6"
   },

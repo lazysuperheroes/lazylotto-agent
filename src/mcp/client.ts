@@ -9,7 +9,9 @@ export async function getMcpClient(): Promise<McpClient> {
   const url = process.env.LAZYLOTTO_MCP_URL;
   if (!url) throw new Error('Missing LAZYLOTTO_MCP_URL in environment');
 
-  mcpClient = new McpClient({ name: 'lazylotto-agent', version: '0.1.0' });
+  const { createRequire } = await import('node:module');
+  const pkg = createRequire(import.meta.url)('../../package.json') as { version: string };
+  mcpClient = new McpClient({ name: 'lazylotto-agent', version: pkg.version });
 
   const headers: Record<string, string> = {};
   const apiKey = process.env.LAZYLOTTO_MCP_API_KEY;
@@ -121,14 +123,6 @@ export async function getPool(poolId: number): Promise<PoolDetail> {
   return callTool('lazylotto_get_pool', { poolId });
 }
 
-export async function getPrizes(
-  poolId: number,
-  offset = 0,
-  limit = 20
-): Promise<PrizePackage[]> {
-  return callTool('lazylotto_get_prizes', { poolId, offset, limit });
-}
-
 export async function getUserState(address: string): Promise<UserState> {
   return callTool('lazylotto_get_user_state', { address });
 }
@@ -173,16 +167,6 @@ export async function roll(poolId: number, address: string, count?: number) {
   const args: Record<string, unknown> = { poolId, address };
   if (count !== undefined) args.count = count;
   return callTool('lazylotto_roll', args);
-}
-
-export async function transferPrizes(
-  address: string,
-  recipientAddress: string,
-  index?: number
-) {
-  const args: Record<string, unknown> = { address, recipientAddress };
-  if (index !== undefined) args.index = index;
-  return callTool('lazylotto_transfer_prizes', args);
 }
 
 export async function closeMcpClient(): Promise<void> {

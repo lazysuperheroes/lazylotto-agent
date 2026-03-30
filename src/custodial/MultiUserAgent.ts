@@ -1,12 +1,5 @@
-import {
-  Client,
-  AccountId,
-  Hbar,
-  TransferTransaction,
-  TokenId,
-} from '@hashgraph/sdk';
+import type { Client } from '@hashgraph/sdk';
 import { createClient, getOperatorAccountId } from '../hedera/wallet.js';
-import { HEDERA_DEFAULTS } from '../config/defaults.js';
 import { LottoAgent } from '../agent/LottoAgent.js';
 import { PersistentStore } from './PersistentStore.js';
 import { UserLedger } from './UserLedger.js';
@@ -21,7 +14,7 @@ import type {
   WithdrawalRecord,
   OperatorState,
 } from './types.js';
-import { UserNotFoundError, InsufficientBalanceError, UserInactiveError } from './types.js';
+import { UserNotFoundError, InsufficientBalanceError, UserInactiveError, hasAvailableToken, reserveSummary } from './types.js';
 import type { SessionReport } from '../agent/ReportGenerator.js';
 import { randomUUID } from 'node:crypto';
 
@@ -34,7 +27,7 @@ export interface AgentHealth {
   depositWatcherRunning: boolean;
   totalUsers: number;
   activeUsers: number;
-  pendingReserves: number;
+  pendingReserves: Record<string, number>;
   errorCount: number;
   operator: OperatorState;
 }
@@ -213,20 +206,31 @@ export class MultiUserAgent {
       throw new UserInactiveError(userId);
     }
 
-    // Determine how much to reserve from user's available balance.
-    // Use the first token budget's maxPerSession as a cap.
-    // TODO: Phase 4 will replace this with per-token reserve logic.
-    const firstTokenBudget = Object.values(user.strategySnapshot.budget.tokenBudgets)[0];
-    const maxSession = firstTokenBudget?.maxPerSession ?? user.balances.available;
-    const sessionBudget = Math.min(maxSession, user.balances.available);
+    // Select the token with the highest available balance to play with.
+    // Future enhancement: iterate all budgeted tokens and play each in sequence.
+    let primaryToken = 'hbar';
+    let bestAvailable = 0;
+    for (const tokenKey of Object.keys(user.strategySnapshot.budget.tokenBudgets)) {
+      const entry = user.balances.tokens[tokenKey];
+      if (entry && entry.available > bestAvailable) {
+        bestAvailable = entry.available;
+        primaryToken = tokenKey;
+      }
+    }
+    const firstTokenBudget = user.strategySnapshot.budget.tokenBudgets[primaryToken];
+    // Get available balance for the primary token
+    const tokenEntry = user.balances.tokens[primaryToken];
+    const tokenAvailable = tokenEntry?.available ?? 0;
+    const maxSession = firstTokenBudget?.maxPerSession ?? tokenAvailable;
+    const sessionBudget = Math.min(maxSession, tokenAvailable);
 
     if (sessionBudget < this.config.minDepositAmount) {
       this.releaseLock(userId);
-      throw new InsufficientBalanceError(userId, this.config.minDepositAmount, user.balances.available);
+      throw new InsufficientBalanceError(userId, this.config.minDepositAmount, tokenAvailable);
     }
 
     // Reserve funds before any on-chain interaction
-    this.ledger.reserve(userId, sessionBudget);
+    this.ledger.reserve(userId, sessionBudget, primaryToken);
 
     try {
       // Build a user-specific strategy with their EOA as prize destination
@@ -237,10 +241,7 @@ export class MultiUserAgent {
           ownerAddress: user.eoaAddress,
           transferToOwner: true,
         },
-        budget: {
-          ...user.strategySnapshot.budget,
-          maxSpendPerSession: sessionBudget,
-        },
+        // NO budget override — LottoAgent handles per-token budgets
       };
 
       // Create a fresh LottoAgent with user's strategy
@@ -249,12 +250,12 @@ export class MultiUserAgent {
 
       // Settle: deduct actual spend from reserved
       const actualSpent = report.totalSpent;
-      this.ledger.settleSpend(userId, actualSpent);
+      this.ledger.settleSpend(userId, actualSpent, primaryToken);
 
       // Release unused reserve
       const unused = sessionBudget - actualSpent;
       if (unused > 0) {
-        this.ledger.releaseReserve(userId, unused);
+        this.ledger.releaseReserve(userId, unused, primaryToken);
       }
 
       // Build play session result
@@ -323,9 +324,13 @@ export class MultiUserAgent {
     } catch (error) {
       // CRITICAL: release ALL reserved funds on failure
       try {
-        this.ledger.releaseReserve(userId, sessionBudget);
-      } catch {
-        /* already released or partially settled */
+        this.ledger.releaseReserve(userId, sessionBudget, primaryToken);
+      } catch (releaseErr) {
+        console.warn(
+          `[MultiUserAgent] Failed to release reserve for ${userId}: ` +
+            `${releaseErr instanceof Error ? releaseErr.message : releaseErr}. ` +
+            'Funds may be recovered on restart.',
+        );
       }
       throw error;
     } finally {
@@ -345,7 +350,7 @@ export class MultiUserAgent {
   async playForAllEligible(): Promise<PlaySessionResult[]> {
     const results: PlaySessionResult[] = [];
     const eligible = this.store.getAllUsers().filter(
-      (u) => u.active && u.balances.available >= this.config.minDepositAmount,
+      (u) => u.active && hasAvailableToken(u.balances, this.config.minDepositAmount),
     );
 
     // Play SEQUENTIALLY -- never interleave users (prize disambiguation)
@@ -373,53 +378,47 @@ export class MultiUserAgent {
    *
    * Uses per-user mutex to prevent concurrent withdrawals/plays.
    */
-  async processWithdrawal(userId: string, amount: number): Promise<WithdrawalRecord> {
+  async processWithdrawal(userId: string, amount: number, token: string = 'hbar'): Promise<WithdrawalRecord> {
     await this.acquireLock(userId);
     try {
       const user = this.store.getUser(userId);
       if (!user) throw new UserNotFoundError(userId);
 
-      // Reserve funds first — safe to release if transfer fails
-      this.ledger.reserve(userId, amount);
+      // Use the token parameter for withdrawal currency selection
+      const withdrawToken = token;
+      const isHbar = withdrawToken === 'hbar';
 
-      // Determine currency for this withdrawal
-      const firstKey = Object.keys(user.strategySnapshot.budget.tokenBudgets)[0] ?? 'hbar';
-      const withdrawCurrency = firstKey === 'hbar' ? 'HBAR' : 'LAZY';
+      // Reserve funds first — safe to release if transfer fails
+      this.ledger.reserve(userId, amount, withdrawToken);
       let transactionId: string;
       try {
-        // Execute TransferTransaction to user
-        const recipientId = AccountId.fromString(user.hederaAccountId);
-        const senderId = AccountId.fromString(getOperatorAccountId(this.client));
-        if (withdrawCurrency === 'HBAR') {
-          const tx = new TransferTransaction()
-            .addHbarTransfer(senderId, new Hbar(-amount))
-            .addHbarTransfer(recipientId, new Hbar(amount));
-          const response = await tx.execute(this.client);
-          await response.getReceipt(this.client);
-          transactionId = response.transactionId.toString();
+        const { transferHbar, transferToken } = await import('../hedera/transfers.js');
+        const sender = getOperatorAccountId(this.client);
+        if (isHbar) {
+          const result = await transferHbar(this.client, sender, user.hederaAccountId, amount);
+          transactionId = result.transactionId;
         } else {
-          const lazyTokenId = process.env.LAZY_TOKEN_ID;
-          if (!lazyTokenId) throw new Error('LAZY_TOKEN_ID not configured');
-          const baseUnits = Math.round(amount * Math.pow(10, HEDERA_DEFAULTS.lazyDecimals));
-          const tx = new TransferTransaction()
-            .addTokenTransfer(TokenId.fromString(lazyTokenId), senderId, -baseUnits)
-            .addTokenTransfer(TokenId.fromString(lazyTokenId), recipientId, baseUnits);
-          const response = await tx.execute(this.client);
-          await response.getReceipt(this.client);
-          transactionId = response.transactionId.toString();
+          // Use the actual token ID (not hardcoded LAZY) for any FT withdrawal
+          const result = await transferToken(this.client, sender, user.hederaAccountId, withdrawToken, amount);
+          transactionId = result.transactionId;
         }
       } catch (transferError) {
         // CRITICAL: release reserved funds on transfer failure
-        this.ledger.releaseReserve(userId, amount);
+        this.ledger.releaseReserve(userId, amount, withdrawToken);
         throw transferError;
       }
 
-      // Transfer succeeded — settle the withdrawal (deduct from reserved, update totals)
-      this.ledger.settleSpend(userId, amount);
-      this.store.updateBalance(userId, (b) => ({
-        ...b,
-        totalWithdrawn: b.totalWithdrawn + amount,
-      }));
+      // Transfer succeeded — settle the withdrawal
+      this.ledger.settleSpend(userId, amount, withdrawToken);
+      // Update totalWithdrawn on the specific token entry
+      this.store.updateBalance(userId, (b) => {
+        const entry = b.tokens[withdrawToken];
+        if (entry) entry.totalWithdrawn += amount;
+        return b;
+      });
+
+      // Flush immediately — critical for crash safety (prevents double-withdraw)
+      await this.store.flush();
 
       // Record via HCS-20 (non-blocking)
       try {
@@ -431,7 +430,7 @@ export class MultiUserAgent {
       const record: WithdrawalRecord = {
         userId,
         amount,
-        tokenId: withdrawCurrency === 'HBAR' ? null : process.env.LAZY_TOKEN_ID ?? null,
+        tokenId: isHbar ? null : withdrawToken,
         recipientAccountId: user.hederaAccountId,
         transactionId,
         timestamp: new Date().toISOString(),
@@ -457,9 +456,9 @@ export class MultiUserAgent {
   /**
    * Withdraw accumulated rake fees to the operator's recipient account.
    *
-   * 1. Validate operator has sufficient platformBalance
-   * 2. Execute HBAR TransferTransaction to the recipient
-   * 3. Update operator state: deduct platformBalance, increment totalWithdrawnByOperator
+   * 1. Validate operator has sufficient balance for the given token
+   * 2. Execute HBAR/LAZY TransferTransaction to the recipient
+   * 3. Update operator state: deduct from balances, increment totalWithdrawnByOperator
    * 4. Record via HCS-20 accounting
    * 5. Return the on-chain transaction ID
    */
@@ -468,40 +467,42 @@ export class MultiUserAgent {
     recipientAccountId: string,
     token: 'HBAR' | 'LAZY' = 'HBAR',
   ): Promise<string> {
-    const operator = this.store.getOperator();
-    if (operator.platformBalance < amount) {
-      throw new InsufficientBalanceError('operator', amount, operator.platformBalance);
+    // Restrict withdrawal to pre-configured address if set
+    const allowedAddress = process.env.OPERATOR_WITHDRAW_ADDRESS;
+    if (allowedAddress && recipientAccountId !== allowedAddress) {
+      throw new Error(
+        `Operator withdrawal restricted to ${allowedAddress}. ` +
+          `Requested: ${recipientAccountId}`
+      );
     }
 
-    const senderId = AccountId.fromString(getOperatorAccountId(this.client));
-    const recipientId = AccountId.fromString(recipientAccountId);
+    const operator = this.store.getOperator();
+    const tokenKey = token === 'HBAR' ? 'hbar' : (process.env.LAZY_TOKEN_ID ?? 'lazy');
+    const tokenBalance = operator.balances[tokenKey] ?? 0;
+    if (tokenBalance < amount) {
+      throw new InsufficientBalanceError('operator', amount, tokenBalance);
+    }
+
+    const { transferHbar, transferToken } = await import('../hedera/transfers.js');
+    const sender = getOperatorAccountId(this.client);
 
     let transactionId: string;
 
     if (token === 'HBAR') {
-      const tx = new TransferTransaction()
-        .addHbarTransfer(senderId, new Hbar(-amount))
-        .addHbarTransfer(recipientId, new Hbar(amount));
-      const response = await tx.execute(this.client);
-      await response.getReceipt(this.client);
-      transactionId = response.transactionId.toString();
+      const result = await transferHbar(this.client, sender, recipientAccountId, amount);
+      transactionId = result.transactionId;
     } else {
       const lazyTokenId = process.env.LAZY_TOKEN_ID;
       if (!lazyTokenId) throw new Error('LAZY_TOKEN_ID not configured');
-      const baseUnits = Math.round(amount * Math.pow(10, HEDERA_DEFAULTS.lazyDecimals));
-      const tx = new TransferTransaction()
-        .addTokenTransfer(TokenId.fromString(lazyTokenId), senderId, -baseUnits)
-        .addTokenTransfer(TokenId.fromString(lazyTokenId), recipientId, baseUnits);
-      const response = await tx.execute(this.client);
-      await response.getReceipt(this.client);
-      transactionId = response.transactionId.toString();
+      const result = await transferToken(this.client, sender, recipientAccountId, lazyTokenId, amount);
+      transactionId = result.transactionId;
     }
 
     // Update operator state
     this.store.updateOperator((op) => ({
       ...op,
-      platformBalance: op.platformBalance - amount,
-      totalWithdrawnByOperator: op.totalWithdrawnByOperator + amount,
+      balances: { ...op.balances, [tokenKey]: (op.balances[tokenKey] ?? 0) - amount },
+      totalWithdrawnByOperator: { ...op.totalWithdrawnByOperator, [tokenKey]: (op.totalWithdrawnByOperator[tokenKey] ?? 0) + amount },
     }));
 
     // Record via HCS-20 accounting (non-blocking)
@@ -543,7 +544,18 @@ export class MultiUserAgent {
       depositWatcherRunning: this.depositWatcher.isRunning(),
       totalUsers: allUsers.length,
       activeUsers: allUsers.filter((u) => u.active).length,
-      pendingReserves: allUsers.reduce((sum, u) => sum + u.balances.reserved, 0),
+      pendingReserves: reserveSummary(
+        allUsers.reduce(
+          (merged, u) => {
+            for (const [t, e] of Object.entries(u.balances.tokens)) {
+              if (!merged.tokens[t]) merged.tokens[t] = { available: 0, reserved: 0, totalDeposited: 0, totalWithdrawn: 0, totalRake: 0 };
+              merged.tokens[t].reserved += e.reserved;
+            }
+            return merged;
+          },
+          { tokens: {} } as import('./types.js').UserBalances
+        )
+      ),
       errorCount: this.errorCount,
       operator: this.store.getOperator(),
     };

@@ -1,7 +1,8 @@
 import type { PersistentStore } from './PersistentStore.js';
 import type { AccountingService } from './AccountingService.js';
-import type { UserAccount, UserBalances, DepositRecord } from './types.js';
-import { InsufficientBalanceError, UserNotFoundError, UserInactiveError } from './types.js';
+import type { UserAccount, UserBalances, DepositRecord, TokenBalanceEntry } from './types.js';
+import { InsufficientBalanceError, UserNotFoundError, UserInactiveError, getTokenEntry, emptyTokenEntry } from './types.js';
+import { roundForToken } from '../utils/math.js';
 
 // ── UserLedger ──────────────────────────────────────────────────
 //
@@ -42,9 +43,10 @@ export class UserLedger {
    * current balance without making any changes.
    *
    * @param userId      - Internal user identifier
-   * @param grossAmount - Total LAZY tokens received (1 decimal place)
+   * @param grossAmount - Total tokens received (1 decimal place for LAZY)
    * @param txId        - On-chain Hedera transaction ID (idempotency key)
    * @param rakePercent - Platform fee percentage (e.g. 1.0 for 1%)
+   * @param token       - Token identifier ("hbar" for native, token ID for FTs)
    * @returns Updated user balances
    */
   async creditDeposit(
@@ -52,6 +54,7 @@ export class UserLedger {
     grossAmount: number,
     txId: string,
     rakePercent: number,
+    token: string,
   ): Promise<UserBalances> {
     // 1. Idempotency check
     if (this.store.isTransactionProcessed(txId)) {
@@ -61,23 +64,31 @@ export class UserLedger {
     // 2. Validate user exists
     const user = this.getUserOrThrow(userId);
 
-    // 3. Calculate rake split
-    const rakeAmount = grossAmount * (rakePercent / 100);
-    const netAmount = grossAmount - rakeAmount;
+    // 3. Calculate rake split (rounded to token's decimal precision)
+    const rakeAmount = roundForToken(grossAmount * (rakePercent / 100), token);
+    const netAmount = roundForToken(grossAmount - rakeAmount, token);
 
     // 4. Credit user balance
-    const newBalances = this.store.updateBalance(userId, (b) => ({
-      ...b,
-      available: b.available + netAmount,
-      totalDeposited: b.totalDeposited + grossAmount,
-      totalRake: b.totalRake + rakeAmount,
-    }));
+    const newBalances = this.store.updateBalance(userId, (b) => {
+      const entry = b.tokens[token] ?? emptyTokenEntry();
+      return {
+        tokens: {
+          ...b.tokens,
+          [token]: {
+            ...entry,
+            available: entry.available + netAmount,
+            totalDeposited: entry.totalDeposited + grossAmount,
+            totalRake: entry.totalRake + rakeAmount,
+          },
+        },
+      };
+    });
 
     // 5. Credit operator (platform) rake
     this.store.updateOperator((op) => ({
       ...op,
-      platformBalance: op.platformBalance + rakeAmount,
-      totalRakeCollected: op.totalRakeCollected + rakeAmount,
+      balances: { ...op.balances, [token]: (op.balances[token] ?? 0) + rakeAmount },
+      totalRakeCollected: { ...op.totalRakeCollected, [token]: (op.totalRakeCollected[token] ?? 0) + rakeAmount },
     }));
 
     // 6. Persist deposit record
@@ -87,7 +98,7 @@ export class UserLedger {
       grossAmount,
       rakeAmount,
       netAmount,
-      tokenId: null,
+      tokenId: token === 'hbar' ? null : token,
       memo: user.depositMemo,
       timestamp: new Date().toISOString(),
     });
@@ -111,6 +122,9 @@ export class UserLedger {
       );
     }
 
+    // Flush immediately for financial durability (bypass debounce)
+    await this.store.flush();
+
     return newBalances;
   }
 
@@ -126,18 +140,25 @@ export class UserLedger {
    * @throws UserInactiveError        if user has been deregistered
    * @throws InsufficientBalanceError if available < amount
    */
-  reserve(userId: string, amount: number): UserBalances {
+  reserve(userId: string, amount: number, token: string): UserBalances {
+    amount = roundForToken(amount, token);
     const user = this.getUserOrThrow(userId);
     if (!user.active) throw new UserInactiveError(userId);
 
     return this.store.updateBalance(userId, (b) => {
-      if (b.available < amount) {
-        throw new InsufficientBalanceError(userId, amount, b.available);
+      const entry = b.tokens[token] ?? emptyTokenEntry();
+      if (entry.available < amount) {
+        throw new InsufficientBalanceError(userId, amount, entry.available);
       }
       return {
-        ...b,
-        available: b.available - amount,
-        reserved: b.reserved + amount,
+        tokens: {
+          ...b.tokens,
+          [token]: {
+            ...entry,
+            available: entry.available - amount,
+            reserved: entry.reserved + amount,
+          },
+        },
       };
     });
   }
@@ -147,11 +168,23 @@ export class UserLedger {
    *
    * Called once the on-chain lottery entries have been confirmed.
    */
-  settleSpend(userId: string, amountSpent: number): UserBalances {
-    return this.store.updateBalance(userId, (b) => ({
-      ...b,
-      reserved: b.reserved - amountSpent,
-    }));
+  settleSpend(userId: string, amountSpent: number, token: string): UserBalances {
+    amountSpent = roundForToken(amountSpent, token);
+    return this.store.updateBalance(userId, (b) => {
+      const entry = b.tokens[token] ?? emptyTokenEntry();
+      const deduction = Math.min(amountSpent, entry.reserved);
+      if (amountSpent > entry.reserved) {
+        console.warn(
+          `[UserLedger] settleSpend: amount ${amountSpent} > reserved ${entry.reserved} for ${userId}/${token}. Clamping.`
+        );
+      }
+      return {
+        tokens: {
+          ...b.tokens,
+          [token]: { ...entry, reserved: entry.reserved - deduction },
+        },
+      };
+    });
   }
 
   /**
@@ -160,12 +193,27 @@ export class UserLedger {
    * Called when a play session fails or is cancelled so the user's
    * funds are not permanently locked.
    */
-  releaseReserve(userId: string, amount: number): UserBalances {
-    return this.store.updateBalance(userId, (b) => ({
-      ...b,
-      available: b.available + amount,
-      reserved: b.reserved - amount,
-    }));
+  releaseReserve(userId: string, amount: number, token: string): UserBalances {
+    amount = roundForToken(amount, token);
+    return this.store.updateBalance(userId, (b) => {
+      const entry = b.tokens[token] ?? emptyTokenEntry();
+      const release = Math.min(amount, entry.reserved);
+      if (amount > entry.reserved) {
+        console.warn(
+          `[UserLedger] releaseReserve: amount ${amount} > reserved ${entry.reserved} for ${userId}/${token}. Clamping.`
+        );
+      }
+      return {
+        tokens: {
+          ...b.tokens,
+          [token]: {
+            ...entry,
+            available: entry.available + release,
+            reserved: entry.reserved - release,
+          },
+        },
+      };
+    });
   }
 
   // ── Withdrawals ───────────────────────────────────────────────
@@ -180,20 +228,30 @@ export class UserLedger {
    * @throws UserNotFoundError        if user does not exist
    * @throws InsufficientBalanceError if available < amount
    */
-  async processWithdrawal(userId: string, amount: number): Promise<UserBalances> {
+  async processWithdrawal(userId: string, amount: number, token: string): Promise<UserBalances> {
+    amount = roundForToken(amount, token);
     const user = this.getUserOrThrow(userId);
 
     // Atomic check-and-deduct
     const newBalances = this.store.updateBalance(userId, (b) => {
-      if (b.available < amount) {
-        throw new InsufficientBalanceError(userId, amount, b.available);
+      const entry = b.tokens[token] ?? emptyTokenEntry();
+      if (entry.available < amount) {
+        throw new InsufficientBalanceError(userId, amount, entry.available);
       }
       return {
-        ...b,
-        available: b.available - amount,
-        totalWithdrawn: b.totalWithdrawn + amount,
+        tokens: {
+          ...b.tokens,
+          [token]: {
+            ...entry,
+            available: entry.available - amount,
+            totalWithdrawn: entry.totalWithdrawn + amount,
+          },
+        },
       };
     });
+
+    // Flush immediately for financial durability (bypass debounce)
+    await this.store.flush();
 
     // Fire HCS-20 accounting (non-blocking)
     try {
@@ -237,10 +295,11 @@ export class UserLedger {
    * Returns true only if the user exists, is active, and has sufficient
    * available balance. Never throws.
    */
-  canAfford(userId: string, amount: number): boolean {
+  canAfford(userId: string, amount: number, token: string): boolean {
     const user = this.store.getUser(userId);
     if (!user) return false;
     if (!user.active) return false;
-    return user.balances.available >= amount;
+    const entry = user.balances.tokens[token];
+    return entry ? entry.available >= amount : amount <= 0;
   }
 }
