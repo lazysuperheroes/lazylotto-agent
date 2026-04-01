@@ -23,7 +23,8 @@ function isValidAccountId(value: string): boolean {
 }
 
 function isValidPrivateKey(value: string): boolean {
-  return /^(302[0-9a-fA-F]{2}|0x[0-9a-fA-F]+)/.test(value) && value.length >= 20;
+  // Accept DER-encoded (302e...), raw hex, or 0x-prefixed
+  return /^[0-9a-fA-F]+$/.test(value.replace(/^0x/, '')) && value.replace(/^0x/, '').length >= 20;
 }
 
 function isValidUrl(value: string): boolean {
@@ -44,11 +45,12 @@ export async function runWizard(): Promise<void> {
     prompt: string,
     opts: { default?: string; validate?: (v: string) => boolean; secret?: boolean } = {}
   ): Promise<string> => {
+    const hasDefault = 'default' in opts;
     const suffix = opts.default ? ` [${opts.default}]` : '';
     while (true) {
       const answer = (await rl.question(`  ${prompt}${suffix}: `)).trim();
       const value = answer || opts.default || '';
-      if (!value && !opts.default) {
+      if (!value && !hasDefault) {
         console.log('    Required. Please enter a value.');
         continue;
       }
@@ -113,10 +115,33 @@ export async function runWizard(): Promise<void> {
   });
 
   console.log('\n  NOTE: The key will be visible as you type.');
+  console.log('  You can paste either a DER-encoded key (starts with 302e/3030)');
+  console.log('  or a raw hex private key. If raw, we\'ll convert it for you.');
   console.log('  Alternatively, edit .env manually after the wizard completes.\n');
-  const privateKey = await ask('Agent Private Key (DER hex, starts with 302e)', {
+  let privateKey = await ask('Agent Private Key (DER or raw hex)', {
     validate: isValidPrivateKey,
   });
+
+  // If it doesn't look like DER, convert it
+  const isDer = /^30[0-9a-fA-F]{2}/.test(privateKey);
+  if (!isDer) {
+    const { PrivateKey } = await import('@hashgraph/sdk');
+    const keyType = await ask('Key type (ed25519 / ecdsa)', {
+      default: 'ed25519',
+      validate: (v) => v === 'ed25519' || v === 'ecdsa',
+    });
+    try {
+      const key = keyType === 'ecdsa'
+        ? PrivateKey.fromStringECDSA(privateKey.replace(/^0x/, ''))
+        : PrivateKey.fromStringED25519(privateKey.replace(/^0x/, ''));
+      privateKey = key.toStringDer();
+      console.log(`    Converted to DER: ${privateKey.slice(0, 12)}...`);
+    } catch (e) {
+      console.error(`    Failed to convert key: ${e instanceof Error ? e.message : e}`);
+      console.error('    Please provide a valid DER-encoded key instead.');
+      process.exit(1);
+    }
+  }
 
   // ── Step 3: Owner Wallet ────────────────────────────────────
 
@@ -165,7 +190,15 @@ export async function runWizard(): Promise<void> {
   }
 
   const lazylottoContract = await ask('LazyLotto Contract ID', {
-    default: isTestnet ? '0.0.8399255' : undefined,
+    default: isTestnet ? '0.0.8463358' : undefined,
+    validate: isValidAccountId,
+  });
+  const storageId = await ask('LazyLotto Storage ID', {
+    default: isTestnet ? '0.0.8463338' : undefined,
+    validate: isValidAccountId,
+  });
+  const poolManagerId = await ask('Pool Manager ID', {
+    default: isTestnet ? '0.0.8463369' : undefined,
     validate: isValidAccountId,
   });
   const gasStationId = await ask('GasStation Contract ID', {
@@ -176,18 +209,17 @@ export async function runWizard(): Promise<void> {
     default: isTestnet ? '0.0.8011209' : undefined,
     validate: isValidAccountId,
   });
-  const storageId = await ask('Storage Contract ID (optional)', {
-    default: '',
-  });
 
   // ── Step 7: Delegation (optional) ───────────────────────────
 
   console.log('\n--- Step 7: Delegation (optional) ---\n');
   console.log('  If you have LSH NFTs delegated to this agent,');
-  console.log('  provide the registry address for --audit checks.\n');
+  console.log('  provide the registry address and token IDs for --audit checks.');
+  console.log('  The agent will check which NFTs from these collections are');
+  console.log('  delegated to it, giving you a win rate boost.\n');
 
   const delegateRegistryId = await ask('Delegate Registry ID (optional)', { default: '' });
-  const lshTokenId = await ask('LSH Token ID (optional)', { default: '' });
+  const lshTokenIds = await ask('LSH Token IDs (comma-separated, optional)', { default: '' });
 
   // ── Write .env ──────────────────────────────────────────────
 
@@ -207,6 +239,7 @@ export async function runWizard(): Promise<void> {
     '# LazyLotto Contract Addresses',
     `LAZYLOTTO_CONTRACT_ID=${lazylottoContract}`,
     `LAZYLOTTO_STORAGE_ID=${storageId}`,
+    `LAZYLOTTO_POOL_MANAGER_ID=${poolManagerId}`,
     `LAZY_GAS_STATION_ID=${gasStationId}`,
     `LAZY_TOKEN_ID=${lazyTokenId}`,
     '',
@@ -216,9 +249,9 @@ export async function runWizard(): Promise<void> {
     '# Strategy',
     `STRATEGY=${strategy}`,
     '',
-    '# Delegate Registry (optional)',
+    '# Delegate Registry (optional — for win rate boost audit)',
     `DELEGATE_REGISTRY_ID=${delegateRegistryId}`,
-    `LSH_TOKEN_ID=${lshTokenId}`,
+    `LSH_TOKEN_IDS=${lshTokenIds}`,
     '',
     '# HOL Registry (optional)',
     'HOL_API_KEY=',

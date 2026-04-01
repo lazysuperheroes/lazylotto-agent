@@ -18,7 +18,6 @@ const mockPools = [
   {
     poolId: 1,
     name: 'LAZY Pool',
-    winRate: 10_000_000,
     winRatePercent: 10,
     entryFee: 5,
     feeTokenSymbol: 'LAZY',
@@ -26,11 +25,11 @@ const mockPools = [
     outstandingEntries: 10,
     paused: false,
     closed: false,
+    trustLevel: null,
   },
   {
     poolId: 2,
     name: 'Paused Pool',
-    winRate: 50_000_000,
     winRatePercent: 50,
     entryFee: 2,
     feeTokenSymbol: 'LAZY',
@@ -38,6 +37,7 @@ const mockPools = [
     outstandingEntries: 0,
     paused: true,
     closed: false,
+    trustLevel: null,
   },
 ];
 
@@ -187,6 +187,7 @@ describe('Agent Play Loop (integration)', () => {
           poolName: sp.pool.name,
           entriesBought: batch,
           amountSpent: sp.pool.entryFee * batch,
+          feeTokenSymbol: sp.pool.feeTokenSymbol,
           rolled: true,
           wins: 0,
           prizesClaimed: 0,
@@ -245,6 +246,7 @@ describe('Agent Play Loop (integration)', () => {
         poolName: 'Pool A',
         entriesBought: 3,
         amountSpent: 15,
+        feeTokenSymbol: 'HBAR',
         rolled: true,
         wins: 1,
         prizesClaimed: 0,
@@ -256,6 +258,7 @@ describe('Agent Play Loop (integration)', () => {
         poolName: 'Pool B',
         entriesBought: 2,
         amountSpent: 10,
+        feeTokenSymbol: 'HBAR',
         rolled: true,
         wins: 0,
         prizesClaimed: 0,
@@ -292,6 +295,7 @@ describe('Agent Play Loop (integration)', () => {
             poolName: pool.name,
             entriesBought: 2,
             amountSpent: 10,
+            feeTokenSymbol: 'HBAR',
             rolled: true,
             wins: 0,
             prizesClaimed: 0,
@@ -304,6 +308,7 @@ describe('Agent Play Loop (integration)', () => {
             poolName: pool.name,
             entriesBought: 0,
             amountSpent: 0,
+            feeTokenSymbol: 'HBAR',
             rolled: false,
             wins: 0,
             prizesClaimed: 0,
@@ -329,7 +334,7 @@ describe('Agent Play Loop (integration)', () => {
       smallBudget.recordSpend(1, 10, 'hbar', 2);
       reportGenerator.addPoolResult({
         poolId: 1, poolName: 'Pool 1', entriesBought: 2,
-        amountSpent: 10, rolled: true, wins: 0, prizesClaimed: 0, prizesTransferred: 0,
+        amountSpent: 10, feeTokenSymbol: 'HBAR', rolled: true, wins: 0, prizesClaimed: 0, prizesTransferred: 0,
       });
 
       // Pool 2: budget only has 2 left, can't afford entryFee=5

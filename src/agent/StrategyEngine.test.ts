@@ -41,7 +41,6 @@ function makePool(overrides: Partial<PoolSummary> = {}): PoolSummary {
   return {
     poolId: 1,
     name: 'Test Pool',
-    winRate: 10000000,
     winRatePercent: 10,
     entryFee: 5,
     feeTokenSymbol: 'LAZY',
@@ -49,6 +48,7 @@ function makePool(overrides: Partial<PoolSummary> = {}): PoolSummary {
     outstandingEntries: 10,
     paused: false,
     closed: false,
+    trustLevel: null,
     ...overrides,
   };
 }

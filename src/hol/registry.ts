@@ -60,8 +60,7 @@ function saveAgentConfig(config: AgentConfig): void {
 
 // ── Profile builder ───────────────────────────────────────────
 
-function buildAgentProfile(network: string) {
-  const builder = new AgentBuilder();
+function buildAgentProfile(hcs11: any) {
   const isMultiUser = process.env.MULTI_USER_ENABLED === 'true';
 
   const capabilities = [
@@ -77,43 +76,28 @@ function buildAgentProfile(network: string) {
   const bio = isMultiUser
     ? 'Multi-user custodial agent that plays LazyLotto on Hedera on behalf of multiple users. ' +
       'Accepts deposits via memo-tagged transfers, plays with configurable strategies, ' +
-      'routes prizes to user EOAs, and provides full on-chain HCS-20 accounting. ' +
-      'Negotiable rake fee. Shared NFT boost benefits all users.'
+      'routes prizes to user EOAs, and provides full on-chain HCS-20 accounting.'
     : 'Autonomous agent that plays LazyLotto on Hedera. Evaluates pools by expected value, ' +
-      'buys entries, rolls for prizes, and transfers winnings to the owner wallet. ' +
-      'Configurable strategy with budget controls and win rate boost via NFT delegation.';
+      'buys entries, rolls for prizes, and transfers winnings to the owner wallet.';
 
-  builder
-    .setName('LazyLotto Player Agent')
-    .setAlias('lazylotto-player')
-    .setBio(bio)
-    .setType('autonomous')
-    .setCapabilities(capabilities)
-    .setModel('claude-opus-4')
-    .setCreator('Lazy Superheroes')
-    .addSocial('website', 'https://lazylotto.app')
-    .addSocial('twitter', '@LazySuperhero')
-    .addProperty('game', 'LazyLotto')
-    .addProperty('chain', 'hedera')
-    .addProperty('protocol', 'HCS-10')
-    .setNetwork(network);
-
-  if (isMultiUser) {
-    builder.setInboundTopicType(InboundTopicType.FEE_BASED);
-    builder.addProperty('multiUser', true);
-    builder.addProperty('rakePercent', Number(process.env.RAKE_DEFAULT_PERCENT ?? 1));
-  } else {
-    builder.setInboundTopicType(InboundTopicType.PUBLIC);
-  }
-
-  // Use existing account (the agent's wallet)
-  const accountId = process.env.HEDERA_ACCOUNT_ID;
-  const privateKey = process.env.HEDERA_PRIVATE_KEY;
-  if (accountId && privateKey) {
-    builder.setExistingAccount(accountId, privateKey);
-  }
-
-  return builder.build();
+  // Use createAIAgentProfile which produces the correct HCS-11 schema
+  // (AgentBuilder.build() produces a flat structure that fails validation)
+  return hcs11.createAIAgentProfile(
+    'LazyLotto Player Agent',   // display_name
+    1,                           // AIAgentType.AUTONOMOUS
+    capabilities,
+    'rule-based/ev-scoring',     // autonomous EV engine, optionally controlled by LLM via MCP
+    {
+      alias: 'lazylotto-player',
+      bio,
+      creator: 'Lazy Superheroes',
+      socials: [{ platform: 'website', handle: 'https://lazylotto.app' }],
+      properties: {
+        game: 'LazyLotto',
+        chain: 'hedera',
+      },
+    }
+  );
 }
 
 // ── Registration flow ─────────────────────────────────────────
@@ -152,8 +136,14 @@ export async function ensureRegistered(opts?: {
     auth: { operatorId: accountId, privateKey },
   });
 
-  // Build profile
-  const profile = buildAgentProfile(network);
+  // Build profile using HCS11Client's createAIAgentProfile (produces valid HCS-11 schema)
+  const profile = buildAgentProfile(hcs11);
+
+  // If profile already inscribed but broker registration failed, skip inscription
+  if (existing?.profileTopicId && !existing?.uaid && existing.network === network) {
+    log(`HOL: Profile already inscribed (${existing.profileTopicId}). Retrying broker registration...`);
+    return await registerWithBroker(hcs11, profile, existing, network, accountId, log);
+  }
 
   // If we have an existing registration but need to update
   if (existing?.uaid && forceUpdate) {
@@ -175,10 +165,12 @@ async function newRegistration(
 ): Promise<AgentConfig> {
   // Step 1: Inscribe profile to Hedera (creates HCS topic)
   log('  Inscribing HCS-11 profile...');
+
   const inscribed = await (hcs11 as any).createAndInscribeProfile(profile, true);
 
-  if (!inscribed.success) {
-    throw new Error(`Profile inscription failed: ${inscribed.error}`);
+  if (!inscribed?.success) {
+    const detail = inscribed?.error ?? JSON.stringify(inscribed);
+    throw new Error(`Profile inscription failed: ${detail}`);
   }
 
   log(`  Profile topic: ${inscribed.profileTopicId}`);
@@ -186,10 +178,42 @@ async function newRegistration(
     log(`  Inscription cost: ${inscribed.totalCostHbar} HBAR`);
   }
 
-  // Step 2: Register with Registry Broker
-  const apiKey = process.env.HOL_API_KEY;
+  // Save partial config immediately so we don't re-inscribe on retry
+  const partialConfig: AgentConfig = {
+    profileTopicId: inscribed.profileTopicId,
+    uaid: null,
+    inboundTopicId: inscribed.inboundTopicId ?? null,
+    outboundTopicId: inscribed.outboundTopicId ?? null,
+    registeredAt: new Date().toISOString(),
+    updatedAt: null,
+    network,
+    accountId,
+  };
+  saveAgentConfig(partialConfig);
+  log(`  Saved partial config (profile inscribed, broker pending)`);
+
+  // Step 2: Register with broker (reuses the partial config)
+  return await registerWithBroker(hcs11, profile, partialConfig, network, accountId, log);
+}
+
+async function registerWithBroker(
+  hcs11: InstanceType<typeof HCS11Client>,
+  profile: any,
+  partialConfig: AgentConfig,
+  network: string,
+  accountId: string,
+  log: (...args: unknown[]) => void
+): Promise<AgentConfig> {
+  const apiKey = process.env.HOL_API_KEY ?? process.env.REGISTRY_BROKER_API_KEY;
+  if (!apiKey) {
+    log('  WARNING: No API key set. Broker registration requires authentication.');
+    log('  Run: npx @hol-org/registry claim');
+    log('  Then set HOL_API_KEY=rbk_... in .env and re-run --register');
+    return partialConfig;
+  }
+
   const brokerClient = new RegistryBrokerClient({
-    ...(apiKey ? { apiKey } : {}),
+    apiKey,
     accountId,
   });
 
@@ -197,48 +221,54 @@ async function newRegistration(
 
   log('  Registering with HOL registry broker...');
 
-  const registration = await brokerClient.registerAgent({
-    profile: JSON.parse(profileJson),
-    metadata: {
-      category: 'gaming',
-      provider: 'lazy-superheroes',
-      openConvAICompatible: true,
-      customFields: {
-        game: 'lazylotto',
-        chain: 'hedera',
-      },
-    },
-  });
-
   let uaid: string;
-  if (registration.status === 'success') {
-    uaid = registration.uaid;
-  } else if (registration.status === 'pending') {
-    log('  Waiting for registration confirmation...');
-    const completed = await brokerClient.waitForRegistrationCompletion(
-      registration.attemptId,
-      {
-        timeoutMs: 60_000,
-        onProgress: (p: any) => log(`  Progress: ${p.status}`),
-      }
-    );
-    uaid = completed.uaid;
-  } else {
-    // partial
-    uaid = registration.uaid;
+  try {
+    const registration = await brokerClient.registerAgent({
+      profile: JSON.parse(profileJson),
+      metadata: {
+        category: 'gaming',
+        provider: 'lazy-superheroes',
+        openConvAICompatible: true,
+        customFields: {
+          game: 'lazylotto',
+          chain: 'hedera',
+        },
+      },
+    });
+
+    if (registration.status === 'success') {
+      uaid = registration.uaid;
+    } else if (registration.status === 'pending') {
+      log('  Waiting for registration confirmation...');
+      const completed = await brokerClient.waitForRegistrationCompletion(
+        registration.attemptId,
+        {
+          timeoutMs: 60_000,
+          onProgress: (p: any) => log(`  Progress: ${p.status}`),
+        }
+      );
+      uaid = completed.uaid;
+    } else {
+      uaid = (registration as any).uaid;
+    }
+  } catch (e: any) {
+    // The SDK's Zod schema may not handle all broker response shapes (e.g., 'pending' status).
+    // Extract the UAID from the raw response if available.
+    const raw = e?.rawValue;
+    if (raw?.success && raw?.uaid) {
+      log(`  Broker returned non-standard response (${raw.status}), but registration succeeded.`);
+      uaid = raw.uaid;
+    } else {
+      throw e;
+    }
   }
 
   log(`  Registered! UAID: ${uaid}`);
 
   const config: AgentConfig = {
-    profileTopicId: inscribed.profileTopicId,
+    ...partialConfig,
     uaid,
-    inboundTopicId: inscribed.inboundTopicId ?? null,
-    outboundTopicId: inscribed.outboundTopicId ?? null,
     registeredAt: new Date().toISOString(),
-    updatedAt: null,
-    network,
-    accountId,
   };
 
   saveAgentConfig(config);

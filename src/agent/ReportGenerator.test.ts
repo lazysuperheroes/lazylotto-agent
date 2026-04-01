@@ -9,6 +9,7 @@ describe('ReportGenerator', () => {
       poolName: 'Pool A',
       entriesBought: 3,
       amountSpent: 15,
+      feeTokenSymbol: 'HBAR',
       rolled: true,
       wins: 1,
       prizesClaimed: 0,

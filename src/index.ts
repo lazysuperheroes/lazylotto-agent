@@ -14,6 +14,16 @@ import cron from 'node-cron';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+/** Wait for Enter then force-exit. Used by one-shot commands on Windows
+ *  where open gRPC/MCP connections prevent clean process exit. */
+async function exitGracefully(): Promise<never> {
+  const { createInterface } = await import('node:readline/promises');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  await rl.question('\nPress Enter to exit...');
+  rl.close();
+  process.exit(0);
+}
+
 /**
  * Resolve token aliases in strategy tokenBudgets.
  * "lazy" → actual LAZY_TOKEN_ID from env. "hbar" stays as-is.
@@ -140,17 +150,17 @@ async function main(): Promise<void> {
   if (args.includes('--register')) {
     const { ensureRegistered } = await import('./hol/registry.js');
     await ensureRegistered({ forceUpdate: args.includes('--force') });
-    return;
+    await exitGracefully();
   }
 
   if (args.includes('--setup')) {
     await agent.setup();
-    return;
+    await exitGracefully();
   }
 
   if (args.includes('--status')) {
     await agent.status();
-    return;
+    await exitGracefully();
   }
 
   if (args.includes('--audit')) {
@@ -158,7 +168,7 @@ async function main(): Promise<void> {
     const audit = new AuditReport(agent.getClient(), strategy);
     const result = await audit.generate();
     audit.print(result);
-    return;
+    await exitGracefully();
   }
 
   if (args.includes('--multi-user')) {
@@ -172,7 +182,7 @@ async function main(): Promise<void> {
       const topicId = await multiAgent.deployAccounting();
       console.log(`HCS-20 deployed. Topic: ${topicId}`);
       console.log(`Add to .env: HCS20_TOPIC_ID=${topicId}`);
-      return;
+      await exitGracefully();
     }
 
     if (args.includes('--mcp-server')) {
@@ -255,13 +265,13 @@ async function main(): Promise<void> {
     else if (existsSync(singlePath)) playsPath = singlePath;
     if (!playsPath) {
       console.log('No play history found. Play a session first.');
-      return;
+      await exitGracefully();
     }
     const raw = JSON.parse(readFileSync(playsPath, 'utf-8'));
     const plays = (Array.isArray(raw) ? raw : raw.sessions ?? []) as Array<Record<string, unknown>>;
     if (plays.length === 0) {
       console.log('Play history is empty.');
-      return;
+      await exitGracefully();
     }
     const headers = Object.keys(plays[0]);
     const csv = [
@@ -277,7 +287,7 @@ async function main(): Promise<void> {
     const outPath = `play-history-${Date.now()}.csv`;
     writeFileSync(outPath, csv, 'utf-8');
     console.log(`Exported ${plays.length} session(s) to ${outPath}`);
-    return;
+    await exitGracefully();
   }
 
   if (args.includes('--dry-run')) {
@@ -315,11 +325,12 @@ async function main(): Promise<void> {
     } finally {
       try { await closeMcpClient(); } catch { /* */ }
     }
-    return;
+    await exitGracefully();
   }
 
   // Default: single play session
   await agent.play();
+  await exitGracefully();
 }
 
 main().catch((e) => {

@@ -3,6 +3,7 @@ export interface PoolResult {
   poolName: string;
   entriesBought: number;
   amountSpent: number;
+  feeTokenSymbol: string;
   rolled: boolean;
   wins: number;
   prizesClaimed: number;
@@ -17,6 +18,7 @@ export interface SessionReport {
   poolsPlayed: number;
   totalEntries: number;
   totalSpent: number;
+  spentByToken: Record<string, number>;
   totalWins: number;
   totalPrizesClaimed: number;
   totalPrizesTransferred: number;
@@ -49,6 +51,11 @@ export class ReportGenerator {
 
   generate(): SessionReport {
     const now = new Date();
+    const spentByToken: Record<string, number> = {};
+    for (const r of this.poolResults) {
+      const sym = r.feeTokenSymbol || 'HBAR';
+      spentByToken[sym] = (spentByToken[sym] ?? 0) + r.amountSpent;
+    }
     return {
       startedAt: this.startedAt.toISOString(),
       endedAt: now.toISOString(),
@@ -57,6 +64,7 @@ export class ReportGenerator {
       poolsPlayed: this.poolResults.length,
       totalEntries: this.poolResults.reduce((s, r) => s + r.entriesBought, 0),
       totalSpent: this.poolResults.reduce((s, r) => s + r.amountSpent, 0),
+      spentByToken,
       totalWins: this.poolResults.reduce((s, r) => s + r.wins, 0),
       totalPrizesClaimed: this.poolResults.reduce((s, r) => s + r.prizesClaimed, 0),
       totalPrizesTransferred: this.poolResults.reduce((s, r) => s + r.prizesTransferred, 0),
@@ -73,21 +81,22 @@ export class ReportGenerator {
     console.log(`Duration:    ${report.startedAt} → ${report.endedAt}`);
     console.log(`Pools:       ${report.poolsPlayed} played / ${report.poolsEvaluated} evaluated`);
     console.log(`Entries:     ${report.totalEntries}`);
-    console.log(`Spent:       ${report.totalSpent} ${report.currency}`);
+    const spentParts = Object.entries(report.spentByToken)
+      .map(([sym, amt]) => `${amt} ${sym}`)
+      .join(' + ');
+    console.log(`Spent:       ${spentParts || '0'}`);
     console.log(`Wins:        ${report.totalWins}`);
-    console.log(`Claimed:     ${report.totalPrizesClaimed}`);
-    console.log(`Transferred: ${report.totalPrizesTransferred}`);
     console.log('───────────────────────────────────────');
 
     for (const r of report.poolResults) {
       const status = r.wins > 0 ? '🏆' : '·';
       console.log(
-        `  ${status} Pool #${r.poolId} (${r.poolName}): ${r.entriesBought} entries, ${r.amountSpent} ${report.currency}, ${r.wins} wins`
+        `  ${status} Pool #${r.poolId} (${r.poolName}): ${r.entriesBought} entries, ${r.amountSpent} ${r.feeTokenSymbol}, ${r.wins} wins`
       );
     }
 
     console.log('───────────────────────────────────────');
-    console.log(`Spent:       -${report.totalSpent} ${report.currency}`);
+    console.log(`Spent:       ${spentParts || '0'}`);
     if (report.totalWins > 0) {
       console.log(`Prizes:      ${report.totalWins} won (transferred to owner, claim from dApp)`);
     }

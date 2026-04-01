@@ -98,27 +98,50 @@ export class LottoAgent {
     console.log(`Network: ${info.network}`);
     console.log(`HBAR:    ${info.hbarBalance}`);
 
-    const sys = await this.loadSystemInfo();
-    console.log(`LazyLotto: ${sys.contractAddresses.lazyLotto}`);
-    console.log(`Pools:     ${sys.totalPools}`);
-
-    const lazyTokenId = process.env.LAZY_TOKEN_ID ?? sys.lazyToken;
+    let sys: SystemInfo | null = null;
     try {
-      await associateToken(this.client, lazyTokenId);
-      console.log(`Associated LAZY token: ${lazyTokenId}`);
-    } catch (e: unknown) {
-      if (errorMsg(e).includes('TOKEN_ALREADY_ASSOCIATED')) {
-        console.log('LAZY token already associated.');
-      } else throw e;
+      sys = await this.loadSystemInfo();
+      console.log(`LazyLotto: ${sys.contractAddresses?.lazyLotto ?? 'from .env'}`);
+      console.log(`Pools:     ${sys.totalPools ?? 'unknown'}`);
+    } catch (e) {
+      console.warn(`Could not load system info from MCP: ${errorMsg(e)}`);
+      console.warn('Using contract addresses from .env instead.');
     }
 
-    await setupApprovals(this.client, {
-      lazyTokenId,
-      gasStationId:
-        process.env.LAZY_GAS_STATION_ID ?? sys.contractAddresses.gasStation,
-      storageId:
-        process.env.LAZYLOTTO_STORAGE_ID ?? sys.contractAddresses.storage,
-    });
+    const lazyTokenId = process.env.LAZY_TOKEN_ID ?? sys?.lazyToken;
+    if (lazyTokenId) {
+      try {
+        await associateToken(this.client, lazyTokenId);
+        console.log(`Associated LAZY token: ${lazyTokenId}`);
+      } catch (e: unknown) {
+        if (errorMsg(e).includes('TOKEN_ALREADY_ASSOCIATED')) {
+          console.log('LAZY token already associated.');
+        } else throw e;
+      }
+    }
+
+    const gasStationId = process.env.LAZY_GAS_STATION_ID ?? sys?.contractAddresses?.gasStation;
+    const storageId = process.env.LAZYLOTTO_STORAGE_ID ?? sys?.contractAddresses?.storage;
+
+    if (!lazyTokenId) {
+      console.warn('LAZY_TOKEN_ID not set — skipping token setup. Set it in .env.');
+    }
+    if (!gasStationId) {
+      console.warn('LAZY_GAS_STATION_ID not set — skipping approvals. Set it in .env.');
+    }
+
+    if (lazyTokenId && gasStationId) {
+      await setupApprovals(this.client, {
+        lazyTokenId,
+        gasStationId,
+        storageId: storageId ?? '',
+      });
+    }
+
+    // Close connections so process can exit
+    try { await closeMcpClient(); } catch { /* best-effort */ }
+    try { this.client.close(); } catch { /* best-effort */ }
+
     console.log('Setup complete.');
   }
 
@@ -344,11 +367,15 @@ export class LottoAgent {
 
     // Paginate through all available pools
     while (true) {
-      const page = await listPools(
+      const pageRaw = await listPools(
         this.strategy.poolFilter.type,
         offset,
         pageSize
       );
+      // MCP may return an array directly or a wrapper like { pools: [...] }
+      const page = Array.isArray(pageRaw)
+        ? pageRaw
+        : (pageRaw as any)?.pools ?? (pageRaw as any)?.data ?? [];
       all.push(...page);
       if (page.length < pageSize) break;
       offset += pageSize;
@@ -425,6 +452,7 @@ export class LottoAgent {
       poolName: sp.pool.name,
       entriesBought: 0,
       amountSpent: 0,
+      feeTokenSymbol: sp.pool.feeTokenSymbol,
       rolled: false,
       wins: 0,
       prizesClaimed: 0,
@@ -450,6 +478,7 @@ export class LottoAgent {
       poolName: pool.name,
       entriesBought: 0,
       amountSpent: 0,
+      feeTokenSymbol: pool.feeTokenSymbol,
       rolled: false,
       wins: 0,
       prizesClaimed: 0,

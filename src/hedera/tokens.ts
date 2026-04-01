@@ -87,13 +87,13 @@ export async function setupApprovals(
 ): Promise<void> {
   const { lazyTokenId, gasStationId, storageId, lazyAmount = 10_000 } = options;
 
+  // LAZY → GasStation (the GasStation handles LAZY burns for entry fees)
   console.log(`Approving ${lazyAmount} LAZY to GasStation (${gasStationId})...`);
   await approveFungibleToken(client, lazyTokenId, gasStationId, lazyAmount);
 
-  if (storageId) {
-    console.log(`Approving ${lazyAmount} LAZY to Storage (${storageId})...`);
-    await approveFungibleToken(client, lazyTokenId, storageId, lazyAmount);
-  }
+  // NOTE: Do NOT approve LAZY to Storage. LAZY is a special case that routes
+  // through GasStation. Other FTs (non-LAZY) would need Storage approval,
+  // but that's handled per-pool via prerequisite checks, not here.
 
   console.log('Approvals complete.');
 }

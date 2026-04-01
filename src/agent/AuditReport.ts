@@ -16,7 +16,7 @@ import { hbarToNumber, tokenBalanceToNumber } from '../utils/format.js';
 // MCP client is optional — loaded lazily to avoid blocking module init
 async function tryGetUserState(
   accountId: string
-): Promise<{ pendingPrizesCount: number; boost: number } | null> {
+): Promise<{ pendingPrizesCount: number; boost: number | { rawBps: number; percent: number } } | null> {
   try {
     const { getUserState } = await import('../mcp/client.js');
     return await getUserState(accountId);
@@ -41,6 +41,7 @@ export interface AuditResult {
 
   boost: {
     totalBps: number;
+    percent: number;
   } | null;
 
   delegation: {
@@ -87,7 +88,7 @@ export interface AuditResult {
     gasStation: string | null;
     delegateRegistry: string | null;
     lazyToken: string | null;
-    lshToken: string | null;
+    lshTokens: string[];
   };
 
   hol: {
@@ -168,34 +169,50 @@ export class AuditReport {
     // ── Boost ───────────────────────────────────────────────
     let boost: AuditResult['boost'] = null;
     if (userState) {
-      boost = { totalBps: userState.boost };
-      if (userState.boost === 0) {
-        recommendations.push(
-          'Win rate boost is 0. Delegate LSH NFTs to this agent for bonus win rate.'
-        );
+      // boost comes as { rawBps, percent } object or a plain number
+      let boostBps: number;
+      let boostPercent: number;
+      if (typeof userState.boost === 'number') {
+        boostBps = userState.boost;
+        boostPercent = userState.boost / 1_000_000; // raw bps to percent
+      } else {
+        boostBps = userState.boost.rawBps ?? 0;
+        boostPercent = userState.boost.percent ?? 0;
       }
+      boost = { totalBps: boostBps, percent: boostPercent };
     }
 
     // ── Delegation ──────────────────────────────────────────
     let delegation: AuditResult['delegation'] = null;
     const registryId = env('DELEGATE_REGISTRY_ID');
-    const lshTokenId = env('LSH_TOKEN_ID');
+    // Support comma-separated list of LSH token IDs (multiple collections)
+    const lshTokenIdsRaw = env('LSH_TOKEN_IDS') ?? env('LSH_TOKEN_ID') ?? '';
+    const lshTokenIds = lshTokenIdsRaw.split(',').map(s => s.trim()).filter(Boolean);
 
     if (registryId) {
       try {
-        if (lshTokenId) {
-          const serials = await getSerialsDelegatedTo(
-            this.client,
-            registryId,
-            accountId,
-            lshTokenId
-          );
+        if (lshTokenIds.length > 0) {
+          // Check each LSH collection for delegated serials
+          const delegatedTokens: { tokenId: string; serials: number[] }[] = [];
+          let totalSerials = 0;
+          for (const tokenId of lshTokenIds) {
+            try {
+              const serials = await getSerialsDelegatedTo(
+                this.client,
+                registryId,
+                accountId,
+                tokenId
+              );
+              delegatedTokens.push({ tokenId, serials: serials.map(Number) });
+              totalSerials += serials.length;
+            } catch {
+              console.warn(`  Failed to check delegation for ${tokenId}`);
+            }
+          }
           delegation = {
             registryContractId: registryId,
-            delegatedTokens: [
-              { tokenId: lshTokenId, serials: serials.map(Number) },
-            ],
-            totalDelegatedSerials: serials.length,
+            delegatedTokens,
+            totalDelegatedSerials: totalSerials,
           };
         } else {
           const result = await getDelegatedNfts(
@@ -223,6 +240,20 @@ export class AuditReport {
     } else {
       recommendations.push(
         'Set DELEGATE_REGISTRY_ID in .env to check NFT delegation status.'
+      );
+    }
+
+    // Smart boost recommendation based on both delegation and boost data
+    const hasDelegatedNfts = delegation && delegation.totalDelegatedSerials > 0;
+    const boostIsZero = boost && boost.totalBps === 0;
+    if (hasDelegatedNfts && boostIsZero) {
+      recommendations.push(
+        `${delegation!.totalDelegatedSerials} NFT(s) delegated but on-chain boost is 0. ` +
+          'The boost may require additional criteria (e.g., minimum LAZY balance, specific collections, or pool-level calculation).'
+      );
+    } else if (!hasDelegatedNfts && boostIsZero) {
+      recommendations.push(
+        'Win rate boost is 0 and no NFTs are delegated. Delegate LSH NFTs to this agent for a bonus win rate.'
       );
     }
 
@@ -376,7 +407,7 @@ export class AuditReport {
         gasStation: env('LAZY_GAS_STATION_ID'),
         delegateRegistry: registryId,
         lazyToken: env('LAZY_TOKEN_ID'),
-        lshToken: lshTokenId,
+        lshTokens: lshTokenIds,
       },
       hol,
       warnings,
@@ -422,7 +453,7 @@ export class AuditReport {
     console.log('WIN RATE BOOST');
     console.log(`${thin}`);
     if (result.boost) {
-      console.log(`  Boost: ${result.boost.totalBps} bps`);
+      console.log(`  Boost: ${result.boost.percent}% (${result.boost.totalBps} raw bps)`);
     } else {
       console.log('  Boost: unavailable (MCP not connected)');
     }
@@ -503,7 +534,7 @@ export class AuditReport {
     if (c.storage) console.log(`  Storage:    ${c.storage}`);
     if (c.gasStation) console.log(`  GasStation: ${c.gasStation}`);
     if (c.lazyToken) console.log(`  LAZY Token: ${c.lazyToken}`);
-    if (c.lshToken) console.log(`  LSH Token:  ${c.lshToken}`);
+    if (c.lshTokens.length > 0) console.log(`  LSH Tokens: ${c.lshTokens.join(', ')}`);
     if (c.delegateRegistry) console.log(`  Delegate:   ${c.delegateRegistry}`);
 
     // HOL Registration

@@ -43,6 +43,7 @@
   "dependencies": {
     "@hashgraph/sdk": "^2.81.0",
     "@hashgraphonline/standards-sdk": "^0.1.172",
+    "@hiero-did-sdk/registrar": "^0.1.8",
     "@lazysuperheroes/lazy-lotto": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.28.0",
     "dotenv": "^17.3.1",
