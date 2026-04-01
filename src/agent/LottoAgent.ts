@@ -534,6 +534,15 @@ export class LottoAgent {
       await waitForMirrorNode();
     }
 
+    // Snapshot pending prize count BEFORE this pool's roll
+    let prizeCountBefore = 0;
+    try {
+      const stateBefore = await getUserState(accountId);
+      prizeCountBefore = stateBefore.pendingPrizesCount;
+    } catch {
+      // Non-critical — worst case we report total instead of delta
+    }
+
     // ── 4b. Buy entries via MCP intent → Hedera SDK execution ─
     const intentRaw = await buyEntries(
       pool.poolId,
@@ -574,14 +583,27 @@ export class LottoAgent {
       }
     }
 
-    // ── 4d. Check for wins ────────────────────────────────────
+    // ── 4d. Check for wins (delta = after - before) ────────────
     if (result.rolled) {
       await waitForMirrorNode();
       try {
-        const state = await getUserState(accountId);
-        result.wins = state.pendingPrizesCount;
-        if (result.wins > 0) {
-          console.log(`    Won ${result.wins} prize(s)!`);
+        const stateAfter = await getUserState(accountId);
+        const newWins = Math.max(0, stateAfter.pendingPrizesCount - prizeCountBefore);
+        result.wins = newWins;
+
+        if (newWins > 0) {
+          // Report which prizes were won using the offset
+          const newPrizes = stateAfter.pendingPrizes.slice(prizeCountBefore);
+          console.log(`    Won ${newWins} prize(s)!`);
+          for (const prize of newPrizes) {
+            const p = prize as Record<string, unknown>;
+            const fungible = p.fungiblePrize as { token?: string; amount?: number } | undefined;
+            const nftCount = (p.nftPrizes as number) ?? 0;
+            const parts: string[] = [];
+            if (fungible?.amount) parts.push(`${fungible.amount} ${fungible.token ?? '?'}`);
+            if (nftCount > 0) parts.push(`${nftCount} NFT(s)`);
+            console.log(`      -> ${parts.join(' + ') || 'prize details unavailable'}`);
+          }
         } else {
           console.log('    No wins this round.');
         }
