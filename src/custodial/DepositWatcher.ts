@@ -3,8 +3,7 @@ import type { PersistentStore } from './PersistentStore.js';
 import type { UserLedger } from './UserLedger.js';
 import type { CustodialConfig } from './types.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
-import { HEDERA_DEFAULTS } from '../config/defaults.js';
-import { getDecimalsSync, getTokenMeta } from '../utils/math.js';
+import { getTokenMeta, getTokenMetaSync } from '../utils/math.js';
 
 interface CreditInfo {
   amount: number;
@@ -82,10 +81,18 @@ export class DepositWatcher {
     this.isPolling = true;
 
     try {
-      const watermark = this.store.getWatermark();
+      let watermark = this.store.getWatermark();
+
+      // On first run (no watermark), start from "now" to avoid re-processing
+      // all historical transactions for an existing agent account.
+      if (!watermark) {
+        watermark = `${Math.floor(Date.now() / 1000)}.000000000`;
+        this.store.setWatermark(watermark);
+        console.log(`[DepositWatcher] No watermark found — starting from now (${watermark})`);
+      }
 
       const txs = await getTransactionsByAccount(this.agentAccountId, {
-        timestampGt: watermark || undefined,
+        timestampGt: watermark,
         limit: 25,
         order: 'asc',
       });
@@ -149,9 +156,14 @@ export class DepositWatcher {
     // Match memo to a registered user
     const user = this.store.getUserByMemo(memo);
     if (!user) {
-      console.warn(
-        `[DepositWatcher] Unknown deposit memo "${memo}" in tx ${tx.transaction_id}`,
-      );
+      // Only log if it looks like a lazylotto memo (ll- prefix) — otherwise
+      // it's just a regular transaction with an unrelated memo
+      if (memo.startsWith('ll-')) {
+        console.warn(
+          `[DepositWatcher] Deposit memo "${memo}" does not match any registered user (tx ${tx.transaction_id}). ` +
+            'This may be a deposit sent before registration completed, or a stale memo from a previous session.',
+        );
+      }
       return false;
     }
 
@@ -224,20 +236,19 @@ export class DepositWatcher {
     if (tx.token_transfers?.length) {
       for (const tt of tx.token_transfers) {
         if (tt.account === this.agentAccountId && tt.amount > 0) {
-          // Look up decimals from token registry
-          let decimals = getDecimalsSync(tt.token_id);
-          if (decimals === 0 && tt.token_id !== 'hbar') {
-            // Unknown token — try async lookup and reject this deposit
-            // The next deposit of this token will use the cached decimals
+          // Check if token is registered (not just decimals value)
+          const meta = getTokenMetaSync(tt.token_id);
+          if (!meta) {
+            // Unknown token — trigger async lookup for future poll cycles
             void getTokenMeta(tt.token_id);
-            console.warn(
-              `[DepositWatcher] Unknown token ${tt.token_id} — decimals not cached. ` +
-                'Deposit will be added to dead-letter queue. Retry on next poll.',
+            // Throw so pollOnce's catch block creates a dead-letter entry
+            throw new Error(
+              `Unknown token ${tt.token_id} — not in registry. ` +
+                'Async lookup triggered. Deposit deferred to dead-letter queue.'
             );
-            return null; // reject — caller adds to dead-letter
           }
           return {
-            amount: tt.amount / Math.pow(10, decimals),
+            amount: tt.amount / Math.pow(10, meta.decimals),
             token: tt.token_id,
           };
         }

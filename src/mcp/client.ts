@@ -29,10 +29,32 @@ export async function getMcpClient(): Promise<McpClient> {
 
 export async function callTool<T = unknown>(
   toolName: string,
-  args: Record<string, unknown> = {}
+  args: Record<string, unknown> = {},
+  _retry = false,
 ): Promise<T> {
-  const client = await getMcpClient();
-  const result = await client.callTool({ name: toolName, arguments: args });
+  let client: McpClient;
+  try {
+    client = await getMcpClient();
+  } catch (e) {
+    if (!_retry) {
+      // Connection may be stale — reset and retry once
+      mcpClient = null;
+      return callTool(toolName, args, true);
+    }
+    throw e;
+  }
+
+  let result;
+  try {
+    result = await client.callTool({ name: toolName, arguments: args });
+  } catch (e) {
+    if (!_retry) {
+      // Transport error — reset client and retry once
+      mcpClient = null;
+      return callTool(toolName, args, true);
+    }
+    throw e;
+  }
 
   const content = result.content as { type: string; text?: string }[] | undefined;
 
@@ -271,3 +293,6 @@ export async function closeMcpClient(): Promise<void> {
     mcpClient = null;
   }
 }
+
+// Exported for testing
+export { mapPoolSummary, mapPoolDetail, mapEvCalculation, mapUserState, mapSystemInfo };

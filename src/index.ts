@@ -1,18 +1,14 @@
 import 'dotenv/config';
-import { readFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { StrategySchema, type Strategy } from './config/strategy.js';
+import type { Strategy } from './config/strategy.js';
 import { initTokenRegistry } from './utils/math.js';
 
 // Initialize token registry from env (LAZY_TOKEN_ID → 1 decimal)
 initTokenRegistry();
 import { DEFAULT_STRATEGY } from './config/defaults.js';
+import { loadStrategy } from './config/loader.js';
 import { LottoAgent } from './agent/LottoAgent.js';
 import { startMcpServer } from './mcp/server.js';
 import cron from 'node-cron';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /** Wait for Enter then force-exit. Used by one-shot commands on Windows
  *  where open gRPC/MCP connections prevent clean process exit. */
@@ -24,43 +20,6 @@ async function exitGracefully(): Promise<never> {
   process.exit(0);
 }
 
-/**
- * Resolve token aliases in strategy tokenBudgets.
- * "lazy" → actual LAZY_TOKEN_ID from env. "hbar" stays as-is.
- * This lets built-in strategies use "lazy" as a portable key that works
- * on both testnet and mainnet — the actual token ID comes from .env.
- */
-function resolveTokenAliases(strategy: Strategy): Strategy {
-  const lazyTokenId = process.env.LAZY_TOKEN_ID;
-  if (!lazyTokenId) return strategy; // No LAZY configured — leave as-is
-
-  const budgets = strategy.budget.tokenBudgets;
-  if (!budgets['lazy']) return strategy; // No alias to resolve
-
-  const resolved = { ...budgets };
-  resolved[lazyTokenId] = resolved['lazy'];
-  delete resolved['lazy'];
-
-  return {
-    ...strategy,
-    budget: { ...strategy.budget, tokenBudgets: resolved },
-  };
-}
-
-function loadStrategy(name: string): Strategy {
-  const builtIn = ['conservative', 'balanced', 'aggressive'];
-
-  if (builtIn.includes(name)) {
-    const path = resolve(__dirname, '..', 'strategies', `${name}.json`);
-    const raw = JSON.parse(readFileSync(path, 'utf-8'));
-    return resolveTokenAliases(StrategySchema.parse(raw));
-  }
-
-  // Treat as file path (resolve from cwd for user-provided paths)
-  const raw = JSON.parse(readFileSync(resolve(name), 'utf-8'));
-  return resolveTokenAliases(StrategySchema.parse(raw));
-}
-
 function printHelp(): void {
   console.log(`
 lazylotto-agent — Autonomous LazyLotto lottery player on Hedera
@@ -69,6 +28,7 @@ Usage:
   lazylotto-agent [options]
 
 Options:
+  --version, -v         Show version number
   --help                Show this help message
   --wizard              Interactive setup wizard (creates .env)
   --setup               First-time wallet setup (associations, approvals)
@@ -104,6 +64,14 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args.includes('--version') || args.includes('-v')) {
+    const { createRequire } = await import('node:module');
+    const require = createRequire(import.meta.url);
+    const pkg = require('../package.json') as { version: string };
+    console.log(`lazylotto-agent v${pkg.version}`);
+    return;
+  }
+
   const strategyName = process.env.STRATEGY ?? 'balanced';
 
   let strategy: Strategy;
@@ -112,8 +80,16 @@ async function main(): Promise<void> {
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
     console.error(`\n  ERROR: Strategy "${strategyName}" failed to load: ${detail}`);
-    console.error('  Falling back to default strategy (HBAR-only budget).');
-    console.error('  If you intended a different strategy, fix the error above.\n');
+
+    // For play modes (default, scheduled, multi-user), refuse to proceed with defaults
+    // to prevent accidentally spending real money with an unintended strategy.
+    const playMode = !args.length || args.includes('--scheduled') || args.includes('--multi-user');
+    if (playMode && !args.includes('--force')) {
+      console.error('  Fix the strategy error above, or use --force to proceed with defaults.\n');
+      process.exit(1);
+    }
+
+    console.error('  Falling back to default strategy (HBAR-only budget).\n');
     strategy = DEFAULT_STRATEGY;
   }
 
@@ -145,6 +121,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Validate OWNER_EOA format before constructing agent (catches bad addresses early)
+  const ownerEoa = process.env.OWNER_EOA;
+  if (ownerEoa && !/^(0\.0\.\d+|0x[0-9a-fA-F]{40})$/.test(ownerEoa)) {
+    console.error(`\n  ERROR: OWNER_EOA "${ownerEoa}" is not a valid Hedera account ID (0.0.X) or EVM address (0x...).`);
+    console.error('  Fix OWNER_EOA in your .env file.\n');
+    process.exit(1);
+  }
+
   const agent = new LottoAgent(strategy);
 
   if (args.includes('--register')) {
@@ -171,7 +155,22 @@ async function main(): Promise<void> {
     await exitGracefully();
   }
 
+  // In MCP stdio mode, stdout is the JSON-RPC transport — redirect all
+  // console.log to stderr BEFORE any subsystem starts writing output.
+  if (args.includes('--mcp-server')) {
+    console.log = console.error;
+  }
+
   if (args.includes('--multi-user')) {
+    // Validate multi-user prerequisites
+    if (!process.env.OPERATOR_WITHDRAW_ADDRESS) {
+      console.warn(
+        '[MultiUser] WARNING: OPERATOR_WITHDRAW_ADDRESS not set. ' +
+          'Any address can be used for operator fee withdrawals. ' +
+          'Set this in .env for production deployments.'
+      );
+    }
+
     const { MultiUserAgent } = await import('./custodial/MultiUserAgent.js');
     const { loadCustodialConfig } = await import('./custodial/types.js');
     const config = loadCustodialConfig();
@@ -185,12 +184,13 @@ async function main(): Promise<void> {
       await exitGracefully();
     }
 
+    // Start the deposit watcher and agent loop regardless of MCP mode
+    multiAgent.start();
+
     if (args.includes('--mcp-server')) {
       await startMcpServer(agent, multiAgent);
       return;
     }
-
-    multiAgent.start();
 
     const cronExpr = strategy.schedule.cron;
     cron.schedule(cronExpr, async () => {
@@ -247,8 +247,16 @@ async function main(): Promise<void> {
 
     console.log('Agent running. Press Ctrl+C to stop.');
 
-    process.on('SIGINT', () => {
-      console.log('\nStopping...');
+    let shuttingDown = false;
+    process.on('SIGINT', async () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      console.log('\nStopping... (waiting for any active session to complete)');
+      // Wait for active session to finish (simple poll)
+      const start = Date.now();
+      while (agent.isPlaying() && Date.now() - start < 300_000) {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
       process.exit(0);
     });
 

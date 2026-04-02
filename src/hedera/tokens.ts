@@ -4,7 +4,6 @@ import {
   AccountAllowanceApproveTransaction,
   TokenId,
   AccountId,
-  NftId,
 } from '@hashgraph/sdk';
 import { getOperatorAccountId } from './wallet.js';
 

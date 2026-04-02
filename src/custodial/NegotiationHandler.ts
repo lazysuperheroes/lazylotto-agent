@@ -8,15 +8,11 @@ import type {
   PlaySessionResult,
 } from './types.js';
 import { emptyBalances } from './types.js';
-import { StrategySchema, type Strategy } from '../config/strategy.js';
+import type { Strategy } from '../config/strategy.js';
+import { loadStrategy as loadSharedStrategy } from '../config/loader.js';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 // ── Constants ──────────────────────────────────────────────────
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const AVAILABLE_STRATEGIES = ['conservative', 'balanced', 'aggressive'] as const;
 const MAX_REGISTRATIONS_PER_HOUR = 100;
@@ -92,10 +88,11 @@ export class NegotiationHandler {
       );
     }
 
-    // 3. Check for existing registration
-    const existing = this.store.getUserByAccountId(hederaAccountId);
-    if (existing) {
-      return existing;
+    // 3. Check for existing registration (by EOA — the unique user identifier)
+    const allUsers = this.store.getAllUsers();
+    const existingByEoa = allUsers.find((u) => u.eoaAddress === eoaAddress);
+    if (existingByEoa) {
+      return existingByEoa;
     }
 
     // 4. Validate and load strategy
@@ -300,27 +297,11 @@ export class NegotiationHandler {
   // ── Private Helpers ─────────────────────────────────────────
 
   /**
-   * Load and validate a strategy JSON file from the strategies/ directory.
+   * Load and validate a strategy. Uses the shared loader which also applies
+   * resolveTokenAliases (converting "lazy" → LAZY_TOKEN_ID from env).
    */
   private loadStrategy(strategyName: string): Strategy {
-    const stratPath = resolve(
-      __dirname,
-      '..',
-      '..',
-      'strategies',
-      `${strategyName}.json`,
-    );
-
-    let raw: unknown;
-    try {
-      raw = JSON.parse(readFileSync(stratPath, 'utf-8'));
-    } catch (err) {
-      throw new Error(
-        `Failed to load strategy file "${stratPath}": ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-
-    return StrategySchema.parse(raw);
+    return loadSharedStrategy(strategyName);
   }
 
   /**

@@ -1,3 +1,9 @@
+export interface PrizeDetail {
+  fungibleAmount?: number;
+  fungibleToken?: string;
+  nftCount?: number;
+}
+
 export interface PoolResult {
   poolId: number;
   poolName: string;
@@ -8,6 +14,7 @@ export interface PoolResult {
   wins: number;
   prizesClaimed: number;
   prizesTransferred: number;
+  prizeDetails: PrizeDetail[];
 }
 
 export interface SessionReport {
@@ -22,6 +29,8 @@ export interface SessionReport {
   totalWins: number;
   totalPrizesClaimed: number;
   totalPrizesTransferred: number;
+  totalPrizeValue: number;
+  prizesByToken: Record<string, number>;
   poolResults: PoolResult[];
   currency: string;
 }
@@ -56,6 +65,17 @@ export class ReportGenerator {
       const sym = r.feeTokenSymbol || 'HBAR';
       spentByToken[sym] = (spentByToken[sym] ?? 0) + r.amountSpent;
     }
+    // Aggregate prize values across all pools
+    const prizesByToken: Record<string, number> = {};
+    let totalPrizeValue = 0;
+    for (const r of this.poolResults) {
+      for (const p of r.prizeDetails) {
+        if (p.fungibleAmount && p.fungibleToken) {
+          prizesByToken[p.fungibleToken] = (prizesByToken[p.fungibleToken] ?? 0) + p.fungibleAmount;
+          totalPrizeValue += p.fungibleAmount;
+        }
+      }
+    }
     return {
       startedAt: this.startedAt.toISOString(),
       endedAt: now.toISOString(),
@@ -68,6 +88,8 @@ export class ReportGenerator {
       totalWins: this.poolResults.reduce((s, r) => s + r.wins, 0),
       totalPrizesClaimed: this.poolResults.reduce((s, r) => s + r.prizesClaimed, 0),
       totalPrizesTransferred: this.poolResults.reduce((s, r) => s + r.prizesTransferred, 0),
+      totalPrizeValue,
+      prizesByToken,
       poolResults: this.poolResults,
       currency: this.currency,
     };

@@ -65,6 +65,12 @@ export async function executeIntent(
   const txResponse: TransactionResponse = await tx.execute(client);
   const receipt = await txResponse.getReceipt(client);
 
+  if (receipt.status !== Status.Success) {
+    throw new Error(
+      `Transaction ${txResponse.transactionId.toString()} failed: ${receipt.status.toString()}`
+    );
+  }
+
   // Estimate gas cost (Hedera charges ~0.000000082 HBAR per gas unit)
   const estimatedGasHbar = intent.gas * 0.000000082;
 
@@ -95,6 +101,12 @@ export async function executeEncodedCall(
   const txResponse: TransactionResponse = await tx.execute(client);
   const receipt = await txResponse.getReceipt(client);
 
+  if (receipt.status !== Status.Success) {
+    throw new Error(
+      `Transaction ${txResponse.transactionId.toString()} failed: ${receipt.status.toString()}`
+    );
+  }
+
   const estimatedGasHbar = gas * 0.000000082;
 
   return {
@@ -103,6 +115,33 @@ export async function executeEncodedCall(
     status: receipt.status,
     estimatedGasHbar,
   };
+}
+
+/**
+ * Transfer all pending prizes to an owner's EVM address.
+ * Calls transferPendingPrizes(ownerEVM, type(uint256).max) on the LazyLotto contract.
+ */
+export async function transferAllPrizes(
+  client: Client,
+  contractId: string,
+  ownerEvmAddress: string,
+): Promise<TxResult> {
+  // Lazy-import to avoid circular deps at module load time
+  const { Interface, MaxUint256 } = await import('ethers');
+  const { LazyLottoABI } = await import('../utils/abi.js');
+
+  const iface = new Interface(LazyLottoABI);
+  const encoded = iface.encodeFunctionData('transferPendingPrizes', [
+    ownerEvmAddress,
+    MaxUint256,
+  ]);
+
+  return executeEncodedCall(
+    client,
+    contractId,
+    GAS_ESTIMATES.transferPendingPrizes.base,
+    encoded,
+  );
 }
 
 type GasOperation = Exclude<keyof typeof GAS_ESTIMATES, 'maxGas'>;

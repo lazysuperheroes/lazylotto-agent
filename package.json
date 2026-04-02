@@ -26,6 +26,7 @@
     "status": "node --import tsx src/index.ts --status",
     "audit": "node --import tsx src/index.ts --audit",
     "wizard": "node --import tsx src/index.ts --wizard",
+    "read-accounting": "node --import tsx src/cli/read-accounting.ts",
     "test": "node --test --import tsx src/**/*.test.ts src/__tests__/*.test.ts",
     "prepublishOnly": "npm run build"
   },
@@ -37,6 +38,10 @@
     "lazylotto"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lazysuperheroes/lazylotto-agent.git"
+  },
   "engines": {
     "node": ">=20.0.0"
   },

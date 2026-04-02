@@ -1,15 +1,12 @@
 import { Client } from '@hashgraph/sdk';
-import { Interface, MaxUint256 } from 'ethers';
 import type { Strategy } from '../config/strategy.js';
 import { resolveBudgetKey, HBAR_TOKEN_KEY } from '../config/strategy.js';
-import { GAS_ESTIMATES } from '../config/defaults.js';
 import {
   createClient,
   getWalletInfo,
 } from '../hedera/wallet.js';
 import {
   executeIntent,
-  executeEncodedCall,
   type IntentResponse,
 } from '../hedera/contracts.js';
 import {
@@ -44,7 +41,6 @@ import {
   type SessionReport,
 } from './ReportGenerator.js';
 import { errorMsg, hbarToNumber, tokenBalanceToNumber, toEvmAddress } from '../utils/format.js';
-import { LazyLottoABI } from '../utils/abi.js';
 
 // ── Prerequisite shape returned by MCP check_prerequisites ────
 
@@ -74,6 +70,7 @@ export class LottoAgent {
   private strategyEngine: StrategyEngine;
   private reportGenerator: ReportGenerator;
   private systemInfo: SystemInfo | null = null;
+  private _playing = false;
 
   constructor(strategy: Strategy) {
     this.client = createClient();
@@ -173,6 +170,15 @@ export class LottoAgent {
   // ══════════════════════════════════════════════════════════════
 
   async play(): Promise<SessionReport> {
+    this._playing = true;
+    try {
+      return await this._runPlaySession();
+    } finally {
+      this._playing = false;
+    }
+  }
+
+  private async _runPlaySession(): Promise<SessionReport> {
     this.budgetManager = new BudgetManager(this.strategy.budget);
     this.reportGenerator.begin(
       this.strategy.name,
@@ -285,6 +291,10 @@ export class LottoAgent {
     return this.client;
   }
 
+  isPlaying(): boolean {
+    return this._playing;
+  }
+
   async getAgentStatus() {
     const info = await getWalletInfo(this.client);
     const tokens = await getTokenBalances(info.accountId.toString());
@@ -367,15 +377,12 @@ export class LottoAgent {
 
     // Paginate through all available pools
     while (true) {
-      const pageRaw = await listPools(
+      // listPools() already handles response unwrapping and returns PoolSummary[]
+      const page = await listPools(
         this.strategy.poolFilter.type,
         offset,
         pageSize
       );
-      // MCP may return an array directly or a wrapper like { pools: [...] }
-      const page = Array.isArray(pageRaw)
-        ? pageRaw
-        : (pageRaw as any)?.pools ?? (pageRaw as any)?.data ?? [];
       all.push(...page);
       if (page.length < pageSize) break;
       offset += pageSize;
@@ -410,26 +417,38 @@ export class LottoAgent {
   //  Phase 3 — Evaluate
   // ══════════════════════════════════════════════════════════════
 
+  private static readonly EV_CONCURRENCY = 10;
+
   private async evaluate(
     pools: PoolDetail[],
     accountId: string
   ): Promise<ScoredPool[]> {
     const evResults: EvCalculation[] = [];
 
-    for (const pool of pools) {
-      try {
-        const ev = await calculateEv(pool.poolId, accountId);
-        evResults.push(ev);
-        console.log(
-          `  #${pool.poolId} ${pool.name}: ` +
-            `EV=${ev.expectedValue.toFixed(2)}, ` +
-            `winRate=${(ev.effectiveWinRate * 100).toFixed(1)}%, ` +
-            `fee=${pool.entryFee} ${pool.feeTokenSymbol}`
-        );
-      } catch (e) {
-        console.warn(
-          `  #${pool.poolId} ${pool.name}: EV calc failed (${errorMsg(e)})`
-        );
+    // Process EV calculations in batches to avoid overwhelming the MCP endpoint
+    for (let i = 0; i < pools.length; i += LottoAgent.EV_CONCURRENCY) {
+      const batch = pools.slice(i, i + LottoAgent.EV_CONCURRENCY);
+      const results = await Promise.allSettled(
+        batch.map((pool) => calculateEv(pool.poolId, accountId))
+      );
+
+      for (let j = 0; j < batch.length; j++) {
+        const pool = batch[j];
+        const result = results[j];
+        if (result.status === 'fulfilled') {
+          const ev = result.value;
+          evResults.push(ev);
+          console.log(
+            `  #${pool.poolId} ${pool.name}: ` +
+              `EV=${ev.expectedValue.toFixed(2)}, ` +
+              `winRate=${(ev.effectiveWinRate * 100).toFixed(1)}%, ` +
+              `fee=${pool.entryFee} ${pool.feeTokenSymbol}`
+          );
+        } else {
+          console.warn(
+            `  #${pool.poolId} ${pool.name}: EV calc failed (${errorMsg(result.reason)})`
+          );
+        }
       }
     }
 
@@ -457,6 +476,7 @@ export class LottoAgent {
       wins: 0,
       prizesClaimed: 0,
       prizesTransferred: 0,
+      prizeDetails: [],
     };
 
     try {
@@ -483,6 +503,7 @@ export class LottoAgent {
       wins: 0,
       prizesClaimed: 0,
       prizesTransferred: 0,
+      prizeDetails: [],
     };
 
     // Calculate how many entries we can buy
@@ -592,7 +613,7 @@ export class LottoAgent {
         result.wins = newWins;
 
         if (newWins > 0) {
-          // Report which prizes were won using the offset
+          // Capture prize details from the offset into pendingPrizes
           const newPrizes = stateAfter.pendingPrizes.slice(prizeCountBefore);
           console.log(`    Won ${newWins} prize(s)!`);
           for (const prize of newPrizes) {
@@ -603,6 +624,11 @@ export class LottoAgent {
             if (fungible?.amount) parts.push(`${fungible.amount} ${fungible.token ?? '?'}`);
             if (nftCount > 0) parts.push(`${nftCount} NFT(s)`);
             console.log(`      -> ${parts.join(' + ') || 'prize details unavailable'}`);
+            result.prizeDetails.push({
+              fungibleAmount: fungible?.amount,
+              fungibleToken: fungible?.token,
+              nftCount: nftCount > 0 ? nftCount : undefined,
+            });
           }
         } else {
           console.log('    No wins this round.');
@@ -689,25 +715,11 @@ export class LottoAgent {
         `transferring to ${ownerAddress}`
     );
 
-    // Convert owner to EVM address for Solidity call
+    // Convert owner to EVM address and call shared utility
     const ownerEvmAddress = toEvmAddress(ownerAddress);
-
-    // Encode transferPendingPrizes(address recipient, uint256 index)
-    // with MaxUint256 = type(uint256).max = transfer ALL prizes at once
-    const iface = new Interface(LazyLottoABI);
-    const encoded = iface.encodeFunctionData('transferPendingPrizes', [
-      ownerEvmAddress,
-      MaxUint256,
-    ]);
-
-    // Execute via direct Hedera SDK contract call
     const contractId = await this.getContractId();
-    const txResult = await executeEncodedCall(
-      this.client,
-      contractId,
-      GAS_ESTIMATES.transferPendingPrizes.base,
-      encoded
-    );
+    const { transferAllPrizes: doTransfer } = await import('../hedera/contracts.js');
+    const txResult = await doTransfer(this.client, contractId, ownerEvmAddress);
 
     console.log(
       `  Transferred ${state.pendingPrizesCount} prize(s): ` +

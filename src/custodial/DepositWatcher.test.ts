@@ -12,6 +12,7 @@ import type {
   DepositRecord,
 } from './types.js';
 import { emptyBalances, emptyOperatorState } from './types.js';
+import { registerToken } from '../utils/math.js';
 
 // ── Test Config ────────────────────────────────────────────────
 
@@ -33,6 +34,7 @@ const TEST_CONFIG: CustodialConfig = {
   minDepositAmount: 1,
   maxUserBalance: 10_000,
   maxUsersPerPlayCycle: 10,
+  gasReservePerUser: 5,
   hcs20Tick: 'LLCRED',
   hcs20TopicId: null,
   dataDir: '.test-data',
@@ -524,5 +526,485 @@ describe('DepositWatcher', () => {
       assert.equal(successTx.result === 'SUCCESS', true);
       assert.equal(failedTx.result === 'SUCCESS', false);
     });
+  });
+});
+
+// ── processTransaction end-to-end tests ────────────────────────
+//
+// These tests invoke the private processTransaction method directly
+// via (watcher as any).processTransaction(tx) to exercise the full
+// internal pipeline: result check -> idempotency -> memo decode ->
+// user lookup -> active check -> extractCredit -> max balance ->
+// ledger creditDeposit. This avoids the need to mock the ES module
+// mirror import that pollOnce depends on.
+
+describe('DepositWatcher.processTransaction (end-to-end)', () => {
+  let mockStore: ReturnType<typeof createMockStore>;
+  let mockLedger: ReturnType<typeof createMockLedger>;
+  let watcher: DepositWatcher;
+
+  beforeEach(() => {
+    mockStore = createMockStore();
+    mockLedger = createMockLedger();
+    watcher = new DepositWatcher(AGENT_ACCOUNT, mockStore, mockLedger, TEST_CONFIG);
+  });
+
+  /** Helper: register a user in the mock store and return it. */
+  function registerUser(overrides: Partial<UserAccount> = {}): UserAccount {
+    const user = makeUser(overrides);
+    mockStore.saveUser(user);
+    return user;
+  }
+
+  // ── HBAR deposit ──────────────────────────────────────────────
+
+  it('credits HBAR deposit to user balance via ledger', async () => {
+    const user = registerUser();
+
+    const tx = makeTx({
+      transaction_id: 'tx-hbar-001',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [
+        { account: AGENT_ACCOUNT, amount: 10_00000000 }, // 10 HBAR
+      ],
+      token_transfers: [],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, true, 'processTransaction should return true for credited deposit');
+    assert.equal(mockLedger._calls.length, 1);
+    assert.equal(mockLedger._calls[0].method, 'creditDeposit');
+    assert.deepStrictEqual(mockLedger._calls[0].args, [
+      user.userId, 10, 'tx-hbar-001', user.rakePercent, 'hbar',
+    ]);
+  });
+
+  // ── Fractional HBAR deposit ───────────────────────────────────
+
+  it('credits fractional HBAR deposit correctly', async () => {
+    const user = registerUser();
+
+    const tx = makeTx({
+      transaction_id: 'tx-hbar-frac',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [
+        { account: AGENT_ACCOUNT, amount: 2_50000000 }, // 2.5 HBAR
+      ],
+      token_transfers: [],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, true);
+    assert.equal(mockLedger._calls[0].args[1], 2.5, 'should convert tinybars to 2.5 HBAR');
+  });
+
+  // ── Known token deposit (LAZY, 1 decimal) ────────────────────
+
+  it('credits known token deposit with correct decimal conversion', async () => {
+    const LAZY_TOKEN_ID = '0.0.8011209';
+    registerToken(LAZY_TOKEN_ID, 1, 'LAZY');
+
+    const user = registerUser();
+
+    const tx = makeTx({
+      transaction_id: 'tx-lazy-001',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [],
+      token_transfers: [
+        { token_id: LAZY_TOKEN_ID, account: AGENT_ACCOUNT, amount: 500 }, // 50 LAZY (1 decimal)
+      ],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, true, 'processTransaction should return true for token deposit');
+    assert.equal(mockLedger._calls.length, 1);
+    assert.deepStrictEqual(mockLedger._calls[0].args, [
+      user.userId, 50, 'tx-lazy-001', user.rakePercent, LAZY_TOKEN_ID,
+    ]);
+  });
+
+  // ── Known token deposit (8 decimals) ──────────────────────────
+
+  it('credits token with 8 decimals correctly', async () => {
+    const TOKEN_ID = '0.0.55555';
+    registerToken(TOKEN_ID, 8, 'USDC');
+
+    const user = registerUser();
+
+    const tx = makeTx({
+      transaction_id: 'tx-usdc-001',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [],
+      token_transfers: [
+        { token_id: TOKEN_ID, account: AGENT_ACCOUNT, amount: 3_00000000 }, // 3.0 USDC
+      ],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, true);
+    assert.deepStrictEqual(mockLedger._calls[0].args, [
+      user.userId, 3, 'tx-usdc-001', user.rakePercent, TOKEN_ID,
+    ]);
+  });
+
+  // ── Unknown token deposit → throws (dead-letter) ─────────────
+
+  it('throws on unknown token deposit (triggers dead-letter in pollOnce)', async () => {
+    const UNKNOWN_TOKEN = '0.0.999999';
+    // Deliberately NOT registering this token
+
+    const user = registerUser();
+
+    const tx = makeTx({
+      transaction_id: 'tx-unknown-token',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [],
+      token_transfers: [
+        { token_id: UNKNOWN_TOKEN, account: AGENT_ACCOUNT, amount: 100 },
+      ],
+    });
+
+    await assert.rejects(
+      () => (watcher as any).processTransaction(tx),
+      (err: Error) => {
+        assert.match(err.message, /Unknown token 0\.0\.999999/);
+        assert.match(err.message, /not in registry/);
+        return true;
+      },
+    );
+
+    // Ledger should NOT have been called
+    assert.equal(mockLedger._calls.length, 0);
+  });
+
+  // ── Inactive user deposit → dead-letter, not credited ────────
+
+  it('returns false and records dead-letter for inactive user deposit', async () => {
+    const user = registerUser({ active: false });
+
+    const tx = makeTx({
+      transaction_id: 'tx-inactive-001',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [
+        { account: AGENT_ACCOUNT, amount: 5_00000000 },
+      ],
+      token_transfers: [],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, false, 'should not credit inactive user');
+    assert.equal(mockLedger._calls.length, 0, 'ledger should not be called');
+
+    // Dead-letter entry should be recorded
+    const deadLetters = mockStore.getDeadLetters();
+    assert.equal(deadLetters.length, 1);
+    assert.equal(deadLetters[0].transactionId, 'tx-inactive-001');
+    assert.match(deadLetters[0].error, /inactive/i);
+  });
+
+  // ── Max balance exceeded → not credited ───────────────────────
+
+  it('returns false when deposit would exceed maxUserBalance', async () => {
+    const user = registerUser({
+      balances: {
+        tokens: {
+          hbar: {
+            available: 9999,
+            reserved: 0,
+            totalDeposited: 9999,
+            totalWithdrawn: 0,
+            totalRake: 0,
+          },
+        },
+      },
+    });
+
+    const tx = makeTx({
+      transaction_id: 'tx-over-max',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [
+        { account: AGENT_ACCOUNT, amount: 2_00000000 }, // 2 HBAR → 9999 + 2 = 10001 > 10000
+      ],
+      token_transfers: [],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, false, 'should reject deposit exceeding max balance');
+    assert.equal(mockLedger._calls.length, 0, 'ledger should not be called');
+  });
+
+  // ── Max balance exactly at limit → still accepted ─────────────
+
+  it('accepts deposit when balance + deposit equals maxUserBalance exactly', async () => {
+    const user = registerUser({
+      balances: {
+        tokens: {
+          hbar: {
+            available: 9995,
+            reserved: 0,
+            totalDeposited: 9995,
+            totalWithdrawn: 0,
+            totalRake: 0,
+          },
+        },
+      },
+    });
+
+    const tx = makeTx({
+      transaction_id: 'tx-exact-max',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [
+        { account: AGENT_ACCOUNT, amount: 5_00000000 }, // 5 HBAR → 9995 + 5 = 10000 == max
+      ],
+      token_transfers: [],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, true, 'should accept deposit that hits max exactly');
+    assert.equal(mockLedger._calls.length, 1);
+  });
+
+  // ── Unknown memo → not credited ──────────────────────────────
+
+  it('returns false for unrecognized deposit memo', async () => {
+    // No user registered with this memo
+    const tx = makeTx({
+      transaction_id: 'tx-unknown-memo',
+      memo_base64: encodeMemo('ll-unknownmemo00000000000000000000'),
+      transfers: [
+        { account: AGENT_ACCOUNT, amount: 1_00000000 },
+      ],
+      token_transfers: [],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, false, 'should skip unknown memo');
+    assert.equal(mockLedger._calls.length, 0);
+  });
+
+  // ── Empty memo → not credited ────────────────────────────────
+
+  it('returns false for empty memo', async () => {
+    registerUser();
+
+    const tx = makeTx({
+      transaction_id: 'tx-no-memo',
+      memo_base64: '',
+      transfers: [
+        { account: AGENT_ACCOUNT, amount: 5_00000000 },
+      ],
+      token_transfers: [],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, false, 'should skip empty memo');
+    assert.equal(mockLedger._calls.length, 0);
+  });
+
+  // ── Duplicate transaction → idempotent ────────────────────────
+
+  it('returns false for already-processed transaction (idempotent)', async () => {
+    const user = registerUser();
+
+    // Pre-mark transaction as processed
+    mockStore = createMockStore({
+      processedTxIds: new Set(['tx-dup-001']),
+      users: new Map([[user.userId, user]]),
+      memoIndex: new Map([[user.depositMemo, user]]),
+    });
+    // Re-create watcher with new store
+    watcher = new DepositWatcher(AGENT_ACCOUNT, mockStore, mockLedger, TEST_CONFIG);
+
+    const tx = makeTx({
+      transaction_id: 'tx-dup-001',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [
+        { account: AGENT_ACCOUNT, amount: 5_00000000 },
+      ],
+      token_transfers: [],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, false, 'should skip duplicate transaction');
+    assert.equal(mockLedger._calls.length, 0);
+  });
+
+  // ── Failed transaction → skipped ──────────────────────────────
+
+  it('returns false for non-SUCCESS transaction', async () => {
+    registerUser();
+
+    const tx = makeTx({
+      transaction_id: 'tx-failed-001',
+      result: 'INSUFFICIENT_ACCOUNT_BALANCE',
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, false, 'should skip failed transaction');
+    assert.equal(mockLedger._calls.length, 0);
+  });
+
+  // ── No matching transfer to agent → not credited ──────────────
+
+  it('returns false when no transfer is directed to the agent account', async () => {
+    const user = registerUser();
+
+    const tx = makeTx({
+      transaction_id: 'tx-no-agent-transfer',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [
+        { account: '0.0.1111', amount: 5_00000000 }, // transfer to someone else
+      ],
+      token_transfers: [],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, false, 'should skip when no transfer to agent');
+    assert.equal(mockLedger._calls.length, 0);
+  });
+
+  // ── Negative transfer amount → not credited ───────────────────
+
+  it('returns false when transfer to agent has negative amount (outgoing)', async () => {
+    const user = registerUser();
+
+    const tx = makeTx({
+      transaction_id: 'tx-negative-amount',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [
+        { account: AGENT_ACCOUNT, amount: -5_00000000 }, // agent is sending, not receiving
+      ],
+      token_transfers: [],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, false, 'should skip negative (outgoing) transfers');
+    assert.equal(mockLedger._calls.length, 0);
+  });
+
+  // ── Token transfer takes priority over HBAR ───────────────────
+
+  it('credits token transfer when both token and HBAR transfers exist', async () => {
+    const TOKEN_ID = '0.0.77777';
+    registerToken(TOKEN_ID, 2, 'TEST');
+
+    const user = registerUser();
+
+    const tx = makeTx({
+      transaction_id: 'tx-both-types',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [
+        { account: AGENT_ACCOUNT, amount: 1_00000000 }, // 1 HBAR
+      ],
+      token_transfers: [
+        { token_id: TOKEN_ID, account: AGENT_ACCOUNT, amount: 5000 }, // 50.00 TEST (2 decimals)
+      ],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, true);
+    assert.equal(mockLedger._calls.length, 1);
+    // Token transfer should be credited, not HBAR
+    assert.deepStrictEqual(mockLedger._calls[0].args, [
+      user.userId, 50, 'tx-both-types', user.rakePercent, TOKEN_ID,
+    ]);
+  });
+
+  // ── Max balance check is per-token ────────────────────────────
+
+  it('applies max balance check against the correct token entry', async () => {
+    const TOKEN_ID = '0.0.88888';
+    registerToken(TOKEN_ID, 1, 'LAZY2');
+
+    // User has high HBAR balance but low token balance
+    const user = registerUser({
+      balances: {
+        tokens: {
+          hbar: {
+            available: 9999,
+            reserved: 0,
+            totalDeposited: 9999,
+            totalWithdrawn: 0,
+            totalRake: 0,
+          },
+          [TOKEN_ID]: {
+            available: 10,
+            reserved: 0,
+            totalDeposited: 10,
+            totalWithdrawn: 0,
+            totalRake: 0,
+          },
+        },
+      },
+    });
+
+    const tx = makeTx({
+      transaction_id: 'tx-token-under-max',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [],
+      token_transfers: [
+        { token_id: TOKEN_ID, account: AGENT_ACCOUNT, amount: 100 }, // 10 LAZY2 → 10 + 10 = 20 < 10000
+      ],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, true, 'should credit token deposit despite high HBAR balance');
+    assert.equal(mockLedger._calls.length, 1);
+    assert.equal(mockLedger._calls[0].args[4], TOKEN_ID, 'should credit to the token, not hbar');
+  });
+
+  // ── Zero-amount transfer → not credited ───────────────────────
+
+  it('returns false for zero-amount transfer', async () => {
+    const user = registerUser();
+
+    const tx = makeTx({
+      transaction_id: 'tx-zero',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [
+        { account: AGENT_ACCOUNT, amount: 0 },
+      ],
+      token_transfers: [],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, false, 'should skip zero-amount transfer');
+    assert.equal(mockLedger._calls.length, 0);
+  });
+
+  // ── Custom rake percent passed to ledger ──────────────────────
+
+  it('passes user-specific rake percent to ledger creditDeposit', async () => {
+    const user = registerUser({ rakePercent: 3 });
+
+    const tx = makeTx({
+      transaction_id: 'tx-custom-rake',
+      memo_base64: encodeMemo(user.depositMemo),
+      transfers: [
+        { account: AGENT_ACCOUNT, amount: 20_00000000 }, // 20 HBAR
+      ],
+      token_transfers: [],
+    });
+
+    const result = await (watcher as any).processTransaction(tx);
+
+    assert.equal(result, true);
+    assert.equal(mockLedger._calls[0].args[3], 3, 'rake percent should be 3, not default 5');
   });
 });

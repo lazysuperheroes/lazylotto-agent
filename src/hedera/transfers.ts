@@ -10,7 +10,6 @@ import {
   TransferTransaction,
   TokenId,
 } from '@hashgraph/sdk';
-import { HEDERA_DEFAULTS } from '../config/defaults.js';
 
 export interface TransferResult {
   transactionId: string;

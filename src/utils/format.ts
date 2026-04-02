@@ -17,11 +17,6 @@ export function tokenBalanceToNumber(
   return roundToDecimals(t.balance / Math.pow(10, t.decimals), t.decimals);
 }
 
-/** Convert a single token balance entry to human-readable number. */
-export function tokenEntryToHuman(t: { balance: number; decimals: number }): number {
-  return roundToDecimals(t.balance / Math.pow(10, t.decimals), t.decimals);
-}
-
 /** Convert Hbar object to number (in HBAR, not tinybars). */
 export function hbarToNumber(hbar: { toTinybars(): { toString(): string } }): number {
   return Number(hbar.toTinybars().toString()) / 1e8;

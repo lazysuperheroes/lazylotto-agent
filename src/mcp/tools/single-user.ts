@@ -6,26 +6,19 @@
  * agent_stop, agent_audit, agent_onboard
  */
 
-import { Interface, MaxUint256 } from 'ethers';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
 import type { LottoAgent } from '../../agent/LottoAgent.js';
 import { StrategySchema, type Strategy } from '../../config/strategy.js';
-import { GAS_ESTIMATES } from '../../config/defaults.js';
+import { loadStrategy as loadStrategyFromFile } from '../../config/loader.js';
 import { getWalletInfo, getOperatorAccountId } from '../../hedera/wallet.js';
-import { executeEncodedCall } from '../../hedera/contracts.js';
+import { transferAllPrizes } from '../../hedera/contracts.js';
 import { getTokenBalances, getNfts } from '../../hedera/mirror.js';
 import { getUserState } from '../client.js';
 import type { ServerContext, SessionRecord } from './types.js';
 import { hbarToNumber } from '../../utils/format.js';
-import { LazyLottoABI } from '../../utils/abi.js';
 import { transferHbar, transferToken } from '../../hedera/transfers.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── Registration ────────────────────────────────────────────────
 
@@ -90,7 +83,10 @@ export function registerSingleUserTools(
         // Persist session history to disk (best-effort)
         try {
           const { writeFileSync, mkdirSync, existsSync } = await import('node:fs');
-          const dir = '.session-history';
+          const { join, dirname } = await import('node:path');
+          const { fileURLToPath } = await import('node:url');
+          const projectRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+          const dir = join(projectRoot, '.session-history');
           if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
           writeFileSync(
             `${dir}/sessions.json`,
@@ -105,9 +101,10 @@ export function registerSingleUserTools(
           poolsEvaluated: report.poolsEvaluated,
           totalEntries: report.totalEntries,
           totalSpent: report.totalSpent,
+          spentByToken: report.spentByToken,
           totalWins: report.totalWins,
-          currency: report.currency,
-          net: report.totalWins - report.totalSpent,
+          totalPrizeValue: report.totalPrizeValue,
+          prizesByToken: report.prizesByToken,
           poolResults: report.poolResults,
         });
       } catch (e) {
@@ -123,8 +120,12 @@ export function registerSingleUserTools(
   server.tool(
     'agent_status',
     'Get agent status: wallet balances, pending prizes, session history, current strategy, cumulative stats.',
-    {},
-    async () => {
+    {
+      auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
+    },
+    async ({ auth_token }) => {
+      const authErr = requireAuth(auth_token);
+      if (authErr) return authErr;
       try {
         const info = await getWalletInfo(client);
         const accountId = info.accountId.toString();
@@ -198,22 +199,10 @@ export function registerSingleUserTools(
           });
         }
 
-        // Encode transferPendingPrizes(address, uint256)
         const ownerEvmAddress = toEvmAddress(ownerEoa);
-        const iface = new Interface(LazyLottoABI);
-        const encoded = iface.encodeFunctionData('transferPendingPrizes', [
-          ownerEvmAddress,
-          MaxUint256,
-        ]);
-
         const contractId = process.env.LAZYLOTTO_CONTRACT_ID;
         if (!contractId) return errorResult('LAZYLOTTO_CONTRACT_ID not set in environment');
-        const txResult = await executeEncodedCall(
-          client,
-          contractId,
-          GAS_ESTIMATES.transferPendingPrizes.base,
-          encoded
-        );
+        const txResult = await transferAllPrizes(client, contractId, ownerEvmAddress);
 
         return json({
           transferred: state.pendingPrizesCount,
@@ -240,16 +229,16 @@ export function registerSingleUserTools(
           z.string().describe('JSON string of a full strategy object'),
         ])
         .describe('Strategy name or JSON object'),
+      auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
-    async ({ strategy: input }) => {
+    async ({ strategy: input, auth_token }) => {
+      const authErr = requireAuth(auth_token);
+      if (authErr) return authErr;
       try {
         let parsed: Strategy;
 
         if (['conservative', 'balanced', 'aggressive'].includes(input)) {
-          // Load built-in strategy — resolve relative to *this* file
-          const stratPath = resolve(__dirname, '..', '..', '..', 'strategies', `${input}.json`);
-          const raw = JSON.parse(readFileSync(stratPath, 'utf-8'));
-          parsed = StrategySchema.parse(raw);
+          parsed = loadStrategyFromFile(input);
         } else {
           // Parse as JSON strategy object
           const raw = JSON.parse(input);
@@ -283,8 +272,12 @@ export function registerSingleUserTools(
   server.tool(
     'agent_wallet_info',
     'Detailed wallet info: account ID, HBAR balance, LAZY balance, token associations, active approvals, owner EOA, held NFTs.',
-    {},
-    async () => {
+    {
+      auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
+    },
+    async ({ auth_token }) => {
+      const authErr = requireAuth(auth_token);
+      if (authErr) return authErr;
       try {
         const info = await getWalletInfo(client);
         const accountId = info.accountId.toString();
@@ -425,21 +418,9 @@ export function registerSingleUserTools(
 
           if (state.pendingPrizesCount > 0) {
             const ownerEvmAddress = toEvmAddress(ownerEoa);
-            const iface = new Interface(LazyLottoABI);
-            const encoded = iface.encodeFunctionData(
-              'transferPendingPrizes',
-              [ownerEvmAddress, MaxUint256]
-            );
-
             const contractId = process.env.LAZYLOTTO_CONTRACT_ID;
             if (!contractId) return errorResult('LAZYLOTTO_CONTRACT_ID not set in environment');
-            const txResult = await executeEncodedCall(
-              client,
-              contractId,
-              GAS_ESTIMATES.transferPendingPrizes.base,
-              encoded
-            );
-
+            const txResult = await transferAllPrizes(client, contractId, ownerEvmAddress);
             transferred = state.pendingPrizesCount;
             transferTxId = txResult.transactionId;
           }
@@ -474,8 +455,12 @@ export function registerSingleUserTools(
     'Comprehensive audit of agent configuration: wallet balances, win rate boost, NFT delegation status, ' +
       'token approvals, strategy summary, prize destination, pending prizes, contract addresses. ' +
       'Returns warnings and actionable recommendations.',
-    {},
-    async () => {
+    {
+      auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
+    },
+    async ({ auth_token }) => {
+      const authErr = requireAuth(auth_token);
+      if (authErr) return authErr;
       try {
         const { AuditReport } = await import('../../agent/AuditReport.js');
         const audit = new AuditReport(client, agent.getStrategy());
@@ -494,8 +479,12 @@ export function registerSingleUserTools(
     'Check onboarding status and return a step-by-step checklist. ' +
       'Each step has a status (done/missing/warning) and instructions. ' +
       'Use this to guide users through first-time setup conversationally.',
-    {},
-    async () => {
+    {
+      auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
+    },
+    async ({ auth_token }) => {
+      const authErr = requireAuth(auth_token);
+      if (authErr) return authErr;
       try {
         const steps: {
           step: number;

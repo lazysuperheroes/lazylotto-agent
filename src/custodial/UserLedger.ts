@@ -1,7 +1,7 @@
 import type { PersistentStore } from './PersistentStore.js';
 import type { AccountingService } from './AccountingService.js';
-import type { UserAccount, UserBalances, DepositRecord, TokenBalanceEntry } from './types.js';
-import { InsufficientBalanceError, UserNotFoundError, UserInactiveError, getTokenEntry, emptyTokenEntry } from './types.js';
+import type { UserAccount, UserBalances } from './types.js';
+import { InsufficientBalanceError, UserNotFoundError, UserInactiveError, emptyTokenEntry } from './types.js';
 import { roundForToken } from '../utils/math.js';
 
 // ── UserLedger ──────────────────────────────────────────────────
@@ -141,6 +141,7 @@ export class UserLedger {
    * @throws InsufficientBalanceError if available < amount
    */
   reserve(userId: string, amount: number, token: string): UserBalances {
+    if (amount < 0) throw new Error(`reserve: amount must be non-negative, got ${amount}`);
     amount = roundForToken(amount, token);
     const user = this.getUserOrThrow(userId);
     if (!user.active) throw new UserInactiveError(userId);
@@ -169,6 +170,7 @@ export class UserLedger {
    * Called once the on-chain lottery entries have been confirmed.
    */
   settleSpend(userId: string, amountSpent: number, token: string): UserBalances {
+    if (amountSpent < 0) throw new Error(`settleSpend: amount must be non-negative, got ${amountSpent}`);
     amountSpent = roundForToken(amountSpent, token);
     return this.store.updateBalance(userId, (b) => {
       const entry = b.tokens[token] ?? emptyTokenEntry();
@@ -194,6 +196,7 @@ export class UserLedger {
    * funds are not permanently locked.
    */
   releaseReserve(userId: string, amount: number, token: string): UserBalances {
+    if (amount < 0) throw new Error(`releaseReserve: amount must be non-negative, got ${amount}`);
     amount = roundForToken(amount, token);
     return this.store.updateBalance(userId, (b) => {
       const entry = b.tokens[token] ?? emptyTokenEntry();
@@ -214,56 +217,6 @@ export class UserLedger {
         },
       };
     });
-  }
-
-  // ── Withdrawals ───────────────────────────────────────────────
-
-  /**
-   * Deduct from available balance for an outbound withdrawal.
-   *
-   * The caller is responsible for executing the on-chain token transfer
-   * after this method returns. If the transfer fails, the caller must
-   * reverse the balance change manually.
-   *
-   * @throws UserNotFoundError        if user does not exist
-   * @throws InsufficientBalanceError if available < amount
-   */
-  async processWithdrawal(userId: string, amount: number, token: string): Promise<UserBalances> {
-    amount = roundForToken(amount, token);
-    const user = this.getUserOrThrow(userId);
-
-    // Atomic check-and-deduct
-    const newBalances = this.store.updateBalance(userId, (b) => {
-      const entry = b.tokens[token] ?? emptyTokenEntry();
-      if (entry.available < amount) {
-        throw new InsufficientBalanceError(userId, amount, entry.available);
-      }
-      return {
-        tokens: {
-          ...b.tokens,
-          [token]: {
-            ...entry,
-            available: entry.available - amount,
-            totalWithdrawn: entry.totalWithdrawn + amount,
-          },
-        },
-      };
-    });
-
-    // Flush immediately for financial durability (bypass debounce)
-    await this.store.flush();
-
-    // Fire HCS-20 accounting (non-blocking)
-    try {
-      await this.accounting.recordWithdrawal(user.hederaAccountId, amount);
-    } catch (err) {
-      console.warn(
-        `[UserLedger] HCS-20 recordWithdrawal failed for user ${userId}:`,
-        err,
-      );
-    }
-
-    return newBalances;
   }
 
   // ── User Lifecycle ────────────────────────────────────────────

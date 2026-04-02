@@ -192,6 +192,7 @@ describe('Agent Play Loop (integration)', () => {
           wins: 0,
           prizesClaimed: 0,
           prizesTransferred: 0,
+          prizeDetails: [],
         };
         reportGenerator.addPoolResult(result);
       }
@@ -251,6 +252,7 @@ describe('Agent Play Loop (integration)', () => {
         wins: 1,
         prizesClaimed: 0,
         prizesTransferred: 1,
+        prizeDetails: [{ fungibleAmount: 50, fungibleToken: 'HBAR' }],
       });
 
       reportGenerator.addPoolResult({
@@ -263,6 +265,7 @@ describe('Agent Play Loop (integration)', () => {
         wins: 0,
         prizesClaimed: 0,
         prizesTransferred: 0,
+        prizeDetails: [],
       });
 
       const report = reportGenerator.generate();
@@ -300,6 +303,7 @@ describe('Agent Play Loop (integration)', () => {
             wins: 0,
             prizesClaimed: 0,
             prizesTransferred: 0,
+            prizeDetails: [],
           });
         } catch {
           // Agent catches per-pool errors and continues
@@ -313,6 +317,7 @@ describe('Agent Play Loop (integration)', () => {
             wins: 0,
             prizesClaimed: 0,
             prizesTransferred: 0,
+            prizeDetails: [],
           });
         }
       }
@@ -334,7 +339,7 @@ describe('Agent Play Loop (integration)', () => {
       smallBudget.recordSpend(1, 10, 'hbar', 2);
       reportGenerator.addPoolResult({
         poolId: 1, poolName: 'Pool 1', entriesBought: 2,
-        amountSpent: 10, feeTokenSymbol: 'HBAR', rolled: true, wins: 0, prizesClaimed: 0, prizesTransferred: 0,
+        amountSpent: 10, feeTokenSymbol: 'HBAR', rolled: true, wins: 0, prizesClaimed: 0, prizesTransferred: 0, prizeDetails: [],
       });
 
       // Pool 2: budget only has 2 left, can't afford entryFee=5

@@ -11,6 +11,10 @@ import {
   UserInactiveError,
   UserNotFoundError,
 } from './types.js';
+import { registerToken, roundForToken } from '../utils/math.js';
+
+// Register a test LAZY token with 1 decimal place for rounding tests
+registerToken('test-lazy', 1, 'LAZY');
 
 // -- Mock helpers -----------------------------------------------------------
 
@@ -233,21 +237,6 @@ describe('UserLedger', () => {
     assert.equal(bal.tokens.hbar.reserved, 0);
   });
 
-  // -- processWithdrawal ------------------------------------------------------
-
-  it('processWithdrawal deducts from available', async () => {
-    const balances = await ledger.processWithdrawal('user-1', 60, 'hbar');
-    assert.equal(balances.tokens.hbar.available, 40);
-    assert.equal(balances.tokens.hbar.totalWithdrawn, 60);
-  });
-
-  it('processWithdrawal throws InsufficientBalanceError', async () => {
-    await assert.rejects(
-      () => ledger.processWithdrawal('user-1', 999, 'hbar'),
-      (err: unknown) => err instanceof InsufficientBalanceError,
-    );
-  });
-
   // -- canAfford --------------------------------------------------------------
 
   it('canAfford returns correct boolean', () => {
@@ -256,5 +245,169 @@ describe('UserLedger', () => {
     assert.equal(ledger.canAfford('user-1', 0, 'hbar'), true);
     // Non-existent user
     assert.equal(ledger.canAfford('no-such-user', 1, 'hbar'), false);
+  });
+});
+
+// -- Rake rounding with LAZY (1 decimal) ------------------------------------
+
+describe('Rake rounding with LAZY (1 decimal)', () => {
+  const AGENT_ACCOUNT = '0.0.9999';
+  const TOKEN = 'test-lazy'; // registered above with 1 decimal
+  let store: PersistentStore;
+  let accounting: ReturnType<typeof createMockAccounting>;
+  let ledger: UserLedger;
+
+  function freshStore(initialAvailable = 0): PersistentStore {
+    const user = makeUser({
+      rakePercent: 5,
+      balances: {
+        tokens: {
+          [TOKEN]: { available: initialAvailable, reserved: 0, totalDeposited: 0, totalWithdrawn: 0, totalRake: 0 },
+        },
+      },
+    });
+    const users = new Map<string, UserAccount>();
+    users.set(user.userId, user);
+    return createMockStore({ users });
+  }
+
+  beforeEach(() => {
+    store = freshStore(0);
+    accounting = createMockAccounting();
+    ledger = new UserLedger(store, accounting, AGENT_ACCOUNT);
+  });
+
+  // 1. Clean division: 5% of 100 LAZY
+  it('5% rake on 100 LAZY: 5.0 rake, 95.0 net (clean division)', async () => {
+    const balances = await ledger.creditDeposit('user-1', 100, 'tx-lazy-1', 5, TOKEN);
+    const entry = balances.tokens[TOKEN];
+    assert.equal(entry.available, 95.0);
+    assert.equal(entry.totalDeposited, 100);
+    assert.equal(entry.totalRake, 5.0);
+
+    const op = store.getOperator();
+    assert.equal(op.balances[TOKEN], 5.0);
+  });
+
+  // 2. Rounding up: 5% of 3 LAZY = 0.15 -> rounds to 0.2
+  it('5% rake on 3 LAZY: 0.2 rake (rounds from 0.15), 2.8 net', async () => {
+    const balances = await ledger.creditDeposit('user-1', 3, 'tx-lazy-2', 5, TOKEN);
+    const entry = balances.tokens[TOKEN];
+
+    const expectedRake = roundForToken(3 * 0.05, TOKEN); // 0.15 -> 0.2
+    const expectedNet = roundForToken(3 - expectedRake, TOKEN); // 2.8
+
+    assert.equal(expectedRake, 0.2, 'rake should round 0.15 to 0.2');
+    assert.equal(expectedNet, 2.8, 'net should be 2.8');
+
+    assert.equal(entry.totalRake, 0.2);
+    assert.equal(entry.available, 2.8);
+  });
+
+  // 3. Tiny amount: 1% of 1 LAZY = 0.01 -> rounds to 0.0
+  it('1% rake on 1 LAZY: 0.0 rake (rounds from 0.01), 1.0 net -- operator gets nothing', async () => {
+    const balances = await ledger.creditDeposit('user-1', 1, 'tx-lazy-3', 1, TOKEN);
+    const entry = balances.tokens[TOKEN];
+
+    assert.equal(entry.totalRake, 0.0, 'rake rounds down to zero on small amounts');
+    assert.equal(entry.available, 1.0, 'user gets the full amount when rake rounds to zero');
+
+    const op = store.getOperator();
+    assert.equal(op.balances[TOKEN] ?? 0, 0, 'operator gets nothing');
+  });
+
+  // 4. Invariant: rakeAmount + netAmount <= grossAmount (rounding cannot create tokens)
+  it('rakeAmount + netAmount <= grossAmount for various amounts', async () => {
+    const testCases = [
+      { gross: 100, rake: 5 },
+      { gross: 3, rake: 5 },
+      { gross: 1, rake: 1 },
+      { gross: 0.1, rake: 5 },
+      { gross: 7, rake: 3 },
+      { gross: 0.3, rake: 10 },
+      { gross: 999.9, rake: 5 },
+    ];
+
+    for (const { gross, rake } of testCases) {
+      const rakeAmount = roundForToken(gross * (rake / 100), TOKEN);
+      const netAmount = roundForToken(gross - rakeAmount, TOKEN);
+
+      assert.ok(
+        rakeAmount + netAmount <= gross,
+        `Invariant violated: rake=${rakeAmount} + net=${netAmount} = ${rakeAmount + netAmount} > gross=${gross} (rake%=${rake})`,
+      );
+
+      // Also verify neither component is negative
+      assert.ok(rakeAmount >= 0, `Negative rake for gross=${gross}, rake%=${rake}`);
+      assert.ok(netAmount >= 0, `Negative net for gross=${gross}, rake%=${rake}`);
+    }
+  });
+
+  // 5. Zero rake (0%): full amount credited, operator gets nothing
+  it('0% rake: full amount credited, operator gets nothing', async () => {
+    const balances = await ledger.creditDeposit('user-1', 50, 'tx-lazy-zero', 0, TOKEN);
+    const entry = balances.tokens[TOKEN];
+
+    assert.equal(entry.available, 50.0, 'user gets the full amount');
+    assert.equal(entry.totalDeposited, 50);
+    assert.equal(entry.totalRake, 0);
+
+    const op = store.getOperator();
+    assert.equal(op.balances[TOKEN] ?? 0, 0, 'operator collects nothing');
+  });
+
+  // 6. Edge case: grossAmount = 0.1 LAZY with 5% rake
+  it('0.1 LAZY with 5% rake: 0.0 rake (rounds from 0.005), 0.1 net', async () => {
+    const balances = await ledger.creditDeposit('user-1', 0.1, 'tx-lazy-tiny', 5, TOKEN);
+    const entry = balances.tokens[TOKEN];
+
+    // 5% of 0.1 = 0.005, roundToDecimals(0.005, 1) = Math.round(0.05)/10 = 0/10 = 0.0
+    assert.equal(entry.totalRake, 0.0, 'rake rounds to zero for sub-minimum amounts');
+    assert.equal(entry.available, 0.1, 'user gets full 0.1 when rake rounds to zero');
+
+    const op = store.getOperator();
+    assert.equal(op.balances[TOKEN] ?? 0, 0, 'operator gets nothing on sub-minimum rake');
+  });
+});
+
+describe('Negative amount guards', () => {
+  let store: ReturnType<typeof createMockStore>;
+  let ledger: UserLedger;
+
+  beforeEach(() => {
+    store = createMockStore();
+    const user = makeUser();
+    user.balances.tokens['hbar'] = { available: 100, reserved: 20, totalDeposited: 120, totalWithdrawn: 0, totalRake: 0 };
+    store.saveUser(user);
+    ledger = new UserLedger(store as unknown as PersistentStore, createMockAccounting() as unknown as AccountingService, '0.0.agent');
+  });
+
+  it('reserve throws on negative amount', () => {
+    assert.throws(
+      () => ledger.reserve('user-1', -5, 'hbar'),
+      { message: /non-negative/ },
+    );
+  });
+
+  it('settleSpend throws on negative amount', () => {
+    assert.throws(
+      () => ledger.settleSpend('user-1', -10, 'hbar'),
+      { message: /non-negative/ },
+    );
+  });
+
+  it('releaseReserve throws on negative amount', () => {
+    assert.throws(
+      () => ledger.releaseReserve('user-1', -1, 'hbar'),
+      { message: /non-negative/ },
+    );
+  });
+
+  it('reserve allows zero amount (no-op)', () => {
+    const before = store.getUser('user-1')!.balances.tokens['hbar'];
+    ledger.reserve('user-1', 0, 'hbar');
+    const after = store.getUser('user-1')!.balances.tokens['hbar'];
+    assert.equal(after.available, before.available);
+    assert.equal(after.reserved, before.reserved);
   });
 });

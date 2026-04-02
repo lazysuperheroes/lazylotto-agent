@@ -29,6 +29,7 @@ const TEST_CONFIG: CustodialConfig = {
   minDepositAmount: 1,
   maxUserBalance: 10_000,
   maxUsersPerPlayCycle: 10,
+  gasReservePerUser: 5,
   hcs20Tick: 'LLCRED',
   hcs20TopicId: null,
   dataDir: '.test-data',

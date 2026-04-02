@@ -1,3 +1,5 @@
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Strategy } from '../config/strategy.js';
 
 // ── User ──────────────────────────────────────────────────────
@@ -129,9 +131,12 @@ export interface PlaySessionResult {
     amountSpent: number;
     rolled: boolean;
     wins: number;
+    prizeDetails: { fungibleAmount?: number; fungibleToken?: string; nftCount?: number }[];
   }[];
   totalSpent: number;
   totalWins: number;
+  totalPrizeValue: number;
+  prizesByToken: Record<string, number>;
   prizesTransferred: boolean;
   gasCostHbar: number;
   amountReserved: number;
@@ -178,6 +183,8 @@ export interface CustodialConfig {
   minDepositAmount: number;
   maxUserBalance: number;
   maxUsersPerPlayCycle: number;
+  /** Minimum HBAR to reserve per active user with balance > 0, to cover gas costs. */
+  gasReservePerUser: number;
   hcs20Tick: string;
   hcs20TopicId: string | null;
   dataDir: string;
@@ -201,9 +208,11 @@ export function loadCustodialConfig(): CustodialConfig {
     minDepositAmount: 1,
     maxUserBalance: Number(process.env.MAX_USER_BALANCE ?? 10_000),
     maxUsersPerPlayCycle: 10,
+    gasReservePerUser: Number(process.env.GAS_RESERVE_PER_USER ?? 5),
     hcs20Tick: process.env.HCS20_TICK ?? 'LLCRED',
     hcs20TopicId: process.env.HCS20_TOPIC_ID || null,
-    dataDir: '.custodial-data',
+    dataDir: process.env.CUSTODIAL_DATA_DIR
+      ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..', '.custodial-data'),
   };
 }
 

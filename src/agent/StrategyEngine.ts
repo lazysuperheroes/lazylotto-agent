@@ -1,4 +1,4 @@
-import type { Strategy, PoolFilter } from '../config/strategy.js';
+import type { Strategy } from '../config/strategy.js';
 import type { PoolSummary, EvCalculation } from '../mcp/client.js';
 
 export interface ScoredPool {

@@ -3,7 +3,9 @@ dist/
 .env
 .agent-config.json
 .custodial-data/
+.session-history/
 *.tsbuildinfo
+play-history-*.csv
 
 # Claude Code frameworks (exclude all)
 .claude/

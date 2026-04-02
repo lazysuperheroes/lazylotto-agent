@@ -201,10 +201,18 @@ export class PersistentStore {
   private flushing = false;
   private flushPromise: Promise<void> | null = null;
 
+  private anyDirty(): boolean {
+    return this.dirtyUsers || this.dirtyOperator || this.dirtyDeposits ||
+      this.dirtyPlays || this.dirtyWithdrawals || this.dirtyGas ||
+      this.dirtyDeadLetters || this.dirtyWatermark;
+  }
+
   async flush(): Promise<void> {
-    // If a flush is in progress, wait for it to complete
+    // If a flush is in progress, wait for it then re-check for new dirty data
     if (this.flushing && this.flushPromise) {
       await this.flushPromise;
+      // Mutations may have occurred during the in-progress flush — flush again if dirty
+      if (this.anyDirty()) return this.flush();
       return;
     }
     this.flushing = true;
@@ -216,6 +224,10 @@ export class PersistentStore {
 
   private async doFlush(): Promise<void> {
     try {
+      // Rotate BEFORE snapshotting dirty flags so rotated data is
+      // included in this write cycle (avoids an extra flush round-trip)
+      await this.rotateRecords();
+
       const writes: Promise<void>[] = [];
       // Snapshot dirty flags BEFORE building writes
       const snap = {
@@ -253,9 +265,6 @@ export class PersistentStore {
       if (snap.withdrawals) this.dirtyWithdrawals = false;
       if (snap.gas) this.dirtyGas = false;
       if (snap.watermark) this.dirtyWatermark = false;
-
-      // Run record rotation check
-      this.rotateRecords();
     } finally {
       this.flushing = false;
       this.flushPromise = null;
@@ -430,13 +439,13 @@ export class PersistentStore {
   }
 
   /** Archive old records when an array exceeds MAX_RECORDS. Keeps the latest half. */
-  private rotateIfNeeded<T>(arr: T[], name: string): T[] {
+  private async rotateIfNeeded<T>(arr: T[], name: string): Promise<T[]> {
     if (arr.length <= MAX_RECORDS) return arr;
     const keep = Math.floor(MAX_RECORDS / 2);
     const archived = arr.slice(0, arr.length - keep);
     const archivePath = this.path(`${name}-archive-${Date.now()}.json`);
     try {
-      writeFileSync(archivePath, JSON.stringify(archived, null, 2), 'utf-8');
+      await writeFile(archivePath, JSON.stringify(archived, null, 2), 'utf-8');
       console.log(`[PersistentStore] Archived ${archived.length} ${name} records to ${archivePath}`);
     } catch (e) {
       console.warn(`[PersistentStore] Failed to archive ${name}:`, e);
@@ -445,10 +454,25 @@ export class PersistentStore {
   }
 
   /** Run rotation check on all record arrays. Call periodically or on flush. */
-  rotateRecords(): void {
-    this.deposits = this.rotateIfNeeded(this.deposits, 'deposits');
-    this.plays = this.rotateIfNeeded(this.plays, 'plays');
-    this.withdrawals = this.rotateIfNeeded(this.withdrawals, 'withdrawals');
-    this.gasLog = this.rotateIfNeeded(this.gasLog, 'gas-log');
+  async rotateRecords(): Promise<void> {
+    const dLen = this.deposits.length;
+    this.deposits = await this.rotateIfNeeded(this.deposits, 'deposits');
+    if (this.deposits.length !== dLen) this.dirtyDeposits = true;
+
+    const pLen = this.plays.length;
+    this.plays = await this.rotateIfNeeded(this.plays, 'plays');
+    if (this.plays.length !== pLen) this.dirtyPlays = true;
+
+    const wLen = this.withdrawals.length;
+    this.withdrawals = await this.rotateIfNeeded(this.withdrawals, 'withdrawals');
+    if (this.withdrawals.length !== wLen) this.dirtyWithdrawals = true;
+
+    const gLen = this.gasLog.length;
+    this.gasLog = await this.rotateIfNeeded(this.gasLog, 'gas-log');
+    if (this.gasLog.length !== gLen) this.dirtyGas = true;
+
+    const dlLen = this.deadLetters.length;
+    this.deadLetters = await this.rotateIfNeeded(this.deadLetters, 'dead-letters');
+    if (this.deadLetters.length !== dlLen) this.dirtyDeadLetters = true;
   }
 }

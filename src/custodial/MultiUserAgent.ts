@@ -17,6 +17,7 @@ import type {
 import { UserNotFoundError, InsufficientBalanceError, UserInactiveError, hasAvailableToken, reserveSummary } from './types.js';
 import type { SessionReport } from '../agent/ReportGenerator.js';
 import { randomUUID } from 'node:crypto';
+import { reconcile, type ReconciliationResult } from './Reconciliation.js';
 
 // ── Health snapshot returned by getHealth() ─────────────────────
 
@@ -234,14 +235,25 @@ export class MultiUserAgent {
 
     try {
       // Build a user-specific strategy with their EOA as prize destination
+      // Cap the token budget to the reserved amount to prevent overspend
+      const cappedBudgets = { ...user.strategySnapshot.budget.tokenBudgets };
+      if (cappedBudgets[primaryToken]) {
+        cappedBudgets[primaryToken] = {
+          ...cappedBudgets[primaryToken],
+          maxPerSession: Math.min(cappedBudgets[primaryToken].maxPerSession, sessionBudget),
+        };
+      }
       const userStrategy = {
         ...user.strategySnapshot,
+        budget: {
+          ...user.strategySnapshot.budget,
+          tokenBudgets: cappedBudgets,
+        },
         playStyle: {
           ...user.strategySnapshot.playStyle,
           ownerAddress: user.eoaAddress,
           transferToOwner: true,
         },
-        // NO budget override — LottoAgent handles per-token budgets
       };
 
       // Create a fresh LottoAgent with user's strategy
@@ -256,6 +268,19 @@ export class MultiUserAgent {
       const unused = sessionBudget - actualSpent;
       if (unused > 0) {
         this.ledger.releaseReserve(userId, unused, primaryToken);
+      }
+
+      // Estimate gas cost (~0.000000082 HBAR per gas unit, ~1.97M gas per pool)
+      // Only count pools that actually executed on-chain transactions
+      const poolsWithTx = report.poolResults.filter(r => r.entriesBought > 0).length;
+      const estimatedGas = poolsWithTx * 1_970_000 * 0.000000082;
+      if (estimatedGas > 0) {
+        this.gasTracker.recordGas(
+          `play-${userId}-${Date.now()}`,
+          userId,
+          'playSession',
+          estimatedGas,
+        );
       }
 
       // Build play session result
@@ -275,11 +300,14 @@ export class MultiUserAgent {
           amountSpent: r.amountSpent,
           rolled: r.rolled,
           wins: r.wins,
+          prizeDetails: r.prizeDetails,
         })),
         totalSpent: actualSpent,
         totalWins: report.totalWins,
+        totalPrizeValue: report.totalPrizeValue,
+        prizesByToken: report.prizesByToken,
         prizesTransferred: true, // LottoAgent handles this in phase 5
-        gasCostHbar: 0, // TODO: capture from transaction receipts
+        gasCostHbar: estimatedGas,
         amountReserved: sessionBudget,
         amountSettled: actualSpent,
         amountReleased: unused,
@@ -483,6 +511,30 @@ export class MultiUserAgent {
       throw new InsufficientBalanceError('operator', amount, tokenBalance);
     }
 
+    // For HBAR withdrawals, ensure enough gas remains for active users.
+    // Each active user with a positive balance needs gasReservePerUser HBAR
+    // to cover transaction fees for their play/withdrawal operations.
+    if (token === 'HBAR') {
+      const activeWithBalance = this.store.getAllUsers().filter((u) => {
+        if (!u.active) return false;
+        return Object.values(u.balances.tokens).some((e) => e.available > 0 || e.reserved > 0);
+      });
+      const requiredReserve = activeWithBalance.length * this.config.gasReservePerUser;
+      const { hbarToNumber } = await import('../utils/format.js');
+      const { getWalletInfo } = await import('../hedera/wallet.js');
+      const info = await getWalletInfo(this.client);
+      const walletHbar = hbarToNumber(info.hbarBalance);
+      const remainingAfter = walletHbar - amount;
+      if (remainingAfter < requiredReserve) {
+        throw new Error(
+          `Operator HBAR withdrawal would leave ${remainingAfter.toFixed(2)} HBAR in wallet, ` +
+            `but ${activeWithBalance.length} active user(s) require ${requiredReserve.toFixed(2)} HBAR ` +
+            `gas reserve (${this.config.gasReservePerUser} HBAR/user). ` +
+            `Max withdrawable: ${Math.max(0, walletHbar - requiredReserve).toFixed(2)} HBAR.`
+        );
+      }
+    }
+
     const { transferHbar, transferToken } = await import('../hedera/transfers.js');
     const sender = getOperatorAccountId(this.client);
 
@@ -559,6 +611,13 @@ export class MultiUserAgent {
       errorCount: this.errorCount,
       operator: this.store.getOperator(),
     };
+  }
+
+  /**
+   * Run on-chain balance reconciliation against the internal ledger.
+   */
+  async reconcile(): Promise<ReconciliationResult> {
+    return reconcile(this.client, this.store);
   }
 
   /**

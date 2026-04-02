@@ -149,8 +149,12 @@ Claude to connect.
   "mcpServers": {
     "lazylotto-agent": {
       "command": "node",
-      "args": ["--import", "tsx", "src/index.ts", "--mcp-server"],
-      "cwd": "D:\\github\\lazylotto-agent",
+      "args": [
+        "--import",
+        "file:///D:/github/lazylotto-agent/node_modules/tsx/dist/esm/index.mjs",
+        "D:\\github\\lazylotto-agent\\src\\index.ts",
+        "--mcp-server"
+      ],
       "env": {
         "DOTENV_CONFIG_PATH": "D:\\github\\lazylotto-agent\\.env"
       }
@@ -158,6 +162,11 @@ Claude to connect.
   }
 }
 ```
+
+> **Windows notes**:
+> - The `--import` path MUST use `file:///` URL format (forward slashes) — Node's ESM loader rejects bare Windows paths like `D:\...`
+> - The script path and env paths can use Windows backslashes
+> - Claude Desktop ignores `cwd`, so all paths must be absolute
 
 Restart Claude Desktop. You should see the agent's tools in the tool list.
 

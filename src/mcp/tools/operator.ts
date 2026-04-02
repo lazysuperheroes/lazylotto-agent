@@ -1,7 +1,7 @@
 /**
  * Operator (platform admin) MCP tools.
  *
- * Registers: operator_balance, operator_withdraw_fees, operator_health
+ * Registers: operator_balance, operator_withdraw_fees, operator_reconcile, operator_health
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -22,8 +22,12 @@ export function registerOperatorTools(
   server.tool(
     'operator_balance',
     'View operator platform balance: rake collected, gas spent, net profit.',
-    {},
-    async () => {
+    {
+      auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
+    },
+    async ({ auth_token }) => {
+      const authErr = requireAuth(auth_token);
+      if (authErr) return authErr;
       try {
         const op = multiUser.getOperatorBalance();
         const netProfit: Record<string, number> = {};
@@ -68,10 +72,32 @@ export function registerOperatorTools(
   );
 
   server.tool(
+    'operator_reconcile',
+    'Compare on-chain wallet balances against internal ledger. Reports per-token deltas and solvency status.',
+    {
+      auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
+    },
+    async ({ auth_token }) => {
+      const authErr = requireAuth(auth_token);
+      if (authErr) return authErr;
+      try {
+        const result = await multiUser.reconcile();
+        return json(result);
+      } catch (e) {
+        return errorResult(`Reconciliation failed: ${errorMsg(e)}`);
+      }
+    }
+  );
+
+  server.tool(
     'operator_health',
     'Health check: uptime, deposit watcher status, error count, active users, pending reserves.',
-    {},
-    async () => {
+    {
+      auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
+    },
+    async ({ auth_token }) => {
+      const authErr = requireAuth(auth_token);
+      if (authErr) return authErr;
       try {
         return json(multiUser.getHealth());
       } catch (e) {

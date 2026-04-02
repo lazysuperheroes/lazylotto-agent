@@ -8,7 +8,16 @@ function baseUrl(): string {
 }
 
 async function mirrorGet<T>(path: string): Promise<T> {
-  const url = `${baseUrl()}${path}`;
+  // Handle pagination next links which include /api/v1 prefix
+  let url: string;
+  if (path.startsWith('/api/v1')) {
+    const base = baseUrl();
+    // Strip /api/v1 from base to get the origin
+    const origin = base.replace(/\/api\/v1$/, '');
+    url = `${origin}${path}`;
+  } else {
+    url = `${baseUrl()}${path}`;
+  }
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`Mirror node ${res.status}: ${url}`);
@@ -30,17 +39,16 @@ export interface AccountTokensResponse {
 export async function getTokenBalances(
   accountId: string
 ): Promise<TokenBalance[]> {
-  const data = await mirrorGet<AccountTokensResponse>(
-    `/accounts/${accountId}/tokens`
-  );
-  return data.tokens;
-}
+  const all: TokenBalance[] = [];
+  let next: string | null = `/accounts/${accountId}/tokens?limit=100`;
 
-export async function getHbarBalance(accountId: string): Promise<number> {
-  const data = await mirrorGet<{ balance: { balance: number } }>(
-    `/balances?account.id=${accountId}`
-  );
-  return data.balance.balance;
+  while (next) {
+    const data: AccountTokensResponse = await mirrorGet<AccountTokensResponse>(next);
+    all.push(...(data.tokens ?? []));
+    next = data.links?.next ?? null;
+  }
+
+  return all;
 }
 
 export interface NftInfo {
@@ -50,11 +58,19 @@ export interface NftInfo {
   metadata: string;
 }
 
+interface NftPageResponse { nfts: NftInfo[]; links?: { next?: string } }
+
 export async function getNfts(accountId: string): Promise<NftInfo[]> {
-  const data = await mirrorGet<{ nfts: NftInfo[] }>(
-    `/accounts/${accountId}/nfts`
-  );
-  return data.nfts;
+  const all: NftInfo[] = [];
+  let next: string | null = `/accounts/${accountId}/nfts?limit=100`;
+
+  while (next) {
+    const data: NftPageResponse = await mirrorGet<NftPageResponse>(next);
+    all.push(...(data.nfts ?? []));
+    next = data.links?.next ?? null;
+  }
+
+  return all;
 }
 
 export async function getTokenInfo(
@@ -71,13 +87,21 @@ export interface TokenAllowance {
   amount_granted: number;
 }
 
+interface AllowancePageResponse { allowances: TokenAllowance[]; links?: { next?: string } }
+
 export async function getTokenAllowances(
   accountId: string
 ): Promise<TokenAllowance[]> {
-  const data = await mirrorGet<{ allowances: TokenAllowance[] }>(
-    `/accounts/${accountId}/allowances/tokens`
-  );
-  return data.allowances ?? [];
+  const all: TokenAllowance[] = [];
+  let next: string | null = `/accounts/${accountId}/allowances/tokens?limit=100`;
+
+  while (next) {
+    const data: AllowancePageResponse = await mirrorGet<AllowancePageResponse>(next);
+    all.push(...(data.allowances ?? []));
+    next = data.links?.next ?? null;
+  }
+
+  return all;
 }
 
 export interface MirrorTransaction {
@@ -107,6 +131,37 @@ export async function getTransactionsByAccount(
 
   const data = await mirrorGet<{ transactions: MirrorTransaction[] }>(path);
   return data.transactions ?? [];
+}
+
+/**
+ * Sum the charged_tx_fee for all transactions by an account within a time range.
+ * Used by reconciliation to account for actual network fees paid.
+ */
+interface FeeTransaction { charged_tx_fee: number; payer_account_id: string }
+interface FeePageResponse { transactions: FeeTransaction[]; links?: { next?: string } }
+
+export async function sumTransactionFees(
+  accountId: string,
+  fromTimestamp?: string,
+): Promise<number> {
+  let totalTinybar = 0;
+  let next: string | null =
+    `/transactions?account.id=${accountId}&limit=100&order=asc` +
+    (fromTimestamp ? `&timestamp=gt:${fromTimestamp}` : '');
+
+  while (next) {
+    const data: FeePageResponse = await mirrorGet<FeePageResponse>(next);
+
+    for (const tx of data.transactions ?? []) {
+      if (tx.payer_account_id === accountId) {
+        totalTinybar += tx.charged_tx_fee ?? 0;
+      }
+    }
+
+    next = data.links?.next ?? null;
+  }
+
+  return totalTinybar / 1e8; // Convert tinybars to HBAR
 }
 
 export async function waitForMirrorNode(): Promise<void> {

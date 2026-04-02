@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { LottoAgent } from '../agent/LottoAgent.js';
 import { createClient } from '../hedera/wallet.js';
 import {
@@ -68,7 +69,27 @@ export async function startMcpServer(
   const client = createClient();
 
   if (MCP_AUTH_TOKEN) {
+    if (MCP_AUTH_TOKEN.length < 32) {
+      if (multiUser) {
+        console.error(
+          '[MCP] FATAL: MCP_AUTH_TOKEN must be at least 32 characters. ' +
+            `Current length: ${MCP_AUTH_TOKEN.length}. Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+        );
+        process.exit(1);
+      } else {
+        console.warn(
+          `[MCP] WARNING: MCP_AUTH_TOKEN is only ${MCP_AUTH_TOKEN.length} characters. ` +
+            'Recommended minimum is 32 characters for security.'
+        );
+      }
+    }
     console.log('MCP auth token configured. Sensitive tools require authentication.');
+  } else if (multiUser) {
+    console.error(
+      '[MCP] FATAL: MCP_AUTH_TOKEN is required in multi-user mode. ' +
+        `Set MCP_AUTH_TOKEN in .env. Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+    );
+    process.exit(1);
   } else {
     console.warn(
       '[MCP] No MCP_AUTH_TOKEN set. All tools are unrestricted. ' +
@@ -103,8 +124,12 @@ export async function startMcpServer(
     authToken: MCP_AUTH_TOKEN,
     requireAuth: (providedToken?: string) => {
       if (!MCP_AUTH_TOKEN) return null; // No auth configured — allow
-      if (providedToken === MCP_AUTH_TOKEN) return null; // Valid token
-      return errorResult('Authentication required. Provide auth_token parameter.');
+      if (providedToken) {
+        // Hash both tokens to fixed 32 bytes — eliminates length oracle side-channel
+        const hash = (s: string) => createHash('sha256').update(s).digest();
+        if (timingSafeEqual(hash(providedToken), hash(MCP_AUTH_TOKEN))) return null;
+      }
+      return errorResult('Authentication required. Provide valid auth_token parameter.');
     },
   };
 

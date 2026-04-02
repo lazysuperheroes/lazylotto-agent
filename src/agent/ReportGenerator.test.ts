@@ -14,6 +14,7 @@ describe('ReportGenerator', () => {
       wins: 1,
       prizesClaimed: 0,
       prizesTransferred: 1,
+      prizeDetails: [],
       ...overrides,
     };
   }
