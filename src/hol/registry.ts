@@ -61,40 +61,49 @@ function saveAgentConfig(config: AgentConfig): void {
 // ── Profile builder ───────────────────────────────────────────
 
 function buildAgentProfile(hcs11: any) {
-  const isMultiUser = process.env.MULTI_USER_ENABLED === 'true';
+  const network = process.env.HEDERA_NETWORK ?? 'testnet';
+  const baseUrl = network === 'mainnet'
+    ? 'https://agent.lazysuperheroes.com'
+    : 'https://testnet-agent.lazysuperheroes.com';
 
   const capabilities = [
     AIAgentCapability.TRANSACTION_ANALYTICS,
     AIAgentCapability.WORKFLOW_AUTOMATION,
     AIAgentCapability.MARKET_INTELLIGENCE,
+    AIAgentCapability.MULTI_AGENT_COORDINATION,
   ];
 
-  if (isMultiUser) {
-    capabilities.push(AIAgentCapability.MULTI_AGENT_COORDINATION);
-  }
+  const bio =
+    'Multi-user custodial lottery agent on Hedera by Lazy Superheroes. ' +
+    'Plays LazyLotto pools on behalf of users — evaluates expected value, ' +
+    'buys entries, rolls for prizes, and transfers winnings to user EOAs. ' +
+    'Accepts deposits via memo-tagged transfers with configurable strategies ' +
+    'and full on-chain HCS-20 accounting. ' +
+    'Authenticate via Hedera signature challenge at ' + baseUrl + '/auth';
 
-  const bio = isMultiUser
-    ? 'Multi-user custodial agent that plays LazyLotto on Hedera on behalf of multiple users. ' +
-      'Accepts deposits via memo-tagged transfers, plays with configurable strategies, ' +
-      'routes prizes to user EOAs, and provides full on-chain HCS-20 accounting.'
-    : 'Autonomous agent that plays LazyLotto on Hedera. Evaluates pools by expected value, ' +
-      'buys entries, rolls for prizes, and transfers winnings to the owner wallet.';
-
-  // Use createAIAgentProfile which produces the correct HCS-11 schema
-  // (AgentBuilder.build() produces a flat structure that fails validation)
   return hcs11.createAIAgentProfile(
-    'LazyLotto Player Agent',   // display_name
-    1,                           // AIAgentType.AUTONOMOUS
+    'LazyLotto Agent',           // display_name
+    1,                            // AIAgentType.AUTONOMOUS
     capabilities,
-    'rule-based/ev-scoring',     // autonomous EV engine, optionally controlled by LLM via MCP
+    'rule-based/ev-scoring',      // model — autonomous EV engine, MCP-controlled
     {
-      alias: 'lazylotto-player',
+      alias: 'lazylotto-agent',
       bio,
       creator: 'Lazy Superheroes',
-      socials: [{ platform: 'website', handle: 'https://lazylotto.app' }],
+      socials: [
+        { platform: 'website', handle: baseUrl },
+        { platform: 'website', handle: 'https://docs.lazysuperheroes.com' },
+      ],
       properties: {
         game: 'LazyLotto',
         chain: 'hedera',
+        network,
+        auth_endpoint: `${baseUrl}/api/auth/challenge`,
+        discover_endpoint: `${baseUrl}/api/discover`,
+        mcp_endpoint: `${baseUrl}/mcp`,
+        dashboard: `${baseUrl}/dashboard`,
+        rake_range: `${process.env.RAKE_MIN_PERCENT ?? 2}-${process.env.RAKE_MAX_PERCENT ?? 5}%`,
+        accepted_tokens: 'HBAR,LAZY',
       },
     }
   );
