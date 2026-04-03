@@ -121,6 +121,7 @@ export default function DashboardPage() {
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notRegistered, setNotRegistered] = useState(false);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [sessions, setSessions] = useState<PlaySession[]>([]);
   const [lockLoading, setLockLoading] = useState(false);
@@ -152,6 +153,13 @@ export default function DashboardPage() {
           localStorage.removeItem('lazylotto:sessionToken');
           localStorage.removeItem('lazylotto:accountId');
           window.location.href = '/auth';
+          return;
+        }
+
+        if (statusRes.status === 404) {
+          // User authenticated but not registered as a player
+          setNotRegistered(true);
+          setLoading(false);
           return;
         }
 
@@ -272,6 +280,34 @@ export default function DashboardPage() {
             className="inline-block rounded-lg bg-primary px-6 py-3 font-semibold text-white transition-colors hover:bg-primary/90"
           >
             Go to Authentication
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  // --- Not registered state ---
+  if (notRegistered) {
+    const accountId = typeof window !== 'undefined' ? localStorage.getItem('lazylotto:accountId') : null;
+    return (
+      <div className="flex flex-1 items-center justify-center px-4">
+        <div className="w-full max-w-md rounded-xl border border-secondary p-8 text-center shadow-lg">
+          <h1 className="mb-3 font-heading text-xl text-foreground">
+            Welcome, {accountId ?? 'Explorer'}
+          </h1>
+          <p className="mb-2 text-sm text-muted">
+            You&apos;re authenticated but not yet registered as a player.
+          </p>
+          <p className="mb-6 text-sm text-muted">
+            To get started, connect the LazyLotto Agent to your Claude Desktop
+            using the MCP URL from the authentication page, then ask Claude to
+            register you and deposit funds.
+          </p>
+          <a
+            href="/auth"
+            className="inline-block rounded-lg bg-primary px-6 py-3 font-semibold text-white transition-colors hover:bg-primary/90"
+          >
+            Get Your MCP Connection
           </a>
         </div>
       </div>

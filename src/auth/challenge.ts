@@ -11,7 +11,7 @@ import { getRedis, KEY_PREFIX } from './redis.js';
 import type { AuthChallenge, HederaKeyType } from './types.js';
 import { getAccountKey } from '../hedera/mirror.js';
 
-const CHALLENGE_TTL_SECONDS = 300; // 5 minutes
+const CHALLENGE_TTL_SECONDS = 600; // 10 minutes — generous for first-time wallet connections
 
 /**
  * Build the human-readable challenge message the user sees in their wallet.

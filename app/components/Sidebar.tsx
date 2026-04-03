@@ -72,9 +72,9 @@ function ShieldIcon({ className }: { className?: string }) {
 // ---------------------------------------------------------------------------
 
 const NAV_ITEMS = [
-  { label: 'Connect Wallet', labelAuth: 'Account', href: '/auth', Icon: WalletIcon },
-  { label: 'Dashboard', href: '/dashboard', Icon: GridIcon },
-  { label: 'Admin', href: '/admin', Icon: ShieldIcon },
+  { label: 'Connect Wallet', labelAuth: 'Account', href: '/auth', Icon: WalletIcon, adminOnly: false },
+  { label: 'Dashboard', href: '/dashboard', Icon: GridIcon, adminOnly: false },
+  { label: 'Admin', href: '/admin', Icon: ShieldIcon, adminOnly: true },
 ];
 
 // ---------------------------------------------------------------------------
@@ -145,10 +145,16 @@ export function Sidebar() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
 
-  // Check auth state for conditional nav labels
+  // Check auth state + admin status for conditional nav
   useEffect(() => {
-    setIsAuthenticated(!!localStorage.getItem('lazylotto:sessionToken'));
+    const hasToken = !!localStorage.getItem('lazylotto:sessionToken');
+    setIsAuthenticated(hasToken);
+
+    const accountId = localStorage.getItem('lazylotto:accountId') ?? '';
+    const adminAccounts = (process.env.NEXT_PUBLIC_ADMIN_ACCOUNTS ?? '').split(',').map(a => a.trim());
+    setIsAdmin(hasToken && adminAccounts.includes(accountId));
   }, [pathname]); // Re-check on route change
 
   // Close sidebar on route change (mobile)
@@ -221,7 +227,7 @@ export function Sidebar() {
 
         {/* Navigation */}
         <nav className="flex flex-1 flex-col gap-1 px-3 py-2">
-          {NAV_ITEMS.map((item) => {
+          {NAV_ITEMS.filter((item) => !item.adminOnly || isAdmin).map((item) => {
             const isActive = pathname === item.href;
             return (
               <Link
