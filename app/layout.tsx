@@ -34,7 +34,7 @@ export const metadata: Metadata = {
   description:
     'Autonomous lottery agent on Hedera. Authenticate to play, manage funds, and track prizes.',
   metadataBase: new URL(
-    process.env.NEXT_PUBLIC_APP_URL || 'https://agent-testnet.lazylotto.app',
+    process.env.NEXT_PUBLIC_APP_URL || 'https://testnet-agent.lazysuperheroes.com',
   ),
   icons: {
     icon: '/favicon.svg',
