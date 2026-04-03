@@ -212,6 +212,19 @@ async function startHttpTransport(
       return;
     }
 
+    // Agent discovery (public, cacheable)
+    if (url.pathname === '/discover' && req.method === 'GET') {
+      const { buildDiscoveryResponse } = await import('../discover.js');
+      const discovery = buildDiscoveryResponse(`http://${req.headers.host}`);
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=300, s-maxage=600',
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.end(JSON.stringify(discovery, null, 2));
+      return;
+    }
+
     // MCP endpoint (/mcp)
     if (url.pathname === '/mcp') {
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
@@ -259,5 +272,6 @@ async function startHttpTransport(
     console.log(`[MCP] MCP endpoint: http://localhost:${port}/mcp`);
     console.log(`[MCP] Auth endpoints: http://localhost:${port}/auth/*`);
     console.log(`[MCP] Health check: http://localhost:${port}/health`);
+    console.log(`[MCP] Discovery: http://localhost:${port}/discover`);
   });
 }
