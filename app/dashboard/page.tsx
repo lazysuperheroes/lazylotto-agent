@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useToast } from '../components/Toast';
 
 // ---------------------------------------------------------------------------
@@ -126,10 +126,11 @@ export default function DashboardPage() {
   const [sessions, setSessions] = useState<PlaySession[]>([]);
   const [lockLoading, setLockLoading] = useState(false);
   const [revokeLoading, setRevokeLoading] = useState(false);
+  const [showAll, setShowAll] = useState(false);
 
   // Set page title
   useEffect(() => {
-    document.title = 'My Dashboard | LazyLotto Agent';
+    document.title = 'Dashboard | LazyLotto Agent';
   }, []);
 
   // Check for auth token on mount, then fetch data
@@ -252,6 +253,56 @@ export default function DashboardPage() {
     }
   }, [sessionToken]);
 
+  // --- Derived performance data ---
+  const perfSummary = useMemo(() => {
+    if (sessions.length === 0) return null;
+
+    const totalWinSessions = sessions.filter((s) => s.totalWins > 0).length;
+    const totalSpentAll = sessions.reduce((sum, s) => sum + s.totalSpent, 0);
+    const totalWonAll = sessions.reduce((sum, s) => sum + s.totalPrizeValue, 0);
+    const net = totalWonAll - totalSpentAll;
+
+    // Find primary token: most common token in spending (heuristic: use the
+    // token key with the highest total deposited, or fall back to HBAR)
+    const tokenSpendCounts: Record<string, number> = {};
+    for (const s of sessions) {
+      for (const pr of s.poolResults) {
+        // Pool results don't carry token key directly; fall back to status balances
+        // We use the balance entries to determine the primary token
+      }
+    }
+    // Simpler approach: use the first balance token or HBAR
+    let primaryToken = 'HBAR';
+    if (status) {
+      const entries = Object.entries(status.balances.tokens);
+      if (entries.length > 0) {
+        // Pick the token with the highest totalDeposited
+        let maxDeposited = -1;
+        for (const [key, entry] of entries) {
+          if (entry.totalDeposited > maxDeposited) {
+            maxDeposited = entry.totalDeposited;
+            primaryToken = tokenSymbol(key);
+          }
+        }
+      }
+    }
+    // Clean up unused variable
+    void tokenSpendCounts;
+
+    return { totalWinSessions, totalSpentAll, totalWonAll, net, primaryToken };
+  }, [sessions, status]);
+
+  // --- Last session trend ---
+  const lastSessionTrend = useMemo(() => {
+    if (sessions.length === 0 || !status?.lastPlayedAt) return null;
+    const last = sessions[0]; // sessions are assumed newest-first
+    if (!last) return null;
+    const lastNet = last.totalPrizeValue - last.totalSpent;
+    if (lastNet > 0) return 'up' as const;
+    if (lastNet < 0) return 'down' as const;
+    return 'flat' as const;
+  }, [sessions, status]);
+
   // --- Loading state ---
   if (loading) {
     return (
@@ -350,6 +401,9 @@ export default function DashboardPage() {
 
   const agentWallet = status?.agentWallet ?? '';
 
+  // Sessions to display (capped at 10 unless expanded)
+  const displayedSessions = showAll ? sessions : sessions.slice(0, 10);
+
   // --- Dashboard ---
   return (
     <div className="w-full px-4 py-8 sm:px-6 lg:px-8">
@@ -357,7 +411,7 @@ export default function DashboardPage() {
         {/* ---- Top Bar ---- */}
         <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <h1 className="font-heading text-2xl text-foreground">
-            My Dashboard
+            Dashboard
           </h1>
 
           {status && (
@@ -366,6 +420,18 @@ export default function DashboardPage() {
             </span>
           )}
         </header>
+
+        {/* ---- Hero Performance Summary ---- */}
+        {perfSummary && (
+          <p className="mb-8 text-lg text-muted">
+            You&apos;ve played {perfSummary.totalSpentAll > 0 ? sessions.length : 0} session{sessions.length !== 1 ? 's' : ''}, won{' '}
+            <span className="text-brand">{perfSummary.totalWinSessions}</span>{' '}
+            time{perfSummary.totalWinSessions !== 1 ? 's' : ''}, and are{' '}
+            <span className={perfSummary.net >= 0 ? 'text-success' : 'text-destructive'}>
+              {perfSummary.net >= 0 ? 'up' : 'down'} {formatAmount(Math.abs(perfSummary.net))} {perfSummary.primaryToken}
+            </span>.
+          </p>
+        )}
 
         {/* Non-fatal error banner */}
         {error && status && (
@@ -378,10 +444,32 @@ export default function DashboardPage() {
         <div className="grid gap-6 lg:grid-cols-2">
 
           {/* ---- Balance Card ---- */}
-          <div className="rounded-xl border border-secondary p-6 shadow">
-            <h2 className="mb-1 font-heading text-lg text-foreground">
-              Available Balance
-            </h2>
+          <div className="rounded-xl bg-gradient-to-br from-secondary/30 to-transparent p-6 shadow">
+            <div className="mb-1 flex items-center gap-2">
+              <h2 className="font-heading text-lg text-foreground">
+                Available Balance
+              </h2>
+              {lastSessionTrend && (
+                <span
+                  className={`text-sm ${
+                    lastSessionTrend === 'up'
+                      ? 'text-success'
+                      : lastSessionTrend === 'down'
+                        ? 'text-destructive'
+                        : 'text-muted'
+                  }`}
+                  title={
+                    lastSessionTrend === 'up'
+                      ? 'Last session was profitable'
+                      : lastSessionTrend === 'down'
+                        ? 'Last session was a loss'
+                        : 'Last session broke even'
+                  }
+                >
+                  {lastSessionTrend === 'up' ? '\u2191' : lastSessionTrend === 'down' ? '\u2193' : '\u2014'}
+                </span>
+              )}
+            </div>
             <p className="mb-4 text-xs text-muted">
               Your current token balances held by the agent. Available funds can be used for lottery entries.
             </p>
@@ -407,7 +495,7 @@ export default function DashboardPage() {
                           </div>
                         </div>
                         <div className="text-right">
-                          <p className="font-heading text-lg text-brand">
+                          <p className="font-heading text-2xl text-brand">
                             {formatAmount(entry.available)}
                           </p>
                           {entry.reserved > 0 && (
@@ -454,11 +542,6 @@ export default function DashboardPage() {
 
             {status && (
               <div className="space-y-5">
-                <p className="text-sm text-muted">
-                  Send tokens to the agent wallet below. Include the deposit memo
-                  so the agent can credit your account automatically.
-                </p>
-
                 {agentWallet && (
                   <div>
                     <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
@@ -505,74 +588,150 @@ export default function DashboardPage() {
             )}
           </div>
 
-          {/* ---- Play History Card (full width) ---- */}
-          <div className="rounded-xl border border-secondary p-6 shadow lg:col-span-2">
+          {/* ---- Play History (full width) ---- */}
+          <div className="lg:col-span-2">
             <h2 className="mb-1 font-heading text-lg text-foreground">
-              Recent Sessions
+              Play History
             </h2>
             <p className="mb-4 text-xs text-muted">
-              Your lottery play history. Each row represents one agent play session across one or more pools.
+              Your lottery play history. Each entry represents one agent play session across one or more pools.
             </p>
 
-            {sessions.length > 0 ? (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-secondary bg-secondary/50 text-left">
-                      <th className="px-4 py-3 font-medium text-muted">Date</th>
-                      <th className="px-4 py-3 font-medium text-muted">Pools</th>
-                      <th className="px-4 py-3 text-right font-medium text-muted">Entries</th>
-                      <th className="px-4 py-3 text-right font-medium text-muted">Spent</th>
-                      <th className="px-4 py-3 text-right font-medium text-muted">Wins</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sessions.map((s) => {
-                      const totalEntries = s.poolResults.reduce(
-                        (sum, pr) => sum + pr.entriesBought,
-                        0,
-                      );
-                      const poolNames = s.poolResults.map((pr) => pr.poolName);
+            {/* ---- Total P&L Summary ---- */}
+            {perfSummary && (
+              <div className="mb-4 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted">
+                <span>Total spent: {formatAmount(perfSummary.totalSpentAll)} {perfSummary.primaryToken}</span>
+                <span className="hidden sm:inline">|</span>
+                <span>Total won: {formatAmount(perfSummary.totalWonAll)} {perfSummary.primaryToken}</span>
+                <span className="hidden sm:inline">|</span>
+                <span>
+                  Net:{' '}
+                  <span className={perfSummary.net >= 0 ? 'text-success' : 'text-destructive'}>
+                    {perfSummary.net >= 0 ? '+' : ''}{formatAmount(perfSummary.net)} {perfSummary.primaryToken}
+                  </span>
+                </span>
+              </div>
+            )}
 
-                      return (
-                        <tr
-                          key={s.sessionId}
-                          className="border-b border-secondary transition-colors hover:bg-secondary/30"
-                        >
-                          <td className="whitespace-nowrap px-4 py-3 text-foreground">
+            {/* ---- Timeline ---- */}
+            {sessions.length > 0 ? (
+              <>
+                <div className="space-y-4">
+                  {displayedSessions.map((s) => {
+                    const isWin = s.totalWins > 0;
+                    return (
+                      <div
+                        key={s.sessionId}
+                        className={`relative rounded-lg border ${
+                          isWin ? 'border-brand/30 bg-brand/5' : 'border-secondary'
+                        } p-4 pl-6`}
+                      >
+                        {/* Left accent bar for wins */}
+                        {isWin && (
+                          <div className="absolute left-0 top-0 bottom-0 w-1 rounded-l-lg bg-brand" />
+                        )}
+
+                        {/* Header row: date + net result */}
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-sm text-muted">
                             {formatTimestamp(s.timestamp)}
-                          </td>
-                          <td className="px-4 py-3">
-                            <div className="flex flex-wrap gap-1.5">
-                              {poolNames.map((pool) => (
-                                <span
-                                  key={pool}
-                                  className="rounded bg-secondary px-2 py-0.5 text-xs text-muted"
-                                >
-                                  {pool}
-                                </span>
-                              ))}
-                            </div>
-                          </td>
-                          <td className="px-4 py-3 text-right text-foreground">
-                            {totalEntries}
-                          </td>
-                          <td className="px-4 py-3 text-right text-foreground">
-                            {formatAmount(s.totalSpent)}
-                          </td>
-                          <td
-                            className={`px-4 py-3 text-right font-medium ${
-                              s.totalWins > 0 ? 'text-success' : 'text-muted'
+                          </span>
+                          <span
+                            className={`font-heading text-sm ${
+                              isWin ? 'text-brand' : 'text-muted'
                             }`}
                           >
-                            {s.totalWins > 0 ? formatAmount(s.totalWins) : '--'}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+                            {isWin
+                              ? `+${formatAmount(s.totalPrizeValue)} won`
+                              : `${formatAmount(s.totalSpent)} spent`}
+                          </span>
+                        </div>
+
+                        {/* Pool badges */}
+                        <div className="flex flex-wrap gap-1.5 mb-2">
+                          {s.poolResults.map((pr) => (
+                            <span
+                              key={pr.poolId}
+                              className="rounded bg-secondary px-2 py-0.5 text-xs text-muted"
+                            >
+                              {pr.poolName}
+                            </span>
+                          ))}
+                        </div>
+
+                        {/* Stats row */}
+                        <div className="flex gap-4 text-xs text-muted">
+                          <span>
+                            {s.poolResults.reduce(
+                              (sum, pr) => sum + pr.entriesBought,
+                              0,
+                            )}{' '}
+                            entries
+                          </span>
+                          <span>{formatAmount(s.totalSpent)} spent</span>
+                          {isWin && s.totalWins > 0 && (
+                            <span className="text-success">
+                              {s.totalWins} win{s.totalWins > 1 ? 's' : ''}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Prize details for winning sessions */}
+                        {isWin &&
+                          s.poolResults.some(
+                            (pr) => pr.prizeDetails.length > 0,
+                          ) && (
+                            <div className="mt-2 rounded bg-brand/10 px-3 py-2 text-xs text-brand">
+                              {s.poolResults
+                                .flatMap((pr) => pr.prizeDetails)
+                                .map((prize, i) => {
+                                  const parts: string[] = [];
+                                  if (prize.fungibleAmount)
+                                    parts.push(
+                                      `${prize.fungibleAmount} ${prize.fungibleToken ?? '?'}`,
+                                    );
+                                  if (prize.nftCount)
+                                    parts.push(
+                                      `${prize.nftCount} NFT${prize.nftCount > 1 ? 's' : ''}`,
+                                    );
+                                  return parts.length > 0 ? (
+                                    <span key={i}>
+                                      {i > 0 ? ' + ' : ''}
+                                      {parts.join(' + ')}
+                                    </span>
+                                  ) : null;
+                                })}
+                            </div>
+                          )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Show older sessions button */}
+                {sessions.length > 10 && !showAll && (
+                  <div className="mt-4 text-center">
+                    <button
+                      type="button"
+                      onClick={() => setShowAll(true)}
+                      className="text-sm text-primary transition-colors hover:text-primary/80"
+                    >
+                      Show older sessions ({sessions.length - 10} more)
+                    </button>
+                  </div>
+                )}
+                {showAll && sessions.length > 10 && (
+                  <div className="mt-4 text-center">
+                    <button
+                      type="button"
+                      onClick={() => setShowAll(false)}
+                      className="text-sm text-primary transition-colors hover:text-primary/80"
+                    >
+                      Show less
+                    </button>
+                  </div>
+                )}
+              </>
             ) : (
               <div className="rounded-lg bg-secondary/30 px-5 py-6 text-center">
                 <p className="text-sm text-muted">
@@ -581,65 +740,54 @@ export default function DashboardPage() {
               </div>
             )}
           </div>
+        </div>
 
-          {/* ---- Session Card (full width) ---- */}
-          <div className="rounded-xl border border-secondary p-6 shadow lg:col-span-2">
-            <h2 className="mb-1 font-heading text-lg text-foreground">
-              Your Session
-            </h2>
-            <p className="mb-4 text-xs text-muted">
-              Your active API session. Lock the key to make it permanent, or revoke to end it.
-            </p>
+        {/* ---- Session Section (compact, demoted) ---- */}
+        <div className="border-t border-secondary mt-8 pt-6">
+          <h2 className="mb-3 font-heading text-sm text-foreground">
+            Session
+          </h2>
 
-            <div className="space-y-4">
-              <div>
-                <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
-                  Session Token
-                </label>
-                <div className="flex items-center gap-2 rounded-lg border border-secondary bg-[#111113] px-4 py-3">
-                  <code className="flex-1 font-mono text-sm text-muted">
-                    {maskToken(sessionToken)}
-                  </code>
-                  <button
-                    type="button"
-                    onClick={() => handleCopy(sessionToken, 'Session token')}
-                    className="shrink-0 rounded-md border border-secondary px-3 py-1.5 text-xs text-muted transition-colors hover:text-foreground"
-                  >
-                    Copy
-                  </button>
-                </div>
-              </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <code className="font-mono text-sm text-muted">
+              {maskToken(sessionToken)}
+            </code>
 
-              {status && (
-                <p className="text-sm text-muted">
-                  Account registered{' '}
-                  {formatTimestamp(status.registeredAt)}.
-                  {status.lastPlayedAt
-                    ? ` Last played ${formatTimestamp(status.lastPlayedAt)}.`
-                    : ' No play sessions yet.'}
-                </p>
-              )}
+            <button
+              type="button"
+              onClick={() => handleCopy(sessionToken, 'Session token')}
+              className="shrink-0 rounded-md border border-secondary px-3 py-1.5 text-xs text-muted transition-colors hover:text-foreground"
+            >
+              Copy
+            </button>
 
-              <div className="flex flex-wrap gap-3">
-                <button
-                  type="button"
-                  onClick={() => void handleLock()}
-                  disabled={lockLoading}
-                  className="rounded-md bg-brand px-4 py-2 text-sm font-semibold text-background transition-opacity hover:opacity-90 disabled:opacity-50"
-                >
-                  {lockLoading ? 'Locking...' : 'Lock API Key'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleRevoke()}
-                  disabled={revokeLoading}
-                  className="rounded-md border border-destructive/50 px-4 py-2 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
-                >
-                  {revokeLoading ? 'Revoking...' : 'Revoke & Re-authenticate'}
-                </button>
-              </div>
-            </div>
+            <button
+              type="button"
+              onClick={() => void handleLock()}
+              disabled={lockLoading}
+              className="rounded-md bg-brand px-4 py-1.5 text-xs font-semibold text-background transition-opacity hover:opacity-90 disabled:opacity-50"
+            >
+              {lockLoading ? 'Locking...' : 'Lock API Key'}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void handleRevoke()}
+              disabled={revokeLoading}
+              className="rounded-md border border-destructive/50 px-4 py-1.5 text-xs font-medium text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
+            >
+              {revokeLoading ? 'Revoking...' : 'Revoke & Re-authenticate'}
+            </button>
           </div>
+
+          {status && (
+            <p className="mt-2 text-xs text-muted">
+              Registered {formatTimestamp(status.registeredAt)}.
+              {status.lastPlayedAt
+                ? ` Last played ${formatTimestamp(status.lastPlayedAt)}.`
+                : ' No play sessions yet.'}
+            </p>
+          )}
         </div>
       </div>
     </div>
