@@ -11,6 +11,7 @@ import type {
   GasRecord,
 } from './types.js';
 import { emptyOperatorState, UserNotFoundError } from './types.js';
+import type { IStore } from './IStore.js';
 
 // ── File names ───────────────────────────────────────────────────
 
@@ -55,7 +56,7 @@ function readJsonSync<T>(filePath: string, fallback: T): T {
 
 // ── PersistentStore ──────────────────────────────────────────────
 
-export class PersistentStore {
+export class PersistentStore implements IStore {
   private readonly dataDir: string;
 
   // In-memory collections

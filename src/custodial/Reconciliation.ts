@@ -12,7 +12,7 @@
 import { getTokenBalances, sumTransactionFees } from '../hedera/mirror.js';
 import { getWalletInfo } from '../hedera/wallet.js';
 import type { Client } from '@hashgraph/sdk';
-import type { PersistentStore } from './PersistentStore.js';
+import type { IStore } from './IStore.js';
 import { hbarToNumber } from '../utils/format.js';
 import { roundToDecimals } from '../utils/math.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
@@ -43,7 +43,7 @@ export interface ReconciliationResult {
  */
 export async function reconcile(
   client: Client,
-  store: PersistentStore,
+  store: IStore,
   fromTimestamp?: string,
 ): Promise<ReconciliationResult> {
   const warnings: string[] = [];

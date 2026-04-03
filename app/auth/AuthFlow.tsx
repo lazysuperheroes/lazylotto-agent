@@ -41,27 +41,29 @@ const CHAIN_IDS: Record<Network, string> = {
 // ---------------------------------------------------------------------------
 
 const IPFS_BASE = 'https://lazysuperheroes.myfilebase.com/ipfs/QmXsG47eDFSwCA4Kpii3XGidHScbsApdAvPnF4aMTpi7KD';
+// Filebase image optimization: resize to 256px, contain aspect ratio, auto format, sharpen
+const IMG_OPTS = '?img-width=256&img-height=256&img-fit=contain&img-format=auto&img-sharpen=1';
 
 const LSH_CHARACTERS = [
   // Gen 1 — Lazy Superheroes (Male)
-  { name: 'Aadan', img: `${IPFS_BASE}/Aadan.png?w=256&h=256`, tagline: 'Aadan is ready. Are you?' },
-  { name: 'Jazz', img: `${IPFS_BASE}/Jazz.png?w=256&h=256`, tagline: 'Jazz says: let the good times roll.' },
-  { name: 'Gordo', img: `${IPFS_BASE}/Gordo.png?w=256&h=256`, tagline: 'Gordo\'s got a feeling about this one.' },
-  { name: 'Korgg', img: `${IPFS_BASE}/Korgg.png?w=256&h=256`, tagline: 'Korgg smash... those lottery odds.' },
-  { name: 'Nobody', img: `${IPFS_BASE}/Nobody.png?w=256&h=256`, tagline: 'Nobody does it better.' },
-  { name: 'Kjell', img: `${IPFS_BASE}/Kjell.png?w=256&h=256`, tagline: 'The HBARBarian is feeling lucky.' },
-  { name: 'Crawford', img: `${IPFS_BASE}/Crawford.png?w=256&h=256`, tagline: 'Crawford always plays it cool.' },
+  { name: 'Aadan', img: `${IPFS_BASE}/Aadan.png${IMG_OPTS}`, tagline: 'Aadan is ready. Are you?' },
+  { name: 'Jazz', img: `${IPFS_BASE}/Jazz.png${IMG_OPTS}`, tagline: 'Jazz says: let the good times roll.' },
+  { name: 'Gordo', img: `${IPFS_BASE}/Gordo.png${IMG_OPTS}`, tagline: "Gordo's got a feeling about this one." },
+  { name: 'Korgg', img: `${IPFS_BASE}/Korgg.png${IMG_OPTS}`, tagline: 'Korgg smash... those lottery odds.' },
+  { name: 'Nobody', img: `${IPFS_BASE}/Nobody.png${IMG_OPTS}`, tagline: 'Nobody does it better.' },
+  { name: 'Kjell', img: `${IPFS_BASE}/Kjell.png${IMG_OPTS}`, tagline: 'The HBARBarian is feeling lucky.' },
+  { name: 'Crawford', img: `${IPFS_BASE}/Crawford.png${IMG_OPTS}`, tagline: 'Crawford always plays it cool.' },
   // Gen 1 — Lazy Superheroes (Female)
-  { name: 'Ginnie Delice', img: `${IPFS_BASE}/Ginnie-Delice.png?w=256&h=256`, tagline: 'Ginnie says: fortune favours the bold.' },
-  { name: 'Tina Ingvild', img: `${IPFS_BASE}/Tina-Ingvild.png?w=256&h=256`, tagline: 'The Red Queen demands a win.' },
-  { name: 'Virginia Lor', img: `${IPFS_BASE}/Virginia-Lor.png?w=256&h=256`, tagline: 'Virginia feels the odds shifting.' },
-  { name: 'Kanna Setsuko', img: `${IPFS_BASE}/Kanna-Setsuko.png?w=256&h=256`, tagline: 'Kanna\'s psychic sense says: play now.' },
+  { name: 'Ginnie Delice', img: `${IPFS_BASE}/Ginnie-Delice.png${IMG_OPTS}`, tagline: 'Ginnie says: fortune favours the bold.' },
+  { name: 'Tina Ingvild', img: `${IPFS_BASE}/Tina-Ingvild.png${IMG_OPTS}`, tagline: 'The Red Queen demands a win.' },
+  { name: 'Virginia Lor', img: `${IPFS_BASE}/Virginia-Lor.png${IMG_OPTS}`, tagline: 'Virginia feels the odds shifting.' },
+  { name: 'Kanna Setsuko', img: `${IPFS_BASE}/Kanna-Setsuko.png${IMG_OPTS}`, tagline: "Kanna's psychic sense says: play now." },
   // Gen 2 — Lazy Super Villains
-  { name: 'Mala', img: `${IPFS_BASE}/Mala.jpg?w=256&h=256`, tagline: 'Even villains need a lucky break.' },
-  { name: 'Soul', img: `${IPFS_BASE}/Soul.jpg?w=256&h=256`, tagline: 'Soul\'s roar echoes: it\'s game time.' },
-  { name: 'Blood', img: `${IPFS_BASE}/Blood.jpg?w=256&h=256`, tagline: 'Blood thirsts for a jackpot.' },
-  { name: 'E-Xterm', img: `${IPFS_BASE}/E-Xterm.jpg?w=256&h=256`, tagline: 'E-Xterm has calculated the optimal play.' },
-  { name: 'Gabriel', img: `${IPFS_BASE}/Gabriel.jpg?w=256&h=256`, tagline: 'The Cobrastra strikes at fortune.' },
+  { name: 'Mala', img: `${IPFS_BASE}/Mala.jpg${IMG_OPTS}`, tagline: 'Even villains need a lucky break.' },
+  { name: 'Soul', img: `${IPFS_BASE}/Soul.jpg${IMG_OPTS}`, tagline: "Soul's roar echoes: it's game time." },
+  { name: 'Blood', img: `${IPFS_BASE}/Blood.jpg${IMG_OPTS}`, tagline: 'Blood thirsts for a jackpot.' },
+  { name: 'E-Xterm', img: `${IPFS_BASE}/E-Xterm.jpg${IMG_OPTS}`, tagline: 'E-Xterm has calculated the optimal play.' },
+  { name: 'Gabriel', img: `${IPFS_BASE}/Gabriel.jpg${IMG_OPTS}`, tagline: 'The Cobrastra strikes at fortune.' },
 ];
 
 // ---------------------------------------------------------------------------

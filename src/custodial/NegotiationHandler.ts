@@ -1,5 +1,5 @@
 import { Client, TopicId, TopicMessageSubmitTransaction } from '@hashgraph/sdk';
-import type { PersistentStore } from './PersistentStore.js';
+import type { IStore } from './IStore.js';
 import type {
   NegotiationMessage,
   CustodialConfig,
@@ -31,7 +31,7 @@ const MAX_REGISTRATIONS_PER_HOUR = 100;
 export class NegotiationHandler {
   constructor(
     private readonly client: Client,
-    private readonly store: PersistentStore,
+    private readonly store: IStore,
     private readonly config: CustodialConfig,
     private readonly agentAccountId: string,
   ) {}

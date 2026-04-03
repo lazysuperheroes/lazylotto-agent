@@ -1,5 +1,5 @@
 import { getTransactionsByAccount, type MirrorTransaction } from '../hedera/mirror.js';
-import type { PersistentStore } from './PersistentStore.js';
+import type { IStore } from './IStore.js';
 import type { UserLedger } from './UserLedger.js';
 import type { CustodialConfig } from './types.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
@@ -37,7 +37,7 @@ export class DepositWatcher {
 
   constructor(
     private agentAccountId: string,
-    private store: PersistentStore,
+    private store: IStore,
     private ledger: UserLedger,
     private config: CustodialConfig,
   ) {}

@@ -2,6 +2,7 @@ import type { Client } from '@hashgraph/sdk';
 import { createClient, getOperatorAccountId } from '../hedera/wallet.js';
 import { LottoAgent } from '../agent/LottoAgent.js';
 import { PersistentStore } from './PersistentStore.js';
+import type { IStore } from './IStore.js';
 import { UserLedger } from './UserLedger.js';
 import { AccountingService } from './AccountingService.js';
 import { DepositWatcher } from './DepositWatcher.js';
@@ -52,7 +53,7 @@ export interface AgentHealth {
 
 export class MultiUserAgent {
   private client!: Client;
-  private store!: PersistentStore;
+  private store!: IStore;
   private ledger!: UserLedger;
   private accounting!: AccountingService;
   private depositWatcher!: DepositWatcher;

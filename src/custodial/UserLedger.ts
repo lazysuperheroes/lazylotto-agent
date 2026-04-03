@@ -1,4 +1,4 @@
-import type { PersistentStore } from './PersistentStore.js';
+import type { IStore } from './IStore.js';
 import type { AccountingService } from './AccountingService.js';
 import type { UserAccount, UserBalances } from './types.js';
 import { InsufficientBalanceError, UserNotFoundError, UserInactiveError, emptyTokenEntry } from './types.js';
@@ -21,7 +21,7 @@ import { roundForToken } from '../utils/math.js';
 
 export class UserLedger {
   constructor(
-    private store: PersistentStore,
+    private store: IStore,
     private accounting: AccountingService,
     private agentAccountId: string,
   ) {}

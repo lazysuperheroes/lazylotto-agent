@@ -1,6 +1,23 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/* LSH Design Tokens — Tailwind v4 CSS config */
+@theme {
+  --color-background: #09090b;
+  --color-foreground: #fafafa;
+  --color-primary: #3b82f6;
+  --color-brand: #e5a800;
+  --color-secondary: #27272a;
+  --color-muted: #a1a1aa;
+  --color-destructive: #dc2626;
+  --color-success: #16a34a;
+  --color-info: #0ea5e9;
+  --font-sans: var(--font-heebo), 'Heebo', sans-serif;
+  --font-heading: var(--font-unbounded), 'Unbounded', sans-serif;
+  --radius-xl: 0.75rem;
+}
+
+/* Source detection for Tailwind v4 — scan all component files */
+@source "../../app/**/*.{ts,tsx}";
 
 body {
   background-color: #09090b;

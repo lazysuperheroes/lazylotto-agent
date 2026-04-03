@@ -1,8 +1,8 @@
 import type { GasRecord, OperatorState } from './types.js';
-import type { PersistentStore } from './PersistentStore.js';
+import type { IStore } from './IStore.js';
 
 export class GasTracker {
-  constructor(private store: PersistentStore) {}
+  constructor(private store: IStore) {}
 
   /**
    * Record a gas cost from a transaction and deduct from operator balance.

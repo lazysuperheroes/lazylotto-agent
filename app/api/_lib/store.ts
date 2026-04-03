@@ -1,33 +1,21 @@
 /**
- * Lazy-loaded PersistentStore singleton for serverless API routes.
+ * Lazy-loaded store singleton for serverless API routes.
  *
- * In the Next.js serverless model we cannot access the running
- * MultiUserAgent instance. Instead, we load the PersistentStore
- * directly from the .custodial-data/ JSON files. This is safe for
- * read-only dashboard queries — the store is loaded fresh on each
- * cold start and cached for the lifetime of the serverless function.
+ * Uses createStore() to pick the right backend:
+ *   - RedisStore  when UPSTASH_REDIS_REST_URL is set (Vercel)
+ *   - PersistentStore  otherwise (local dev, self-hosted)
  *
- * The data directory is resolved in order of precedence:
- *   1. CUSTODIAL_DATA_DIR environment variable (explicit override)
- *   2. Relative to this module: ../../.. from app/api/_lib/ -> project root + .custodial-data
+ * The store is loaded once per cold start and cached for the
+ * lifetime of the serverless function instance.
  */
 
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { PersistentStore } from '~/custodial/PersistentStore';
+import { createStore } from '~/custodial/createStore';
+import type { IStore } from '~/custodial/IStore';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+let store: IStore | null = null;
 
-let store: PersistentStore | null = null;
-
-export async function getStore(): Promise<PersistentStore> {
+export async function getStore(): Promise<IStore> {
   if (store) return store;
-
-  const dataDir =
-    process.env.CUSTODIAL_DATA_DIR ??
-    join(__dirname, '..', '..', '..', '.custodial-data');
-
-  store = new PersistentStore(dataDir);
-  await store.load();
+  store = await createStore();
   return store;
 }
