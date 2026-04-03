@@ -63,5 +63,5 @@ export interface ServerContext {
   authToken: string | null;
 
   /** Check auth for fund-moving operations. Returns error result if auth fails. */
-  requireAuth: (providedToken?: string) => ToolResult | null;
+  requireAuth: (providedToken?: string) => Promise<ToolResult | null> | ToolResult | null;
 }

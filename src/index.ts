@@ -35,7 +35,9 @@ Options:
   --register [--force]  Register/update agent with HOL registry
   --status              Check wallet balances and state
   --audit               Comprehensive configuration audit
-  --mcp-server          Start MCP server (for Claude Desktop)
+  --mcp-server          Start MCP server (stdio for Claude Desktop)
+  --http                Use HTTP transport instead of stdio
+  --port N              HTTP port (default 3001)
   --dry-run             Show what would be played without executing
   --export-history      Export play history to CSV file
   --scheduled           Run play sessions on cron schedule
@@ -188,7 +190,10 @@ async function main(): Promise<void> {
     multiAgent.start();
 
     if (args.includes('--mcp-server')) {
-      await startMcpServer(agent, multiAgent);
+      const httpMode = args.includes('--http');
+      const portIdx = args.indexOf('--port');
+      const port = portIdx >= 0 ? Number(args[portIdx + 1]) : 3001;
+      await startMcpServer(agent, multiAgent, httpMode ? { http: true, port } : undefined);
       return;
     }
 
@@ -214,7 +219,10 @@ async function main(): Promise<void> {
   }
 
   if (args.includes('--mcp-server')) {
-    await startMcpServer(agent);
+    const httpMode = args.includes('--http');
+    const portIdx = args.indexOf('--port');
+    const port = portIdx >= 0 ? Number(args[portIdx + 1]) : 3001;
+    await startMcpServer(agent, undefined, httpMode ? { http: true, port } : undefined);
     return;
   }
 

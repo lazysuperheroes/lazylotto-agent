@@ -15,7 +15,9 @@
     ".env.example"
   ],
   "scripts": {
-    "build": "tsc && node -e \"const fs=require('fs'),f='dist/index.js',c=fs.readFileSync(f,'utf8');if(!c.startsWith('#!'))fs.writeFileSync(f,'#!/usr/bin/env node\\n'+c)\"",
+    "build": "tsc -p tsconfig.cli.json && node -e \"const fs=require('fs'),f='dist/index.js',c=fs.readFileSync(f,'utf8');if(!c.startsWith('#!'))fs.writeFileSync(f,'#!/usr/bin/env node\\n'+c)\"",
+    "build:web": "next build --webpack",
+    "dev:web": "next dev --port 3000",
     "dev": "node --import tsx src/index.ts",
     "dev:scheduled": "node --import tsx src/index.ts --scheduled",
     "dev:mcp": "node --import tsx src/index.ts --mcp-server",
@@ -27,6 +29,9 @@
     "audit": "node --import tsx src/index.ts --audit",
     "wizard": "node --import tsx src/index.ts --wizard",
     "read-accounting": "node --import tsx src/cli/read-accounting.ts",
+    "smoke-test": "node --import tsx src/cli/smoke-test.ts",
+    "dev:http": "node --import tsx src/index.ts --mcp-server --http",
+    "dev:multi-http": "node --import tsx src/index.ts --multi-user --mcp-server --http",
     "test": "node --test --import tsx src/**/*.test.ts src/__tests__/*.test.ts",
     "prepublishOnly": "npm run build"
   },
@@ -46,19 +51,33 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "@hashgraph/hedera-wallet-connect": "^2.1.2",
+    "@hashgraph/proto": "^2.25.0",
     "@hashgraph/sdk": "^2.81.0",
     "@hashgraphonline/standards-sdk": "^0.1.172",
     "@hiero-did-sdk/registrar": "^0.1.8",
     "@lazysuperheroes/lazy-lotto": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.28.0",
+    "@tailwindcss/postcss": "^4.2.2",
+    "@upstash/redis": "^1.37.0",
+    "@walletconnect/modal": "^2.7.0",
+    "autoprefixer": "^10.4.27",
     "dotenv": "^17.3.1",
     "ethers": "^6.16.0",
+    "next": "^16.2.2",
     "node-cron": "^4.2.1",
+    "postcss": "^8.5.8",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwindcss": "^4.2.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
     "@types/node-cron": "^3.0.11",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "esbuild": "^0.28.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }

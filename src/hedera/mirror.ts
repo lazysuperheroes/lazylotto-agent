@@ -104,6 +104,27 @@ export async function getTokenAllowances(
   return all;
 }
 
+// ── Account Key ─────────────────────────────────────────────
+
+export interface AccountKeyInfo {
+  _type: string; // 'ED25519' | 'ECDSA_SECP256K1' | 'ProtobufEncoded'
+  key: string;   // hex-encoded, DER-prefixed
+}
+
+/**
+ * Fetch a Hedera account's public key from the mirror node.
+ * Used for signature challenge-response authentication.
+ */
+export async function getAccountKey(accountId: string): Promise<AccountKeyInfo> {
+  const data = await mirrorGet<{ key: AccountKeyInfo }>(`/accounts/${accountId}`);
+  if (!data.key?.key || !data.key?._type) {
+    throw new Error(`No key found for account ${accountId}`);
+  }
+  return data.key;
+}
+
+// ── Transactions ────────────────────────────────────────────
+
 export interface MirrorTransaction {
   transaction_id: string;
   consensus_timestamp: string;

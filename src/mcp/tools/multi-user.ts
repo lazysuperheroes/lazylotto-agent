@@ -30,7 +30,7 @@ export function registerMultiUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ auth_token }) => {
-      const authErr = requireAuth(auth_token);
+      const authErr = await requireAuth(auth_token);
       if (authErr) return authErr;
       try {
         const users = multiUser.getAllUsersStatus();
@@ -70,7 +70,7 @@ export function registerMultiUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ eoaAddress, accountId, strategy: strat, rakePercent, auth_token }) => {
-      const authErr = requireAuth(auth_token);
+      const authErr = await requireAuth(auth_token);
       if (authErr) return authErr;
       try {
         const resolvedAccountId = accountId ?? getOperatorAccountId(client);
@@ -108,7 +108,7 @@ export function registerMultiUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ userId, auth_token }) => {
-      const authErr = requireAuth(auth_token);
+      const authErr = await requireAuth(auth_token);
       if (authErr) return authErr;
       try {
         const user = multiUser.getUserStatus(userId);
@@ -138,7 +138,7 @@ export function registerMultiUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ userId, auth_token }) => {
-      const authErr = requireAuth(auth_token);
+      const authErr = await requireAuth(auth_token);
       if (authErr) return authErr;
       try {
         if (userId) {
@@ -164,7 +164,7 @@ export function registerMultiUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ userId, amount, token, auth_token }) => {
-      const authErr = requireAuth(auth_token);
+      const authErr = await requireAuth(auth_token);
       if (authErr) return authErr;
       try {
         const record = await multiUser.processWithdrawal(userId, amount, token);
@@ -183,7 +183,7 @@ export function registerMultiUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ userId, auth_token }) => {
-      const authErr = requireAuth(auth_token);
+      const authErr = await requireAuth(auth_token);
       if (authErr) return authErr;
       try {
         multiUser.deregisterUser(userId);
@@ -209,7 +209,7 @@ export function registerMultiUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ userId, limit, auth_token }) => {
-      const authErr = requireAuth(auth_token);
+      const authErr = await requireAuth(auth_token);
       if (authErr) return authErr;
       try {
         const sessions = multiUser.getPlayHistory(userId);

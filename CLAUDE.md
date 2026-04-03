@@ -15,6 +15,9 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Operates in two 
 - **Wallet**: Agent holds its own Hedera account with private key in .env
 - **Strategy**: Versioned JSON files define play behavior, budget, and risk tolerance
 - **Accounting**: HCS-20 immutable on-chain ledger (multi-user mode)
+- **Auth**: Hedera signature challenge-response, session tokens in Upstash Redis (or in-memory fallback)
+- **HTTP Transport**: Dual mode — stdio for Claude Desktop, HTTP for Vercel/self-hosted
+- **Frontend**: Next.js 16 app with WalletConnect auth page, user dashboard, admin dashboard
 
 ## Tech Stack
 
@@ -25,6 +28,10 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Operates in two 
 - HOL: @hashgraphonline/standards-sdk (HCS-10/11/20, registry, discovery)
 - Scheduler: node-cron (periodic play sessions)
 - Config: dotenv + versioned JSON strategy files + Zod validation
+- Next.js 16 (App Router, React 19, Tailwind v4)
+- @hashgraph/hedera-wallet-connect (WalletConnect v2 for Hedera wallets)
+- @upstash/redis (session storage, serverless-compatible)
+- @hashgraph/proto (SignatureMap protobuf decode for wallet signatures)
 
 ## Key Directories
 
@@ -33,10 +40,35 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Operates in two 
 - src/hedera/      — Hedera SDK wrappers (wallet, contracts, mirror node, tokens, delegates)
 - src/mcp/         — MCP client (dApp reads) and MCP server (19 agent control tools)
 - src/hol/         — HOL registry integration (HCS-11 profile, UAID)
+- src/auth/        — Challenge-response authentication, session management
 - src/cli/         — Interactive setup wizard
 - src/config/      — Strategy schema (Zod) and defaults
 - strategies/      — Versioned JSON strategy files
 - docs/            — Multi-user guide, MCP integration design, MCP server reference
+- app/             — Next.js frontend (auth page, dashboards, API routes)
+- public/          — Static assets (favicon, robots.txt)
+
+## Auth System
+
+- Challenge-response: server generates nonce, user signs with Hedera wallet, server verifies signature
+- Four tiers: public (register, onboard), user (play, withdraw, status), admin (refund, dead-letters), operator (fees, reconcile, health)
+- Session tokens: sk_ prefixed, sha256-hashed in Redis, 7-day expiry, lockable (permanent)
+- Auto-revoke on re-auth
+- Rate limiting on auth endpoints
+
+## HTTP Transport
+
+- `--mcp-server --http --port 3001` for HTTP mode
+- Endpoints: /mcp (MCP), /auth/* (challenge/verify/refresh/lock/revoke), /health
+- CORS configured for auth page origin
+
+## Next.js Frontend
+
+- app/ directory with App Router
+- Pages: /auth (WalletConnect sign-in), /dashboard (user), /admin (operator)
+- API routes: /api/auth/*, /api/user/*, /api/admin/*
+- LSH branding: dark mode, Unbounded/Heebo fonts, LAZY Gold accents
+- Dual tsconfig: tsconfig.json (Next.js), tsconfig.cli.json (CLI)
 
 ## Hedera-Specific Rules
 
@@ -64,12 +96,18 @@ npm run dev              — Single play session (tsx)
 npm run dev:mcp          — MCP server (tsx)
 npm run dev:scheduled    — Scheduled mode (tsx)
 npm run dev:audit        — Configuration audit (tsx)
+npm run dev:web          — Next.js dev server
+npm run dev:http         — HTTP transport MCP server
+npm run dev:multi-http   — Multi-user HTTP MCP server
 npm run setup            — First-time wallet setup
 npm run status           — Check wallet balances
 npm run audit            — Configuration audit
 npm run wizard           — Interactive .env setup
-npm test                 — Run test suite (69 tests)
+npm test                 — Run test suite (325+ tests)
 npm run build            — Compile + shebang injection
+npm run build:web        — Next.js production build
+npm run smoke-test       — Auth flow smoke test
+npm run read-accounting  — HCS-20 audit trail reader
 ```
 
 Multi-user mode:
