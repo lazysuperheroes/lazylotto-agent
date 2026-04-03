@@ -17,6 +17,7 @@ export interface DiscoveryResponse {
   description: string;
   version: string;
   operator: string;
+  uaid: string | null;
 
   // Network
   network: string;
