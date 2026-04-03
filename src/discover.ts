@@ -78,11 +78,13 @@ export function buildDiscoveryResponse(baseUrl: string): DiscoveryResponse {
 
   return {
     // ── Identity ──────────────────────────────────────────────
-    name: 'LazyLotto Player Agent',
+    name: 'LazyLotto Agent',
     description:
-      'Autonomous lottery agent on Hedera. Plays LazyLotto pools, manages custodial funds, and transfers prizes.',
+      'Multi-user custodial lottery agent on Hedera by Lazy Superheroes. ' +
+      'Plays LazyLotto pools on behalf of users, manages deposits, and transfers prizes.',
     version: process.env.npm_package_version ?? '0.1.0',
     operator: 'Lazy Superheroes',
+    uaid: process.env.UAID ?? null,
 
     // ── Network ───────────────────────────────────────────────
     network,
