@@ -1,6 +1,6 @@
 /**
  * Factory that returns the appropriate IStore implementation:
- *   - RedisStore  when UPSTASH_REDIS_REST_URL is set (Vercel serverless)
+ *   - RedisStore  when KV_REST_API_URL or UPSTASH_REDIS_REST_URL is set (Vercel serverless)
  *   - PersistentStore  otherwise (local dev, self-hosted)
  *
  * The returned store is already loaded (cache hydrated).
@@ -13,7 +13,7 @@ import type { IStore } from './IStore.js';
 export type { IStore } from './IStore.js';
 
 export async function createStore(): Promise<IStore> {
-  if (process.env.UPSTASH_REDIS_REST_URL) {
+  if (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL) {
     const store = new RedisStore();
     await store.load();
     return store;

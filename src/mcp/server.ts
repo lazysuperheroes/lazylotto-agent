@@ -65,7 +65,7 @@ const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || null;
  */
 async function requireAuthCheck(providedToken?: string): Promise<ReturnType<typeof errorResult> | null> {
   // No auth configured (local dev without MCP_AUTH_TOKEN) — allow everything
-  if (!MCP_AUTH_TOKEN && !process.env.UPSTASH_REDIS_REST_URL) return null;
+  if (!MCP_AUTH_TOKEN && !(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL)) return null;
 
   if (!providedToken) {
     return errorResult('Authentication required. Provide auth_token parameter.');
@@ -114,7 +114,7 @@ export async function startMcpServer(
       }
     }
     console.log('MCP auth token configured. Sensitive tools require authentication.');
-  } else if (multiUser && !process.env.UPSTASH_REDIS_REST_URL) {
+  } else if (multiUser && !(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL)) {
     console.error(
       '[MCP] FATAL: MCP_AUTH_TOKEN or Upstash Redis is required in multi-user mode. ' +
         `Set MCP_AUTH_TOKEN in .env or configure UPSTASH_REDIS_REST_URL for session-based auth.`
