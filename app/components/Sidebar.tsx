@@ -49,6 +49,27 @@ function GridIcon({ className }: { className?: string }) {
   );
 }
 
+function DocumentIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M9 1H4a1 1 0 00-1 1v12a1 1 0 001 1h8a1 1 0 001-1V5L9 1z" />
+      <path d="M9 1v4h4" />
+      <line x1="5" y1="8" x2="11" y2="8" />
+      <line x1="5" y1="11" x2="9" y2="11" />
+    </svg>
+  );
+}
+
 function ShieldIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -74,6 +95,7 @@ function ShieldIcon({ className }: { className?: string }) {
 const NAV_ITEMS = [
   { label: 'Connect Wallet', labelAuth: 'Account', href: '/auth', Icon: WalletIcon, adminOnly: false },
   { label: 'Dashboard', href: '/dashboard', Icon: GridIcon, adminOnly: false },
+  { label: 'Audit Trail', href: '/audit', Icon: DocumentIcon, adminOnly: false },
   { label: 'Admin', href: '/admin', Icon: ShieldIcon, adminOnly: true },
 ];
 
