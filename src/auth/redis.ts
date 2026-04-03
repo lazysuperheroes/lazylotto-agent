@@ -8,13 +8,15 @@
 
 import { createHash } from 'node:crypto';
 
-// ── Key prefixes ─────────────────────────────────────────────
+// ── Key prefixes (network-scoped to allow shared Redis) ──────
+
+const NET = process.env.HEDERA_NETWORK ?? 'testnet';
 
 export const KEY_PREFIX = {
-  challenge: 'lla:challenge:',
-  session: 'lla:session:',
-  accountSessions: 'lla:account-sessions:',
-  rateLimit: 'lla:ratelimit:',
+  challenge: `lla:${NET}:challenge:`,
+  session: `lla:${NET}:session:`,
+  accountSessions: `lla:${NET}:account-sessions:`,
+  rateLimit: `lla:${NET}:ratelimit:`,
 } as const;
 
 // ── Token hashing ────────────────────────────────────────────

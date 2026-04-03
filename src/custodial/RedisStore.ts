@@ -43,7 +43,8 @@ import type { IStore, DeadLetterEntry } from './IStore.js';
 
 // ── Constants ────────────────────────────────────────────────────
 
-const P = 'lla:store:'; // key prefix
+const NET = process.env.HEDERA_NETWORK ?? 'testnet';
+const P = `lla:${NET}:store:`; // network-scoped key prefix
 const MAX_RECORDS = 10_000;
 
 // ── Helpers ──────────────────────────────────────────────────────
