@@ -177,12 +177,12 @@ export async function startMcpServer(
     releaseUserLock: async () => {},
   };
 
-  // Register tool groups
-  registerSingleUserTools(server, agent, ctx);
-
+  // Register tool groups — multi-user mode subsumes single-user tools
   if (multiUser) {
     registerMultiUserTools(server, multiUser, ctx);
     registerOperatorTools(server, multiUser, ctx);
+  } else {
+    registerSingleUserTools(server, agent, ctx);
   }
 
   // ── Start transport ──────────────────────────────────────

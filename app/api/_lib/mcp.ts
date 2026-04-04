@@ -14,7 +14,6 @@ import { MultiUserAgent } from '~/custodial/MultiUserAgent';
 import { loadCustodialConfig } from '~/custodial/types';
 import { loadStrategy } from '~/config/loader';
 import {
-  registerSingleUserTools,
   registerMultiUserTools,
   registerOperatorTools,
 } from '~/mcp/tools/index';
@@ -34,7 +33,7 @@ let multiUser: MultiUserAgent | null = null;
 let cachedStore: IStore | null = null;
 let cachedClient: Client | null = null;
 
-const AGENT_VERSION = '0.1.0';
+const AGENT_VERSION = '0.1.1';
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -163,7 +162,7 @@ export async function createMcpServer(): Promise<McpServer> {
     releaseUserLock: (userId: string) => releaseUserLock(userId),
   };
 
-  registerSingleUserTools(server, a, ctx);
+  // Multi-user mode only — single-user tools are not registered on the hosted version
   registerMultiUserTools(server, mu, ctx);
   registerOperatorTools(server, mu, ctx);
 

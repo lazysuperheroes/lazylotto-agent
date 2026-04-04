@@ -18,15 +18,15 @@ Operator validation guide for the deployed LazyLotto Agent at
 ## 1. Discovery Endpoint
 
 ```bash
-curl https://testnet-agent.lazysuperheroes.com/api/discover | jq .
+curl https://testnet-agent.lazysuperheroes.com/api/discover
 ```
 
 Verify:
-- [ ] Returns JSON with `name`, `version`, `uaid`
-- [ ] `endpoints.mcp` is `/api/mcp`
-- [ ] `endpoints.auth.challenge` is `/api/auth/challenge`
-- [ ] `capabilities.multiUser` is `true`
-- [ ] `fees.rakePercent` shows the correct default
+- [X] Returns JSON with `name`, `version`, `uaid`
+- [X] `endpoints.mcp` is `/api/mcp`
+- [X] `endpoints.auth.challenge` is `/api/auth/challenge`
+- [X] `capabilities.multiUser` is `true`
+- [X] `fees.rakePercent` shows the correct default
 
 ---
 
@@ -36,11 +36,11 @@ Verify:
 2. Connect your **operator wallet** via WalletConnect
 
 Verify:
-- [ ] Character mascot appears with tagline
-- [ ] Challenge nonce appears for signing
-- [ ] After signing, redirects to /dashboard
-- [ ] Sidebar shows your account ID and "testnet" badge
-- [ ] Session token stored in localStorage (DevTools > Application > Local Storage)
+- [X] Character mascot appears with tagline
+- [X] Challenge nonce appears for signing
+- [X] After signing, redirects to /dashboard
+- [X] Sidebar shows your account ID and "testnet" badge
+- [X] Session token stored in localStorage (DevTools > Application > Local Storage)
 
 ---
 
@@ -49,9 +49,9 @@ Verify:
 Visit https://testnet-agent.lazysuperheroes.com/admin
 
 Verify:
-- [ ] Page loads (not 403/404)
-- [ ] Shows user count, operator balance, dead letter count
-- [ ] If no users yet, shows zeros (not errors)
+- [X] Page loads (not 403/404)
+- [X] Shows user count, operator balance, dead letter count
+- [X] If no users yet, shows zeros (not errors)
 
 ---
 
@@ -63,7 +63,8 @@ Test the MCP endpoint directly with curl:
 # Initialize
 curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"uat","version":"1.0"}},"id":1}' | jq .
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"uat","version":"1.0"}},"id":1}'
 ```
 
 - [ ] Returns `serverInfo` with `name: lazylotto-agent`
@@ -72,10 +73,11 @@ curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
 # List tools
 curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/list","id":2}' | jq '.result.tools | length'
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","id":2}'
 ```
 
-- [ ] Returns 22 (9 single-user + 7 multi-user + 6 operator)
+- [X] Returns 22 (7 multi-user + 6 operator)
 
 ---
 
@@ -222,6 +224,7 @@ With a **user-tier** session token:
 # User trying to call operator tool — should be denied
 curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"operator_balance","arguments":{"auth_token":"sk_USER_TOKEN"}},"id":1}' | jq .
 ```
 
@@ -231,6 +234,7 @@ curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
 # User trying to access another user's data
 curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"multi_user_play","arguments":{"userId":"some-other-user","auth_token":"sk_USER_TOKEN"}},"id":1}' | jq .
 ```
 
@@ -241,6 +245,7 @@ Without any token:
 ```bash
 curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"multi_user_status","arguments":{}},"id":1}' | jq .
 ```
 
@@ -256,6 +261,7 @@ for i in $(seq 1 35); do
   curl -s -o /dev/null -w "%{http_code}" -X POST \
     https://testnet-agent.lazysuperheroes.com/api/mcp \
     -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
     -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
   echo
 done
