@@ -18,7 +18,16 @@ const config = {
       '.mjs': ['.mts', '.mjs'],
     };
 
-    if (!isServer) {
+    if (isServer) {
+      // Externalize packages that use ESM-only exports incompatible with webpack.
+      // These are only loaded at runtime via dynamic imports in the MCP tool chain
+      // (single-user tools → AuditReport → HOL registry → standards-sdk → file-type).
+      config.externals = [
+        ...(Array.isArray(config.externals) ? config.externals : []),
+        '@hashgraphonline/standards-sdk',
+        'file-type',
+      ];
+    } else {
       config.resolve.fallback = {
         ...config.resolve.fallback,
         fs: false,

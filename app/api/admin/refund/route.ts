@@ -1,17 +1,18 @@
 /**
  * POST /api/admin/refund
  *
- * Processes a refund for a user (returns deposited funds to their account).
- * Requires 'operator' tier auth.
+ * Processes a refund for a specific Hedera transaction: looks up the
+ * transaction on the mirror node, identifies the sender, and transfers
+ * the same amount back.
  *
- * This operation requires a live Hedera Client with the agent's private
- * key to execute the on-chain transfer, which is not available in the
- * serverless Next.js environment. Returns 501 until the full HTTP server
- * mode is used.
+ * Requires 'operator' tier auth.
  */
 
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
+import { getClient } from '../../_lib/hedera';
+import { getStore } from '../../_lib/store';
+import { processRefund } from '~/hedera/refund';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -28,15 +29,18 @@ export async function POST(request: Request) {
     const auth = await requireTier(request, 'operator');
     if (isErrorResponse(auth)) return auth;
 
-    return NextResponse.json(
-      {
-        error: 'Not implemented in serverless mode',
-        message:
-          'Refunds require the agent CLI with a live Hedera client. ' +
-          'Use: npm run dev:http and call POST /api/admin/refund on the HTTP server.',
-      },
-      { status: 501, headers: CORS_HEADERS },
-    );
+    const body = (await request.json()) as { transactionId?: string };
+    if (!body.transactionId) {
+      return NextResponse.json(
+        { error: 'Missing required field: transactionId' },
+        { status: 400, headers: CORS_HEADERS },
+      );
+    }
+
+    const store = await getStore();
+    const result = await processRefund(getClient(), body.transactionId, { store });
+
+    return NextResponse.json(result, { headers: CORS_HEADERS });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(

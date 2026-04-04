@@ -2,15 +2,17 @@
  * POST /api/admin/reconcile
  *
  * Triggers on-chain balance reconciliation against the internal ledger.
- * Requires 'operator' tier auth.
+ * Processes any pending deposits first to ensure fresh data.
  *
- * This operation requires a live Hedera Client with the agent's private
- * key, which is not available in the serverless Next.js environment.
- * Returns 501 until the full HTTP server mode is used.
+ * Requires 'operator' tier auth.
  */
 
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
+import { getClient } from '../../_lib/hedera';
+import { getStore } from '../../_lib/store';
+import { checkDeposits } from '../../_lib/deposits';
+import { reconcile } from '~/custodial/Reconciliation';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -27,15 +29,14 @@ export async function POST(request: Request) {
     const auth = await requireTier(request, 'operator');
     if (isErrorResponse(auth)) return auth;
 
-    return NextResponse.json(
-      {
-        error: 'Not implemented in serverless mode',
-        message:
-          'Reconciliation requires the agent CLI with a live Hedera client. ' +
-          'Use: npm run dev:http and call POST /api/admin/reconcile on the HTTP server.',
-      },
-      { status: 501, headers: CORS_HEADERS },
-    );
+    // Process any pending deposits before reconciling
+    await checkDeposits();
+
+    const client = getClient();
+    const store = await getStore();
+    const result = await reconcile(client, store);
+
+    return NextResponse.json(result, { headers: CORS_HEADERS });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(

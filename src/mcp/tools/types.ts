@@ -7,6 +7,7 @@
  */
 
 import type { Client } from '@hashgraph/sdk';
+import type { AuthContext } from '../../auth/types.js';
 
 // ── MCP tool return shapes ──────────────────────────────────────
 
@@ -20,6 +21,12 @@ export interface ToolResult {
   content: TextContent[];
   isError?: true;
 }
+
+// ── Auth result (returned by requireAuth) ───────────────────────
+
+export type AuthResult =
+  | { error: ToolResult }
+  | { auth: AuthContext };
 
 // ── Session tracking ────────────────────────────────────────────
 
@@ -62,6 +69,31 @@ export interface ServerContext {
   /** Auth token for sensitive operations. Null = no auth configured. */
   authToken: string | null;
 
-  /** Check auth for fund-moving operations. Returns error result if auth fails. */
-  requireAuth: (providedToken?: string) => Promise<ToolResult | null> | ToolResult | null;
+  /**
+   * Check auth for operations. Returns either { auth: AuthContext } on
+   * success or { error: ToolResult } on failure.
+   */
+  requireAuth: (providedToken?: string) => Promise<AuthResult>;
+
+  /**
+   * Resolve internal userId from a Hedera account ID.
+   * Returns null if the account is not registered.
+   */
+  resolveUserId: (accountId: string) => string | null;
+
+  /**
+   * On-demand deposit detection. Polls the mirror node for new
+   * deposits since the last watermark. Returns count processed.
+   */
+  checkDeposits: () => Promise<number>;
+
+  /**
+   * Distributed lock for concurrent play/withdraw prevention.
+   * In serverless: Redis SETNX. In CLI: no-op (in-memory locks suffice).
+   * Returns true if lock acquired, false if already held.
+   */
+  acquireUserLock: (userId: string) => Promise<boolean>;
+
+  /** Release a distributed user lock. */
+  releaseUserLock: (userId: string) => Promise<void>;
 }

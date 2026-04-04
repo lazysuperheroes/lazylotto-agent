@@ -11,6 +11,7 @@
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
+import { checkDeposits } from '../../_lib/deposits';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -26,6 +27,9 @@ export async function GET(request: Request) {
   try {
     const auth = await requireTier(request, 'user');
     if (isErrorResponse(auth)) return auth;
+
+    // Process any pending deposits before returning balance
+    await checkDeposits();
 
     const store = await getStore();
     const accountId = auth.accountId;

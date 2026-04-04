@@ -51,8 +51,8 @@ export function registerSingleUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      if ('error' in authResult) return authResult.error;
       if (getIsSessionActive()) {
         return errorResult('A session is already running. Wait for it to complete.');
       }
@@ -124,8 +124,8 @@ export function registerSingleUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      if ('error' in authResult) return authResult.error;
       try {
         const info = await getWalletInfo(client);
         const accountId = info.accountId.toString();
@@ -184,8 +184,8 @@ export function registerSingleUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      if ('error' in authResult) return authResult.error;
       try {
         const ownerEoa = getOwnerEoa();
         const accountId = getOperatorAccountId(client);
@@ -232,8 +232,8 @@ export function registerSingleUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ strategy: input, auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      if ('error' in authResult) return authResult.error;
       try {
         let parsed: Strategy;
 
@@ -276,8 +276,8 @@ export function registerSingleUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      if ('error' in authResult) return authResult.error;
       try {
         const info = await getWalletInfo(client);
         const accountId = info.accountId.toString();
@@ -342,8 +342,8 @@ export function registerSingleUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ amount, token, to, auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      if ('error' in authResult) return authResult.error;
       try {
         const recipient = to ?? getOwnerEoa();
         // Restrict to OWNER_EOA if no explicit 'to' and auth is required
@@ -399,8 +399,8 @@ export function registerSingleUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      if ('error' in authResult) return authResult.error;
       try {
         // Signal active session to stop
         const wasPlaying = getIsSessionActive();
@@ -459,8 +459,8 @@ export function registerSingleUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      if ('error' in authResult) return authResult.error;
       try {
         const { AuditReport } = await import('../../agent/AuditReport.js');
         const audit = new AuditReport(client, agent.getStrategy());
@@ -483,8 +483,8 @@ export function registerSingleUserTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      if ('error' in authResult) return authResult.error;
       try {
         const steps: {
           step: number;

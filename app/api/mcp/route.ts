@@ -1,31 +1,51 @@
 /**
- * POST|GET /api/mcp
+ * POST /api/mcp
  *
- * Stub endpoint for the MCP protocol on Vercel.
+ * Stateless MCP endpoint for the LazyLotto agent on Vercel.
  *
- * The MCP protocol requires:
- *   - Persistent in-memory state (session tracking, cumulative stats)
- *   - Hedera SDK client with the agent's private key for signing transactions
- *   - Long-lived SSE connections for server-initiated notifications
+ * Uses WebStandardStreamableHTTPServerTransport in stateless mode
+ * (no session tracking). Each request creates a fresh McpServer with
+ * all tools registered, handles the JSON-RPC request, and returns
+ * the response. The heavy objects (agent, store, Hedera client) are
+ * cached per warm Lambda instance.
  *
- * None of these are available in a stateless serverless environment.
- * The real MCP server runs on the operator's infrastructure via the CLI
- * (npm run dev:http or npm run dev:mcp).
- *
- * This route returns a helpful 501 explaining the situation and pointing
- * callers to the correct endpoint.
+ * Discoverable via HOL at:
+ *   GET /api/discover → { endpoints: { mcp: "/api/mcp" } }
  */
 
-import { NextResponse } from 'next/server';
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
+import { createMcpServer, getAgentContext } from '../_lib/mcp';
+import { getRedis, KEY_PREFIX } from '~/auth/redis';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': process.env.AUTH_PAGE_ORIGIN ?? '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, Mcp-Session-Id',
+  'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version',
+  'Access-Control-Expose-Headers': 'Mcp-Session-Id',
 };
 
+/** 30 requests per minute, keyed by auth token or IP. */
+const MCP_RATE_LIMIT = 30;
+const MCP_RATE_WINDOW_SEC = 60;
+
+async function checkMcpRateLimit(request: Request): Promise<boolean> {
+  // Key by auth token if present, otherwise by IP
+  const authHeader = request.headers.get('authorization');
+  const identity = authHeader?.startsWith('Bearer ')
+    ? authHeader.slice(7, 23) // first 16 chars of token (enough to distinguish)
+    : request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
+
+  const redis = await getRedis();
+  const key = `${KEY_PREFIX.rateLimit}mcp:${identity}`;
+  const count = await redis.incr(key);
+  if (count === 1) {
+    await redis.expire(key, MCP_RATE_WINDOW_SEC);
+  }
+  return count <= MCP_RATE_LIMIT;
+}
+
 export async function OPTIONS() {
-  return new NextResponse(null, {
+  return new Response(null, {
     status: 204,
     headers: {
       ...CORS_HEADERS,
@@ -34,34 +54,77 @@ export async function OPTIONS() {
   });
 }
 
-export async function POST() {
-  return NextResponse.json(
-    {
-      error: 'MCP endpoint not available on serverless deployment',
-      message:
-        'The MCP protocol requires a persistent connection and Hedera signing capability. ' +
-        'Run the agent locally with: npm run dev:http (or npm run dev:multi-http for multi-user mode). ' +
-        'Then connect Claude Desktop to http://localhost:3001/mcp',
-      alternatives: {
-        auth: '/api/auth/challenge — Authenticate via Hedera signature',
-        dashboard: '/dashboard — View your balance and play history',
-        admin: '/admin — Operator dashboard',
+export async function POST(request: Request) {
+  try {
+    // Rate limit before doing any heavy work
+    if (!await checkMcpRateLimit(request)) {
+      return new Response(
+        JSON.stringify({ error: 'Rate limit exceeded. Try again shortly.' }),
+        {
+          status: 429,
+          headers: {
+            ...CORS_HEADERS,
+            'Content-Type': 'application/json',
+            'Retry-After': String(MCP_RATE_WINDOW_SEC),
+          },
+        },
+      );
+    }
+
+    const server = await createMcpServer();
+
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: undefined, // stateless mode — no session tracking
+      enableJsonResponse: true,      // JSON responses, no SSE streams
+    });
+
+    await server.connect(transport);
+    const response = await transport.handleRequest(request);
+    await transport.close();
+
+    // Flush any pending Redis writes before Lambda freezes
+    const { store } = await getAgentContext();
+    await store.flush();
+
+    return response;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return new Response(
+      JSON.stringify({ error: message }),
+      {
+        status: 500,
+        headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
       },
-    },
-    { status: 501, headers: CORS_HEADERS },
-  );
+    );
+  }
 }
 
 export async function GET() {
-  return NextResponse.json(
-    {
+  return new Response(
+    JSON.stringify({
       error: 'MCP endpoint requires POST with JSON-RPC',
-      message:
-        'This serverless deployment does not support the MCP protocol. ' +
-        'The MCP server must run on operator infrastructure with access to the Hedera wallet.',
+      message: 'Send a POST request with a JSON-RPC body to interact with this MCP server.',
       docs: 'https://modelcontextprotocol.io/docs',
-      localEndpoint: 'http://localhost:3001/mcp',
+      example: {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: { jsonrpc: '2.0', method: 'initialize', params: { capabilities: {} }, id: 1 },
+      },
+    }),
+    {
+      status: 405,
+      headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
     },
-    { status: 405, headers: CORS_HEADERS },
+  );
+}
+
+export async function DELETE() {
+  // Stateless mode — no sessions to delete
+  return new Response(
+    JSON.stringify({ error: 'No active session (stateless mode)' }),
+    {
+      status: 405,
+      headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+    },
   );
 }

@@ -22,10 +22,12 @@ import { reconcile, type ReconciliationResult } from './Reconciliation.js';
 // ── Health snapshot returned by getHealth() ─────────────────────
 
 export interface AgentHealth {
+  mode: 'cli' | 'serverless';
   isRunning: boolean;
   startedAt: string | null;
   uptime: number;
   depositWatcherRunning: boolean;
+  depositDetection: 'background-poll' | 'on-demand';
   totalUsers: number;
   activeUsers: number;
   pendingReserves: Record<string, number>;
@@ -76,18 +78,24 @@ export class MultiUserAgent {
   /**
    * Initialize all subsystems. Must be called before start().
    *
-   * 1. Create Hedera client from environment
-   * 2. Load persistent state from disk
+   * 1. Create Hedera client from environment (or use injected client)
+   * 2. Load persistent state (or use injected store)
    * 3. Wire up accounting, ledger, deposit watcher, negotiation, gas tracker
+   *
+   * @param options.store  Inject a pre-existing store (serverless: avoids double-instantiation)
+   * @param options.client Inject a pre-existing Hedera client
    */
-  async initialize(): Promise<void> {
-    this.client = createClient();
+  async initialize(options?: { store?: IStore; client?: Client }): Promise<void> {
+    this.client = options?.client ?? createClient();
 
     const agentAccountId = getOperatorAccountId(this.client);
 
-    // Use RedisStore when KV/Upstash is configured, otherwise JSON files
-    const { createStore } = await import('./createStore.js');
-    this.store = await createStore();
+    if (options?.store) {
+      this.store = options.store;
+    } else {
+      const { createStore } = await import('./createStore.js');
+      this.store = await createStore();
+    }
 
     this.accounting = new AccountingService({
       client: this.client,
@@ -144,6 +152,15 @@ export class MultiUserAgent {
 
     await this.store.flush();
     console.log('[MultiUserAgent] Multi-user agent stopped');
+  }
+
+  /**
+   * Run a single deposit poll cycle against the mirror node.
+   * Used in serverless mode where the background watcher doesn't run.
+   * Returns the number of deposits successfully processed.
+   */
+  async pollDepositsOnce(): Promise<number> {
+    return this.depositWatcher.pollOnce();
   }
 
   // ── Accounting Deployment ──────────────────────────────────────
@@ -588,13 +605,16 @@ export class MultiUserAgent {
    */
   getHealth(): AgentHealth {
     const allUsers = this.store.getAllUsers();
+    const serverless = !this.isRunning && !this.depositWatcher.isRunning();
     return {
+      mode: serverless ? 'serverless' : 'cli',
       isRunning: this.isRunning,
       startedAt: this.startedAt,
       uptime: this.startedAt
         ? Date.now() - new Date(this.startedAt).getTime()
         : 0,
       depositWatcherRunning: this.depositWatcher.isRunning(),
+      depositDetection: this.depositWatcher.isRunning() ? 'background-poll' : 'on-demand',
       totalUsers: allUsers.length,
       activeUsers: allUsers.filter((u) => u.active).length,
       pendingReserves: reserveSummary(

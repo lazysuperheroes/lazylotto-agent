@@ -15,6 +15,7 @@ import type {
   ServerContext,
   SessionRecord,
   CumulativeStats,
+  AuthResult,
 } from './tools/types.js';
 import { errorMsg, tokenBalanceToNumber, toEvmAddress } from '../utils/format.js';
 import { resolveAuth, satisfiesTier, extractToken, type AuthContext } from '../auth/index.js';
@@ -61,22 +62,24 @@ const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || null;
 
 /**
  * Unified auth check supporting both legacy MCP_AUTH_TOKEN and new session tokens.
- * Used by all tool handlers via ctx.requireAuth.
+ * Returns { auth: AuthContext } on success, { error: ToolResult } on failure.
  */
-async function requireAuthCheck(providedToken?: string): Promise<ReturnType<typeof errorResult> | null> {
+async function requireAuthCheck(providedToken?: string): Promise<AuthResult> {
   // No auth configured (local dev without MCP_AUTH_TOKEN) — allow everything
-  if (!MCP_AUTH_TOKEN && !(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL)) return null;
+  if (!MCP_AUTH_TOKEN && !(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL)) {
+    return { auth: { tier: 'operator', accountId: 'local' } };
+  }
 
   if (!providedToken) {
-    return errorResult('Authentication required. Provide auth_token parameter.');
+    return { error: errorResult('Authentication required. Provide auth_token parameter.') };
   }
 
   const auth = await resolveAuth(providedToken);
   if (!auth) {
-    return errorResult('Invalid or expired authentication token.');
+    return { error: errorResult('Invalid or expired authentication token.') };
   }
 
-  return null; // Auth succeeded
+  return { auth };
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -152,9 +155,26 @@ export async function startMcpServer(
       isSessionActive = v;
     },
     authToken: MCP_AUTH_TOKEN,
-    requireAuth: async (providedToken?: string) => {
-      return requireAuthCheck(providedToken);
+    requireAuth: (providedToken?: string) => requireAuthCheck(providedToken),
+    resolveUserId: (accountId: string) => {
+      // In CLI mode, resolve from multiUser's store if available
+      if (multiUser) {
+        const user = (multiUser as unknown as { store: import('../custodial/IStore.js').IStore }).store
+          ?.getUserByAccountId(accountId);
+        return user?.userId ?? null;
+      }
+      return null;
     },
+    checkDeposits: async () => {
+      // In CLI mode, the deposit watcher runs in the background — no-op here.
+      // In serverless mode (Next.js API route), the route handler wires this
+      // to DepositWatcher.pollOnce().
+      return 0;
+    },
+    // In CLI mode, the in-memory promise-based locks in MultiUserAgent
+    // provide single-process protection. No distributed lock needed.
+    acquireUserLock: async () => true,
+    releaseUserLock: async () => {},
   };
 
   // Register tool groups

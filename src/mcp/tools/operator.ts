@@ -10,7 +10,7 @@ import { z } from 'zod';
 
 import type { MultiUserAgent } from '../../custodial/MultiUserAgent.js';
 import { withChecksum } from '../../utils/checksum.js';
-import type { ServerContext } from './types.js';
+import type { ServerContext, AuthResult } from './types.js';
 
 // ── Registration ────────────────────────────────────────────────
 
@@ -21,6 +21,13 @@ export function registerOperatorTools(
 ): void {
   const { json, errorResult, errorMsg, requireAuth } = ctx;
 
+  /** Require admin or operator tier. Returns error ToolResult if denied, null if allowed. */
+  function requireOperator(authResult: AuthResult) {
+    if ('error' in authResult) return authResult.error;
+    if (authResult.auth.tier === 'user') return errorResult('Access denied');
+    return null;
+  }
+
   server.tool(
     'operator_balance',
     'View operator platform balance: rake collected, gas spent, net profit.',
@@ -28,8 +35,9 @@ export function registerOperatorTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      const denied = requireOperator(authResult);
+      if (denied) return denied;
       try {
         const op = multiUser.getOperatorBalance();
         const netProfit: Record<string, number> = {};
@@ -56,8 +64,9 @@ export function registerOperatorTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ amount, to, token, auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      const denied = requireOperator(authResult);
+      if (denied) return denied;
       try {
         const txId = await multiUser.operatorWithdrawFees(amount, to, token);
         const op = multiUser.getOperatorBalance();
@@ -80,8 +89,9 @@ export function registerOperatorTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      const denied = requireOperator(authResult);
+      if (denied) return denied;
       try {
         const result = await multiUser.reconcile();
         return json(result);
@@ -101,8 +111,9 @@ export function registerOperatorTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      const denied = requireOperator(authResult);
+      if (denied) return denied;
       try {
         const deadLetters = multiUser.getHealth(); // health includes error count
         // Access store directly for dead letters
@@ -131,89 +142,15 @@ export function registerOperatorTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ transactionId, auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      const denied = requireOperator(authResult);
+      if (denied) return denied;
       try {
-        // Look up the transaction on mirror node
-        const { getTransactionsByAccount } = await import('../../hedera/mirror.js');
-        const { transferHbar, transferToken } = await import('../../hedera/transfers.js');
-        const { getOperatorAccountId } = await import('../../hedera/wallet.js');
-
-        const agentAccountId = getOperatorAccountId(ctx.client);
-
-        // Fetch the specific transaction from mirror node
-        const mirrorUrl = (process.env.HEDERA_NETWORK === 'mainnet'
-          ? 'https://mainnet.mirrornode.hedera.com'
-          : 'https://testnet.mirrornode.hedera.com') + '/api/v1';
-
-        const txRes = await fetch(`${mirrorUrl}/transactions/${transactionId}`);
-        if (!txRes.ok) {
-          return errorResult(`Transaction ${transactionId} not found on mirror node`);
-        }
-        const txData = (await txRes.json()) as { transactions: Array<{
-          transfers: Array<{ account: string; amount: number }>;
-          token_transfers: Array<{ token_id: string; account: string; amount: number }>;
-          result: string;
-        }> };
-
-        const tx = txData.transactions?.[0];
-        if (!tx) return errorResult('Transaction not found');
-        if (tx.result !== 'SUCCESS') return errorResult(`Transaction was not successful: ${tx.result}`);
-
-        // Find the sender (who sent TO the agent)
-        const hbarIn = tx.transfers?.find(t => t.account === agentAccountId && t.amount > 0);
-        const tokenIn = tx.token_transfers?.find(t => t.account === agentAccountId && t.amount > 0);
-
-        if (!hbarIn && !tokenIn) {
-          return errorResult('No incoming transfer to agent found in this transaction');
-        }
-
-        // Find who sent it (the account with the negative amount)
-        let senderAccountId: string | null = null;
-        let refundAmount: number;
-        let refundToken: string | null = null;
-
-        if (tokenIn) {
-          senderAccountId = tx.token_transfers.find(t => t.token_id === tokenIn.token_id && t.amount < 0)?.account ?? null;
-          refundAmount = tokenIn.amount; // base units
-          refundToken = tokenIn.token_id;
-        } else if (hbarIn) {
-          senderAccountId = tx.transfers.find(t => t.amount < 0 && t.account !== agentAccountId)?.account ?? null;
-          refundAmount = hbarIn.amount; // tinybars
-          refundToken = null; // HBAR
-        } else {
-          return errorResult('Could not determine sender');
-        }
-
-        if (!senderAccountId) {
-          return errorResult('Could not determine sender account from transaction');
-        }
-
-        // Execute the refund
-        let refundTxId: string;
-        if (refundToken) {
-          // Token refund (amount is in base units, transferToken expects human-readable)
-          const { getTokenMeta } = await import('../../utils/math.js');
-          const meta = await getTokenMeta(refundToken);
-          const humanAmount = refundAmount / Math.pow(10, meta.decimals);
-          const result = await transferToken(ctx.client, agentAccountId, senderAccountId, refundToken, humanAmount);
-          refundTxId = result.transactionId;
-        } else {
-          // HBAR refund (amount is in tinybars, transferHbar expects HBAR)
-          const hbarAmount = refundAmount / 1e8;
-          const result = await transferHbar(ctx.client, agentAccountId, senderAccountId, hbarAmount);
-          refundTxId = result.transactionId;
-        }
-
-        return json({
-          refunded: true,
-          originalTx: transactionId,
-          sender: withChecksum(senderAccountId),
-          amount: refundToken
-            ? `${refundAmount} base units of ${refundToken}`
-            : `${refundAmount / 1e8} HBAR`,
-          refundTxId,
-        });
+        const { processRefund } = await import('../../hedera/refund.js');
+        // Pass store for ledger adjustment — deducts from user balance if this was a deposit
+        const store = (multiUser as unknown as { store: import('../../custodial/IStore.js').IStore }).store;
+        const result = await processRefund(ctx.client, transactionId, store ? { store } : undefined);
+        return json(result);
       } catch (e) {
         return errorResult(`Refund failed: ${errorMsg(e)}`);
       }
@@ -229,8 +166,9 @@ export function registerOperatorTools(
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
     async ({ auth_token }) => {
-      const authErr = await requireAuth(auth_token);
-      if (authErr) return authErr;
+      const authResult = await requireAuth(auth_token);
+      const denied = requireOperator(authResult);
+      if (denied) return denied;
       try {
         return json(multiUser.getHealth());
       } catch (e) {
