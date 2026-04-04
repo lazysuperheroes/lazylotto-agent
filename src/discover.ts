@@ -166,7 +166,7 @@ export function buildDiscoveryResponse(baseUrl: string): DiscoveryResponse {
 
     // ── Links ─────────────────────────────────────────────────
     links: {
-      website: 'https://lazylotto.app',
+      website: 'https://lazysuperheroes.com',
       dapp:
         network === 'mainnet'
           ? 'https://dapp.lazysuperheroes.com'

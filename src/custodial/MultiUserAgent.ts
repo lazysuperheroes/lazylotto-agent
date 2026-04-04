@@ -1,7 +1,6 @@
 import type { Client } from '@hashgraph/sdk';
 import { createClient, getOperatorAccountId } from '../hedera/wallet.js';
 import { LottoAgent } from '../agent/LottoAgent.js';
-import { PersistentStore } from './PersistentStore.js';
 import type { IStore } from './IStore.js';
 import { UserLedger } from './UserLedger.js';
 import { AccountingService } from './AccountingService.js';
@@ -86,8 +85,9 @@ export class MultiUserAgent {
 
     const agentAccountId = getOperatorAccountId(this.client);
 
-    this.store = new PersistentStore(this.config.dataDir);
-    await this.store.load();
+    // Use RedisStore when KV/Upstash is configured, otherwise JSON files
+    const { createStore } = await import('./createStore.js');
+    this.store = await createStore();
 
     this.accounting = new AccountingService({
       client: this.client,

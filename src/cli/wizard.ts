@@ -159,7 +159,7 @@ export async function runWizard(): Promise<void> {
   console.log('\n--- Step 4: LazyLotto MCP Endpoint ---\n');
 
   const mcpUrl = await ask('MCP URL', {
-    default: 'https://lazylotto.app/api/mcp',
+    default: 'https://testnet-dapp.lazysuperheroes.com/api/mcp',
     validate: isValidUrl,
   });
 

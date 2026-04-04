@@ -536,7 +536,7 @@ export function registerSingleUserTools(
             : 'LAZYLOTTO_MCP_URL not set.',
           action: hasMcp
             ? undefined
-            : 'Set LAZYLOTTO_MCP_URL=https://lazylotto.app/api/mcp in .env',
+            : 'Set LAZYLOTTO_MCP_URL in .env (testnet: https://testnet-dapp.lazysuperheroes.com/api/mcp)',
         });
 
         // Step 4: Wallet funding
