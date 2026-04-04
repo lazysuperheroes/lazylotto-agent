@@ -257,6 +257,8 @@ export function AuthFlow() {
     const acctId = localStorage.getItem('lazylotto:accountId');
     if (token && acctId) {
       setStoredAccountId(acctId);
+      setSessionToken(token);
+      setMcpUrl(localStorage.getItem('lazylotto:mcpUrl')?.split('?')[0] ?? '');
       setStatus('already-auth');
     } else {
       setStatus('landing');
@@ -646,9 +648,10 @@ export function AuthFlow() {
                   )}
                 </div>
 
-                {/* If URL shown */}
+                {/* Connection details (expanded) */}
                 {showUrl && savedUrl && (
-                  <div className="w-full">
+                  <div className="w-full flex flex-col gap-4">
+                    {/* Connection URL */}
                     <div className="rounded-lg border border-secondary bg-[#111113] px-4 py-3">
                       <p className="break-all font-mono text-sm text-brand">
                         {savedUrl}
@@ -661,7 +664,7 @@ export function AuthFlow() {
                         setCopiedUrl(true);
                         setTimeout(() => setCopiedUrl(false), 2000);
                       }}
-                      className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-secondary py-2.5 text-sm font-semibold text-foreground transition-colors hover:bg-secondary"
+                      className="flex w-full items-center justify-center gap-2 rounded-lg border border-secondary py-2.5 text-sm font-semibold text-foreground transition-colors hover:bg-secondary"
                     >
                       {copiedUrl ? (
                         <>
@@ -674,6 +677,67 @@ export function AuthFlow() {
                         'Copy Connection URL'
                       )}
                     </button>
+
+                    {/* Claude Desktop config toggle */}
+                    <button
+                      type="button"
+                      onClick={() => setShowJsonConfig((prev) => !prev)}
+                      className="text-left text-xs text-brand underline transition-colors hover:text-brand/80"
+                    >
+                      {showJsonConfig ? 'Hide Claude Desktop config' : 'Show Claude Desktop config (JSON)'}
+                    </button>
+                    {showJsonConfig && (
+                      <div className="relative rounded-lg border border-secondary bg-[#111113] p-4">
+                        <pre className="break-all font-mono text-xs text-brand whitespace-pre-wrap">
+                          {claudeConfig}
+                        </pre>
+                        <button
+                          type="button"
+                          onClick={() => void handleCopy(claudeConfig, 'Claude config')}
+                          className="absolute right-2 top-2 rounded border border-secondary px-2 py-1 text-xs text-muted transition-colors hover:text-foreground"
+                        >
+                          Copy
+                        </button>
+                      </div>
+                    )}
+
+                    {/* How to connect */}
+                    <div className="rounded-lg bg-secondary/30 px-4 py-3 text-sm text-muted">
+                      <p className="mb-2 font-semibold text-foreground">How to connect</p>
+                      <ul className="flex flex-col gap-1.5">
+                        <li className="flex gap-2">
+                          <span className="text-muted/60">&#8226;</span>
+                          <span>Claude AI: Settings &rarr; Integrations &rarr; Add custom MCP &rarr; paste URL</span>
+                        </li>
+                        <li className="flex gap-2">
+                          <span className="text-muted/60">&#8226;</span>
+                          <span>Claude Desktop: Settings &rarr; MCP Servers &rarr; Add &rarr; paste URL or config</span>
+                        </li>
+                      </ul>
+                    </div>
+
+                    {/* Example commands */}
+                    <div className="rounded-lg bg-secondary/30 px-4 py-3 text-sm text-muted">
+                      <p className="mb-2 font-semibold text-foreground">Try saying</p>
+                      <div className="flex flex-wrap gap-2">
+                        {[
+                          'Register me for LazyLotto',
+                          'Show my deposit info',
+                          'Play a lottery session',
+                          'Check my balance',
+                        ].map((cmd) => (
+                          <button
+                            key={cmd}
+                            type="button"
+                            onClick={() => void handleCopy(cmd, 'Command')}
+                            className="cursor-pointer rounded bg-secondary/50 px-3 py-1.5 text-left text-sm text-foreground transition-colors hover:bg-secondary hover:text-brand"
+                            title="Click to copy"
+                          >
+                            {cmd}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 )}
 
