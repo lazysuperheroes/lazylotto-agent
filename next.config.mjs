@@ -1,6 +1,13 @@
+import { readFileSync } from 'node:fs';
+
+const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'));
+
 /** @type {import('next').NextConfig} */
 const config = {
   reactStrictMode: true,
+  env: {
+    NEXT_PUBLIC_APP_VERSION: pkg.version,
+  },
   transpilePackages: ['@hashgraph/hedera-wallet-connect'],
   images: {
     remotePatterns: [

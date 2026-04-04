@@ -156,6 +156,11 @@ function UserContext() {
           Disconnect
         </button>
       )}
+
+      {/* Version */}
+      <p className="mt-3 text-[10px] text-[#52525b]">
+        v{process.env.NEXT_PUBLIC_APP_VERSION ?? '0.0.0'}
+      </p>
     </div>
   );
 }
