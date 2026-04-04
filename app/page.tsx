@@ -9,7 +9,8 @@ export default function Home() {
   useEffect(() => {
     const token = localStorage.getItem('lazylotto:sessionToken');
     if (token) {
-      router.replace('/dashboard');
+      const tier = localStorage.getItem('lazylotto:tier') ?? '';
+      router.replace(tier === 'admin' || tier === 'operator' ? '/admin' : '/dashboard');
     } else {
       router.replace('/auth');
     }

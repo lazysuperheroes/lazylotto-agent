@@ -405,12 +405,14 @@ export function AuthFlow() {
       const verified = (await verifyRes.json()) as {
         sessionToken: string;
         mcpUrl: string;
+        tier: string;
         expiresAt: string;
       };
 
       // 5. Store to localStorage
       localStorage.setItem('lazylotto:sessionToken', verified.sessionToken);
       localStorage.setItem('lazylotto:accountId', acctId);
+      localStorage.setItem('lazylotto:tier', verified.tier);
 
       // Store the connection URL so already-auth state can show it later
       const fullUrl = `${verified.mcpUrl}?key=${verified.sessionToken}`;
@@ -489,6 +491,7 @@ export function AuthFlow() {
   const handleReauthenticate = useCallback(() => {
     localStorage.removeItem('lazylotto:sessionToken');
     localStorage.removeItem('lazylotto:accountId');
+    localStorage.removeItem('lazylotto:tier');
     localStorage.removeItem('lazylotto:mcpUrl');
     setStoredAccountId('');
     setShowUrl(false);
@@ -504,6 +507,7 @@ export function AuthFlow() {
     }
     localStorage.removeItem('lazylotto:sessionToken');
     localStorage.removeItem('lazylotto:accountId');
+    localStorage.removeItem('lazylotto:tier');
     localStorage.removeItem('lazylotto:mcpUrl');
     setStatus('landing');
     setAccountId('');
@@ -676,10 +680,10 @@ export function AuthFlow() {
                 {/* Primary CTA */}
                 <button
                   type="button"
-                  onClick={() => router.push('/dashboard')}
+                  onClick={() => router.push(localStorage.getItem('lazylotto:tier') === 'admin' || localStorage.getItem('lazylotto:tier') === 'operator' ? '/admin' : '/dashboard')}
                   className="w-full rounded-lg bg-primary px-6 py-3 font-semibold text-white transition-colors hover:bg-primary/90"
                 >
-                  Go to Dashboard
+                  {localStorage.getItem('lazylotto:tier') === 'admin' || localStorage.getItem('lazylotto:tier') === 'operator' ? 'Go to Admin' : 'Go to Dashboard'}
                 </button>
 
                 {/* Secondary actions */}
@@ -937,10 +941,10 @@ export function AuthFlow() {
                   {/* Go to Dashboard */}
                   <button
                     type="button"
-                    onClick={() => router.push('/dashboard')}
+                    onClick={() => router.push(localStorage.getItem('lazylotto:tier') === 'admin' || localStorage.getItem('lazylotto:tier') === 'operator' ? '/admin' : '/dashboard')}
                     className="w-full rounded-lg bg-primary py-3 font-semibold text-white transition-colors hover:bg-primary/90"
                   >
-                    Go to Dashboard
+                    {localStorage.getItem('lazylotto:tier') === 'admin' || localStorage.getItem('lazylotto:tier') === 'operator' ? 'Go to Admin' : 'Go to Dashboard'}
                   </button>
                 </div>
               );
@@ -1175,7 +1179,7 @@ export function AuthFlow() {
               {/* SECTION 4: Go to Dashboard */}
               <button
                 type="button"
-                onClick={() => router.push('/dashboard')}
+                onClick={() => router.push(localStorage.getItem('lazylotto:tier') === 'admin' || localStorage.getItem('lazylotto:tier') === 'operator' ? '/admin' : '/dashboard')}
                 className="w-full rounded-lg bg-primary py-3 font-semibold text-white transition-colors hover:bg-primary/90"
               >
                 Go to Dashboard

@@ -115,6 +115,7 @@ function UserContext() {
   const handleDisconnect = useCallback(() => {
     localStorage.removeItem('lazylotto:sessionToken');
     localStorage.removeItem('lazylotto:accountId');
+    localStorage.removeItem('lazylotto:tier');
     window.location.href = '/auth';
   }, []);
 
@@ -174,9 +175,8 @@ export function Sidebar() {
     const hasToken = !!localStorage.getItem('lazylotto:sessionToken');
     setIsAuthenticated(hasToken);
 
-    const accountId = localStorage.getItem('lazylotto:accountId') ?? '';
-    const adminAccounts = (process.env.NEXT_PUBLIC_ADMIN_ACCOUNTS ?? '').split(',').map(a => a.trim());
-    setIsAdmin(hasToken && adminAccounts.includes(accountId));
+    const tier = localStorage.getItem('lazylotto:tier') ?? '';
+    setIsAdmin(hasToken && (tier === 'admin' || tier === 'operator'));
   }, [pathname]); // Re-check on route change
 
   // Close sidebar on route change (mobile)

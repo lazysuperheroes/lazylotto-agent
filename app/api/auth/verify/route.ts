@@ -36,7 +36,7 @@ export async function POST(request: Request) {
     const result = await verifyChallenge(challengeId, accountId, signatureMapBase64);
 
     const origin = new URL(request.url).origin;
-    const mcpUrl = process.env.AGENT_MCP_URL ?? `${origin}/mcp`;
+    const mcpUrl = process.env.AGENT_MCP_URL ?? `${origin}/api/mcp`;
 
     return NextResponse.json(
       { ...result, mcpUrl },
