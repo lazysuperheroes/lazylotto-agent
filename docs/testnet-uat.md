@@ -1,0 +1,294 @@
+# Testnet UAT Checklist
+
+Operator validation guide for the deployed LazyLotto Agent at
+**testnet-agent.lazysuperheroes.com**. Work through each section in order.
+
+---
+
+## Prerequisites
+
+- [X] Agent wallet funded with testnet HBAR (check on [HashScan](https://hashscan.io/testnet))
+- [X] Your operator wallet account ID is in `ADMIN_ACCOUNTS` env var on Vercel
+- [X] A second testnet wallet for user-role testing (HashPack or Blade)
+- [X] Claude Desktop installed
+- [X] Browser with wallet extension (HashPack or Blade)
+
+---
+
+## 1. Discovery Endpoint
+
+```bash
+curl https://testnet-agent.lazysuperheroes.com/api/discover | jq .
+```
+
+Verify:
+- [ ] Returns JSON with `name`, `version`, `uaid`
+- [ ] `endpoints.mcp` is `/api/mcp`
+- [ ] `endpoints.auth.challenge` is `/api/auth/challenge`
+- [ ] `capabilities.multiUser` is `true`
+- [ ] `fees.rakePercent` shows the correct default
+
+---
+
+## 2. Web Auth Flow (Operator)
+
+1. Visit https://testnet-agent.lazysuperheroes.com/auth
+2. Connect your **operator wallet** via WalletConnect
+
+Verify:
+- [ ] Character mascot appears with tagline
+- [ ] Challenge nonce appears for signing
+- [ ] After signing, redirects to /dashboard
+- [ ] Sidebar shows your account ID and "testnet" badge
+- [ ] Session token stored in localStorage (DevTools > Application > Local Storage)
+
+---
+
+## 3. Admin Dashboard
+
+Visit https://testnet-agent.lazysuperheroes.com/admin
+
+Verify:
+- [ ] Page loads (not 403/404)
+- [ ] Shows user count, operator balance, dead letter count
+- [ ] If no users yet, shows zeros (not errors)
+
+---
+
+## 4. MCP Endpoint — Raw JSON-RPC
+
+Test the MCP endpoint directly with curl:
+
+```bash
+# Initialize
+curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"uat","version":"1.0"}},"id":1}' | jq .
+```
+
+- [ ] Returns `serverInfo` with `name: lazylotto-agent`
+
+```bash
+# List tools
+curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","id":2}' | jq '.result.tools | length'
+```
+
+- [ ] Returns 22 (9 single-user + 7 multi-user + 6 operator)
+
+---
+
+## 5. Claude Desktop — Operator Connection
+
+In Claude Desktop, add the MCP server via URL:
+
+**URL:** `https://testnet-agent.lazysuperheroes.com/api/mcp`
+
+When prompted for headers, add:
+```
+Authorization: Bearer sk_YOUR_SESSION_TOKEN
+```
+
+(Get the token from localStorage after step 2, or from the auth success response.)
+
+Verify:
+- [ ] Claude shows the MCP server as connected
+- [ ] Ask Claude: "What tools do you have from lazylotto?" — lists all tools
+- [ ] Ask Claude: "Check operator health" — calls `operator_health`
+- [ ] Response shows `mode: "serverless"` and `depositDetection: "on-demand"`
+
+---
+
+## 6. User Registration (Second Wallet)
+
+Switch to your **user test wallet**:
+
+1. Visit /auth, connect with user wallet, sign challenge
+2. Copy the session token
+3. In Claude Desktop, update the MCP server's auth header with the new token
+
+```
+Ask Claude: "Register me for LazyLotto. My EOA is 0.0.XXXXX"
+```
+
+Verify:
+- [ ] Returns `status: "registered"`, a `userId`, and `deposit.memo`
+- [ ] Shows agent wallet address to send deposits to
+
+```
+Ask Claude: "Register me again"
+```
+
+- [ ] Returns `status: "already_registered"` with existing userId and memo
+
+---
+
+## 7. Deposit Flow
+
+From your user test wallet, send testnet HBAR to the agent wallet:
+- **Amount**: 10 HBAR (or whatever is convenient)
+- **Memo**: The deposit memo from step 6
+
+Wait ~10 seconds for mirror node propagation, then:
+
+```
+Ask Claude: "Check my deposit info"
+```
+
+Verify:
+- [ ] Calls `multi_user_deposit_info`
+- [ ] Balance shows deposited amount minus rake
+- [ ] Deposit memo is correct
+
+Also check the web dashboard at /dashboard:
+- [ ] Balance matches what Claude reported
+
+---
+
+## 8. Play Flow
+
+```
+Ask Claude: "Play a lottery session for me"
+```
+
+Verify:
+- [ ] Calls `multi_user_play` with your userId auto-resolved
+- [ ] Returns session result: pools evaluated, entries bought, wins/losses
+- [ ] Balance decreased by amount spent
+
+```
+Ask Claude: "Show my play history"
+```
+
+- [ ] Returns the session with correct details
+
+---
+
+## 9. Withdrawal Flow
+
+```
+Ask Claude: "Withdraw 1 HBAR from my account"
+```
+
+Verify:
+- [ ] Calls `multi_user_withdraw`
+- [ ] Returns withdrawal record with transaction ID
+- [ ] Check [HashScan](https://hashscan.io/testnet) for the withdrawal transaction
+- [ ] Balance decreased by withdrawal amount
+
+---
+
+## 10. Operator Tools
+
+Switch back to your **operator wallet** token in Claude Desktop.
+
+```
+Ask Claude: "Show me the operator balance"
+```
+- [ ] Shows rake collected, gas spent, net profit
+
+```
+Ask Claude: "Run a reconciliation check"
+```
+- [ ] Returns ReconciliationResult with on-chain vs ledger comparison
+- [ ] `solvent: true` (no shortfall)
+
+```
+Ask Claude: "Show dead letters"
+```
+- [ ] Returns dead letter queue (may be empty)
+
+---
+
+## 11. Admin API Routes
+
+```bash
+# Reconciliation (use operator session token)
+curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/admin/reconcile \
+  -H "Authorization: Bearer sk_OPERATOR_TOKEN" | jq .
+```
+
+- [ ] Returns ReconciliationResult JSON
+- [ ] `solvent: true`
+
+---
+
+## 12. Security Spot-Checks
+
+With a **user-tier** session token:
+
+```bash
+# User trying to call operator tool — should be denied
+curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"operator_balance","arguments":{"auth_token":"sk_USER_TOKEN"}},"id":1}' | jq .
+```
+
+- [ ] Returns error: "Access denied"
+
+```bash
+# User trying to access another user's data
+curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"multi_user_play","arguments":{"userId":"some-other-user","auth_token":"sk_USER_TOKEN"}},"id":1}' | jq .
+```
+
+- [ ] Returns error: "Access denied"
+
+Without any token:
+
+```bash
+curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"multi_user_status","arguments":{}},"id":1}' | jq .
+```
+
+- [ ] Returns error: "Authentication required"
+
+---
+
+## 13. Rate Limiting
+
+```bash
+for i in $(seq 1 35); do
+  echo -n "Request $i: "
+  curl -s -o /dev/null -w "%{http_code}" -X POST \
+    https://testnet-agent.lazysuperheroes.com/api/mcp \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
+  echo
+done
+```
+
+- [ ] Requests 1-30 return 200
+- [ ] Requests 31+ return 429
+
+---
+
+## 14. IPFS Character Images
+
+Visit /auth and inspect the character image in DevTools (Network tab).
+
+- [ ] Image loads from Filebase CDN (lazysuperheroes.myfilebase.com)
+- [ ] Image dimensions are optimized (256x256 or similar)
+- [ ] No broken image placeholders
+
+---
+
+## Summary
+
+| Area | Tests | Critical? |
+|------|-------|-----------|
+| Discovery | 1 | Yes |
+| Web auth | 2, 3 | Yes |
+| MCP endpoint | 4 | Yes |
+| Claude Desktop | 5 | Yes |
+| Registration + dedup | 6 | Yes |
+| Deposits | 7 | Yes |
+| Play | 8 | Yes |
+| Withdrawal | 9 | Yes |
+| Operator tools | 10, 11 | Yes |
+| Security | 12 | Yes |
+| Rate limiting | 13 | No (defense-in-depth) |
+| Images | 14 | No (cosmetic) |

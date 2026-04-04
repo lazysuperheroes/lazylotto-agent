@@ -5,25 +5,32 @@
  * per warm Lambda instance. A new McpServer is created per request
  * since McpServer.connect() binds to a single transport.
  *
- * Dynamic imports are used throughout to avoid webpack pulling in
- * @hashgraphonline/standards-sdk (via HOL registry -> AuditReport ->
- * single-user tools) at build time. That SDK depends on `file-type`
- * which uses ESM-only exports incompatible with webpack.
+ * Tool registration is lightweight (~1ms synchronous hashmap insertion).
  */
 
-import type { IStore } from '~/custodial/IStore';
-import type { Client } from '@hashgraph/sdk';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { LottoAgent } from '~/agent/LottoAgent';
+import { MultiUserAgent } from '~/custodial/MultiUserAgent';
+import { loadCustodialConfig } from '~/custodial/types';
+import { loadStrategy } from '~/config/loader';
+import {
+  registerSingleUserTools,
+  registerMultiUserTools,
+  registerOperatorTools,
+} from '~/mcp/tools/index';
 import type { ServerContext, SessionRecord, CumulativeStats, AuthResult } from '~/mcp/tools/types';
+import { errorMsg, tokenBalanceToNumber, toEvmAddress } from '~/utils/format';
+import { resolveAuth } from '~/auth/middleware';
 import { getStore } from './store';
 import { getClient } from './hedera';
+import { acquireUserLock, releaseUserLock } from './locks';
+import type { IStore } from '~/custodial/IStore';
+import type { Client } from '@hashgraph/sdk';
 
 // ── Cached singletons ───────────────────────────────────────────
 
-// Using `any` because the concrete types come from dynamic imports
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let agent: any = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let multiUser: any = null;
+let agent: LottoAgent | null = null;
+let multiUser: MultiUserAgent | null = null;
 let cachedStore: IStore | null = null;
 let cachedClient: Client | null = null;
 
@@ -77,7 +84,6 @@ async function requireAuthCheck(providedToken?: string): Promise<AuthResult> {
     return { error: errorResult('Authentication required. Provide auth_token parameter.') };
   }
 
-  const { resolveAuth } = await import('~/auth/middleware');
   const auth = await resolveAuth(providedToken);
   if (!auth) {
     return { error: errorResult('Invalid or expired authentication token.') };
@@ -89,10 +95,8 @@ async function requireAuthCheck(providedToken?: string): Promise<AuthResult> {
 // ── Public API ──────────────────────────────────────────────────
 
 export interface AgentContext {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  agent: any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  multiUser: any;
+  agent: LottoAgent;
+  multiUser: MultiUserAgent;
   store: IStore;
   client: Client;
 }
@@ -109,9 +113,7 @@ export async function getAgentContext(): Promise<AgentContext> {
   cachedStore = await getStore();
   cachedClient = getClient();
 
-  const { loadCustodialConfig } = await import('~/custodial/types');
   const config = loadCustodialConfig();
-  const { MultiUserAgent } = await import('~/custodial/MultiUserAgent');
   multiUser = new MultiUserAgent(config);
   // Inject the shared store and client — avoids double-instantiation
   // where MultiUserAgent.initialize() would create a separate store instance.
@@ -119,10 +121,8 @@ export async function getAgentContext(): Promise<AgentContext> {
   // Note: do NOT call multiUser.start() — no background deposit watcher in serverless.
   // Deposits are detected on-demand via multiUser.pollDepositsOnce().
 
-  const { loadStrategy } = await import('~/config/loader');
   const strategyName = process.env.STRATEGY ?? 'balanced';
   const strategy = loadStrategy(strategyName);
-  const { LottoAgent } = await import('~/agent/LottoAgent');
   agent = new LottoAgent(strategy);
 
   return { agent, multiUser, store: cachedStore, client: cachedClient };
@@ -132,16 +132,8 @@ export async function getAgentContext(): Promise<AgentContext> {
  * Create a fresh McpServer with all tools registered.
  * Called per request — McpServer is lightweight, the heavy stuff is cached.
  */
-export async function createMcpServer() {
+export async function createMcpServer(): Promise<McpServer> {
   const { agent: a, multiUser: mu, store, client } = await getAgentContext();
-
-  const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
-  const { errorMsg, tokenBalanceToNumber, toEvmAddress } = await import('~/utils/format');
-  const {
-    registerSingleUserTools,
-    registerMultiUserTools,
-    registerOperatorTools,
-  } = await import('~/mcp/tools/index');
 
   const server = new McpServer({
     name: 'lazylotto-agent',
@@ -167,14 +159,8 @@ export async function createMcpServer() {
       return user?.userId ?? null;
     },
     checkDeposits: () => mu.pollDepositsOnce(),
-    acquireUserLock: async (userId: string) => {
-      const { acquireUserLock } = await import('./locks');
-      return acquireUserLock(userId);
-    },
-    releaseUserLock: async (userId: string) => {
-      const { releaseUserLock } = await import('./locks');
-      return releaseUserLock(userId);
-    },
+    acquireUserLock: (userId: string) => acquireUserLock(userId),
+    releaseUserLock: (userId: string) => releaseUserLock(userId),
   };
 
   registerSingleUserTools(server, a, ctx);
