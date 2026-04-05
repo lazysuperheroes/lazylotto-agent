@@ -89,7 +89,16 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Three deployment
 - Concurrency: Redis distributed locks (INCR + TTL) for play/withdraw per user
 - Hedera client: cached per warm Lambda, created from env vars (works fine server-side)
 - Store injection: MultiUserAgent.initialize({ store, client }) avoids double-instantiation
-- Webpack: @hashgraphonline/standards-sdk externalized (ESM-only file-type dep)
+- Webpack externals (server-side only):
+  - @modelcontextprotocol/sdk — minification breaks StreamableHTTPClientTransport
+    (mangles class/method names the SDK uses at runtime, causes "b is not a function").
+    Must remain un-bundled so Node.js loads it from node_modules directly.
+  - Note: @hashgraphonline/standards-sdk was previously externalized for a file-type
+    ESM issue, fixed upstream in v0.1.174 — no longer needed.
+- Dual MCP role: the serverless function acts as MCP server (receiving tool calls)
+  AND MCP client (connecting to dApp for pool reads). Both transports run in one Lambda.
+- Strategy files: inlined in src/config/loader.ts for serverless (strategies/*.json
+  not available on Vercel filesystem). CLI reads from disk, falls back to inline.
 
 ## Hedera-Specific Rules
 

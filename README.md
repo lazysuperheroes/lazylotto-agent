@@ -707,6 +707,36 @@ user's assigned deposit memo exactly.
 
 ---
 
+## Known Limitations and Future Considerations
+
+**Dual MCP role in serverless.** Each play request acts as both MCP server (receiving
+the tool call) and MCP client (connecting to the dApp to read pool data). This works
+but means two MCP transport handshakes per play. A future optimisation would be a
+direct HTTP client for dApp reads in serverless mode, bypassing the MCP client
+transport entirely. This would eliminate the webpack externalization requirement and
+reduce cold start latency.
+
+**Webpack externalization.** The `@modelcontextprotocol/sdk` package must be
+externalized from webpack server-side builds because minification breaks its
+transport layer. This is a standard pattern (similar to Prisma, etc.) but means the
+SDK is loaded from `node_modules` at runtime rather than bundled.
+
+**On-demand deposit detection.** Deposits are only detected when a user interacts
+(checks balance, plays, views history). If no interaction occurs, deposits sit
+unprocessed in the agent wallet. If this becomes a UX issue at scale, add a Vercel
+cron route (`/api/cron/deposits`) polling every 1-2 minutes. The architecture
+supports this cleanly via `DepositWatcher.pollOnce()`.
+
+**Mirror node latency at scale.** Each balance-dependent request triggers a mirror
+node query (~1-2s). With many concurrent users, consider adding a short cache layer
+or moving to cron-based deposit polling to reduce per-request latency.
+
+**Strategy files.** Built-in strategies are inlined in `src/config/loader.ts` for
+serverless compatibility. If you modify `strategies/*.json`, update the inline copies
+too, or they will diverge on Vercel.
+
+---
+
 ## Links
 
 | Resource | URL |
