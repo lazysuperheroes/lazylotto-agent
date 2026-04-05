@@ -11,6 +11,12 @@ interface BurnEntry {
   memo: string;
 }
 
+interface PoolWinResult {
+  poolName: string;
+  wins: number;
+  prizeDetails: unknown[];
+}
+
 interface AuditEntry {
   sequence: number;
   timestamp: string;
@@ -23,6 +29,9 @@ interface AuditEntry {
   memo?: string;
   sessionId?: string;
   burns?: BurnEntry[];
+  totalWins?: number;
+  totalSpent?: number;
+  poolResults?: PoolWinResult[];
   raw: Record<string, unknown>;
 }
 
@@ -55,6 +64,13 @@ function formatAmount(amount: number): string {
     minimumFractionDigits: 0,
     maximumFractionDigits: 4,
   });
+}
+
+/** Map HCS-20 tick names to user-friendly token names. */
+function displayToken(tick?: string): string {
+  if (!tick) return '';
+  if (tick === 'LLCRED') return 'HBAR';
+  return tick;
 }
 
 function formatTimestamp(iso: string): string {
@@ -377,7 +393,7 @@ export default function AuditPage() {
             className="mb-6 flex items-center gap-2 rounded-lg bg-secondary/30 px-4 py-3 text-sm text-muted transition-colors hover:bg-secondary/50"
           >
             <span>On-chain ledger: Topic {topicId} on HashScan</span>
-            <span className="text-primary">&nearr;</span>
+            <span className="text-primary">&#x2197;</span>
           </a>
         )}
 
@@ -461,7 +477,7 @@ export default function AuditPage() {
 
                     {entry.amount && (
                       <span className="font-heading text-sm text-foreground">
-                        {entry.amount} {entry.token ?? ''}
+                        {entry.amount} {displayToken(entry.token)}
                       </span>
                     )}
                   </div>
@@ -507,6 +523,35 @@ export default function AuditPage() {
                           </p>
                         ))}
                       </div>
+                    )}
+
+                    {/* Win results (enriched from play session data) */}
+                    {entry.type === 'play' && entry.totalWins != null && entry.totalWins > 0 && (
+                      <div className="mt-2 rounded bg-success/10 px-3 py-2">
+                        <p className="text-sm font-semibold text-success">
+                          {entry.totalWins} win{entry.totalWins > 1 ? 's' : ''}!
+                        </p>
+                        {entry.poolResults && entry.poolResults.length > 0 && (
+                          <div className="mt-1 space-y-0.5">
+                            {entry.poolResults.map((pr, i) => (
+                              <p key={i} className="text-xs text-success/80">
+                                {pr.poolName}: {pr.wins} win{pr.wins > 1 ? 's' : ''}
+                                {pr.prizeDetails.length > 0 && (
+                                  <span className="ml-1 text-muted">
+                                    ({pr.prizeDetails.map((d: any) =>
+                                      (d as any).nftCount ? `${(d as any).nftCount} NFT` :
+                                      (d as any).fungibleAmount ? `${(d as any).fungibleAmount} ${(d as any).fungibleToken ?? ''}` : ''
+                                    ).filter(Boolean).join(', ')})
+                                  </span>
+                                )}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {entry.type === 'play' && (entry.totalWins === 0 || entry.totalWins == null) && entry.totalSpent != null && (
+                      <p className="mt-1 text-xs text-muted">No wins this session</p>
                     )}
                   </div>
 

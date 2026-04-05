@@ -44,6 +44,10 @@ interface AuditEntry {
   memo?: string;
   sessionId?: string;
   burns?: { amount: string; memo: string }[];
+  /** Play session results (enriched from store when sessionId matches) */
+  totalWins?: number;
+  totalSpent?: number;
+  poolResults?: { poolName: string; wins: number; prizeDetails: unknown[] }[];
   raw: Record<string, unknown>;
 }
 
@@ -257,6 +261,10 @@ export async function GET(request: Request) {
       nextPath = data.links?.next ?? null;
     }
 
+    // Load play sessions for enriching play entries with win data
+    const playSessions = store.getPlaySessionsForUser(user.userId);
+    const sessionMap = new Map(playSessions.map(s => [s.sessionId, s]));
+
     // Decode, filter, and transform
     const entries: AuditEntry[] = [];
     let totalDeposited = 0;
@@ -270,6 +278,23 @@ export async function GET(request: Request) {
       if (!involvesAccount(payload, hederaAccountId)) continue;
 
       const entry = toAuditEntry(seq, timestamp, payload, hederaAccountId);
+
+      // Enrich play entries with win results from the store
+      if (entry.type === 'play' && entry.sessionId) {
+        const session = sessionMap.get(entry.sessionId);
+        if (session) {
+          entry.totalWins = session.totalWins;
+          entry.totalSpent = session.totalSpent;
+          entry.poolResults = session.poolResults
+            .filter(p => p.wins > 0)
+            .map(p => ({
+              poolName: p.poolName,
+              wins: p.wins,
+              prizeDetails: p.prizeDetails,
+            }));
+        }
+      }
+
       entries.push(entry);
 
       // Accumulate summary

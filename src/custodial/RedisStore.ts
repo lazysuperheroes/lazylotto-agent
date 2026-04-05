@@ -106,6 +106,19 @@ export class RedisStore implements IStore {
   // ── Lifecycle ────────────────────────────────────────────────
 
   async load(): Promise<void> {
+    // Clear in-memory caches before re-hydrating.
+    // Without this, repeated load() calls (serverless getStore()) cause
+    // duplicate records because loadListRecords appends to existing arrays.
+    this.users.clear();
+    this.memoIndex.clear();
+    this.accountIdIndex.clear();
+    this.deposits.length = 0;
+    this.plays.length = 0;
+    this.withdrawals.length = 0;
+    this.gasLog.length = 0;
+    this.deadLetters.length = 0;
+    this.processedTxIds.clear();
+
     // 1. Load all user IDs from the set
     const userIds = await this.redis.smembers(k('users', 'all'));
 
