@@ -9,9 +9,15 @@ export async function getMcpClient(): Promise<McpClient> {
   const url = process.env.LAZYLOTTO_MCP_URL;
   if (!url) throw new Error('Missing LAZYLOTTO_MCP_URL in environment');
 
-  const { createRequire } = await import('node:module');
-  const pkg = createRequire(import.meta.url)('../../package.json') as { version: string };
-  mcpClient = new McpClient({ name: 'lazylotto-agent', version: pkg.version });
+  let version = '0.1.1';
+  try {
+    const { createRequire } = await import('node:module');
+    const pkg = createRequire(import.meta.url)('../../package.json') as { version: string };
+    version = pkg.version;
+  } catch {
+    // Serverless: package.json may not be on the filesystem
+  }
+  mcpClient = new McpClient({ name: 'lazylotto-agent', version });
 
   const headers: Record<string, string> = {};
   const apiKey = process.env.LAZYLOTTO_MCP_API_KEY;

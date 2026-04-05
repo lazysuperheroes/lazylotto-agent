@@ -25,6 +25,17 @@ const config = {
       '.mjs': ['.mts', '.mjs'],
     };
 
+    if (isServer) {
+      // Externalize the MCP SDK for server-side bundles. Webpack's minification
+      // breaks the StreamableHTTPClientTransport ("b is not a function") because
+      // it mangles class/method names the SDK relies on at runtime.
+      config.externals = [
+        ...(Array.isArray(config.externals) ? config.externals : []),
+        '@modelcontextprotocol/sdk',
+        /^@modelcontextprotocol\/sdk\/.*/,
+      ];
+    }
+
     if (!isServer) {
       config.resolve.fallback = {
         ...config.resolve.fallback,

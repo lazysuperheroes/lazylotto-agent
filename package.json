@@ -57,7 +57,7 @@
     "@hashgraphonline/standards-sdk": "^0.1.174",
     "@hiero-did-sdk/registrar": "^0.1.8",
     "@lazysuperheroes/lazy-lotto": "^1.4.0",
-    "@modelcontextprotocol/sdk": "^1.28.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@tailwindcss/postcss": "^4.2.2",
     "@upstash/redis": "^1.37.0",
     "@walletconnect/modal": "^2.7.0",

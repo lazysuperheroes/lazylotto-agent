@@ -17,6 +17,10 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { createMcpServer, getAgentContext } from '../_lib/mcp';
 import { getRedis, KEY_PREFIX } from '~/auth/redis';
 
+// Play sessions involve MCP client → dApp reads + Hedera SDK writes.
+// Default 10s timeout is too short. Vercel Hobby allows up to 60s.
+export const maxDuration = 60;
+
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': process.env.AUTH_PAGE_ORIGIN ?? '*',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
