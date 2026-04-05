@@ -278,6 +278,11 @@ export class MultiUserAgent {
       const agent = new LottoAgent(userStrategy);
       const report: SessionReport = await agent.play();
 
+      // Set lastPlayedAt BEFORE balance operations so that the user object
+      // written to Redis by updateBalance() already includes the timestamp.
+      // (async fire-and-forget writes can race; the last write wins)
+      user.lastPlayedAt = new Date().toISOString();
+
       // Settle: deduct actual spend from reserved
       const actualSpent = report.totalSpent;
       this.ledger.settleSpend(userId, actualSpent, primaryToken);
@@ -331,11 +336,8 @@ export class MultiUserAgent {
         amountReleased: unused,
       };
 
-      // Record play session
+      // Record play session and persist user (lastPlayedAt already set above)
       this.store.recordPlaySession(session);
-
-      // Update user's lastPlayedAt
-      user.lastPlayedAt = session.timestamp;
       this.store.saveUser(user);
 
       // Batch HCS-20 accounting
