@@ -11,7 +11,10 @@
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
+import { getClient } from '../../_lib/hedera';
 import { checkDeposits } from '../../_lib/deposits';
+import { getOperatorAccountId } from '~/hedera/wallet';
+import { withChecksum } from '~/utils/checksum';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -54,12 +57,16 @@ export async function GET(request: Request) {
       );
     }
 
+    // Agent wallet address for deposits
+    const agentWallet = withChecksum(getOperatorAccountId(getClient()));
+
     return NextResponse.json(
       {
         userId: user.userId,
         hederaAccountId: user.hederaAccountId,
         eoaAddress: user.eoaAddress,
         depositMemo: user.depositMemo,
+        agentWallet,
         strategyName: user.strategyName,
         strategyVersion: user.strategyVersion,
         rakePercent: user.rakePercent,

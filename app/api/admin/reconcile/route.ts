@@ -26,7 +26,7 @@ export async function OPTIONS() {
 
 export async function POST(request: Request) {
   try {
-    const auth = await requireTier(request, 'operator');
+    const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
 
     // Process any pending deposits before reconciling
