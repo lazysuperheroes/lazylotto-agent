@@ -218,10 +218,6 @@ export default function DashboardPage() {
 
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [storedAccountId, setStoredAccountId] = useState<string | null>(null);
-  // First-run orientation strip dismissal — persisted in localStorage so
-  // the user doesn't see it again after closing it once. Hydrated in the
-  // mount useEffect (avoid SSR hydration mismatch).
-  const [onboardingDismissed, setOnboardingDismissed] = useState(true);
   // Persistent character mascot — shared with /auth via localStorage.
   // Starts at 0 for SSR determinism, rehydrated on mount.
   const [characterIdx, setCharacterIdx] = useState(0);
@@ -427,9 +423,6 @@ export default function DashboardPage() {
     const token = localStorage.getItem('lazylotto:sessionToken');
     setSessionToken(token);
     setStoredAccountId(localStorage.getItem('lazylotto:accountId'));
-    setOnboardingDismissed(
-      localStorage.getItem('lazylotto:hideOnboarding') === '1',
-    );
     setCharacterIdx(loadOrPickCharacterIdx());
 
     if (!token) {
@@ -987,14 +980,25 @@ export default function DashboardPage() {
   const hasPlayableBalance = balanceEntries.some(([, e]) => e.available > 0);
   const agentClosed =
     publicStats?.acceptingOperations === false;
+  // First-run = just registered, no balance, no plays. The mascot
+  // teaches the loop in this state. As soon as the user funds, they
+  // graduate to "ready" and the line changes to a nudge toward PLAY.
+  // After the first play, they rotate through lazy quips. Kill
+  // switch overrides everything.
+  const isFirstRun =
+    !!status && sessions.length === 0 && !hasPlayableBalance;
   // Pick a character line deterministically per session so the same
   // page refresh shows the same quip (but different sessions rotate).
   const characterLine = status
     ? agentClosed
       ? pickLine(character.nappingLines, status.userId)
-      : hasPlayableBalance
-        ? pickLine(character.lazyLines, status.userId)
-        : pickLine(character.taglines, status.userId)
+      : isFirstRun
+        ? pickLine(character.introLines, status.userId)
+        : hasPlayableBalance && sessions.length === 0
+          ? pickLine(character.readyLines, status.userId)
+          : hasPlayableBalance
+            ? pickLine(character.lazyLines, status.userId)
+            : pickLine(character.taglines, status.userId)
     : '';
 
   // Sessions to display (capped at 10 unless expanded)
@@ -1021,83 +1025,6 @@ export default function DashboardPage() {
             </p>
           )}
         </header>
-
-        {/* ---- First-run progress strip ────────────────────
-            A compact 3-panel step row for freshly-registered users.
-            Each step is a mini comic panel showing a number, label,
-            and state indicator. The user's current step is gold;
-            future steps are muted. Dismissible — persists in
-            localStorage so returning users never see it again. */}
-        {status &&
-          !onboardingDismissed &&
-          sessions.length === 0 &&
-          balanceEntries.every(([, e]) => e.available <= 0) && (
-            <div className="mb-8">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <p className="label-caps-brand">Getting started</p>
-                <button
-                  type="button"
-                  aria-label="Dismiss onboarding"
-                  onClick={() => {
-                    localStorage.setItem('lazylotto:hideOnboarding', '1');
-                    setOnboardingDismissed(true);
-                  }}
-                  className="label-caps transition-colors hover:text-foreground"
-                >
-                  Dismiss ✕
-                </button>
-              </div>
-              <ol className="grid gap-3 sm:grid-cols-3">
-                {[
-                  {
-                    n: '01',
-                    label: 'Fund',
-                    desc: 'Send HBAR or LAZY with your deposit memo',
-                    active: true,
-                  },
-                  {
-                    n: '02',
-                    label: 'Play',
-                    desc: 'The agent plays lottery pools for you',
-                    active: false,
-                  },
-                  {
-                    n: '03',
-                    label: 'Withdraw',
-                    desc: 'Pull funds back to your wallet anytime',
-                    active: false,
-                  },
-                ].map((step) => (
-                  <li
-                    key={step.n}
-                    className={`relative border-2 px-4 py-3 ${
-                      step.active
-                        ? 'border-brand bg-brand/10 panel-shadow-sm'
-                        : 'border-secondary bg-[var(--color-panel)]'
-                    }`}
-                  >
-                    <div className="flex items-baseline gap-3">
-                      <span
-                        className={`font-pixel text-[11px] ${
-                          step.active ? 'text-brand' : 'text-muted/60'
-                        }`}
-                      >
-                        {step.n}
-                      </span>
-                      <span
-                        className={`heading-2 uppercase tracking-wider ${
-                          step.active ? 'text-foreground' : 'text-muted'
-                        }`}
-                      >
-                        {step.label}
-                      </span>
-                    </div>
-                    <p className="type-caption mt-1">{step.desc}</p>
-                  </li>
-                ))}
-              </ol>
-            </div>
-          )}
 
         {/* ---- Agent operational status ────────────────────
             Kill switch banner rendered as a destructive ComicPanel
@@ -1320,15 +1247,59 @@ export default function DashboardPage() {
                     </div>
                   </div>
                 ) : (
-                  // Zero-balance state — points down at the deposit card
-                  // below. The dashed Step 1 block was removed because
-                  // the Fund Your Account card is now full-width right
-                  // underneath and the duplication was noisy. Single
-                  // subtle brand-gold inline hint is enough.
-                  <div className="mt-6 border-t-2 border-brand/30 pt-4">
-                    <p className="label-caps-brand">
-                      Your agent is empty →{' '}
-                      <span className="text-brand">fund it below to start playing</span>
+                  // Zero-balance state — show the inline 3-step ribbon
+                  // that teaches the loop. Step 1 (Fund) is the active
+                  // step since the user hasn't funded yet. The ribbon
+                  // replaces the old dashed Step 1 block AND the
+                  // separate top-of-page orientation strip — one
+                  // welcome, one teaching moment, tied to the mascot.
+                  <div className="mt-6 border-t-2 border-brand/30 pt-5">
+                    <p className="label-caps-brand mb-3">The loop</p>
+                    <ol className="flex items-center gap-1 sm:gap-3">
+                      {[
+                        { n: '01', label: 'Fund', active: true, done: false },
+                        { n: '02', label: 'Play', active: false, done: false },
+                        { n: '03', label: 'Withdraw', active: false, done: false },
+                      ].map((step, i, arr) => (
+                        <li
+                          key={step.n}
+                          className="flex flex-1 items-center gap-1 sm:gap-3"
+                        >
+                          <div
+                            className={`flex min-w-0 flex-1 items-baseline gap-2 border-2 px-3 py-2 ${
+                              step.active
+                                ? 'border-brand bg-brand/10 panel-shadow-sm'
+                                : 'border-secondary bg-[var(--color-panel)]'
+                            }`}
+                          >
+                            <span
+                              className={`font-pixel text-[9px] ${
+                                step.active ? 'text-brand' : 'text-muted/60'
+                              }`}
+                            >
+                              {step.n}
+                            </span>
+                            <span
+                              className={`font-heading text-sm font-extrabold uppercase tracking-wider ${
+                                step.active ? 'text-foreground' : 'text-muted'
+                              }`}
+                            >
+                              {step.label}
+                            </span>
+                          </div>
+                          {i < arr.length - 1 && (
+                            <span
+                              className="hidden font-pixel text-[10px] text-brand/40 sm:inline"
+                              aria-hidden="true"
+                            >
+                              ▸
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                    </ol>
+                    <p className="label-caps-brand mt-3">
+                      ↓ Start by funding below
                     </p>
                   </div>
                 )}
