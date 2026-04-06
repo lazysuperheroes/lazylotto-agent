@@ -505,6 +505,54 @@ body {
   font-family: var(--font-pixel);
 }
 
+/* ─────────────────────────────────────────────────────────────
+   Primary CTA button — the "PLAY" button on the dashboard hero,
+   the "Sign in" button on the auth-required empty state, etc.
+   This is the one place in the app that uses this exact treatment:
+   solid brand-gold fill, neo-brutalist shadow, lift-on-hover, full
+   width by default. Extracted from inline Tailwind soup so the
+   incantation lives in one place — if the design changes, change
+   it here, not at every callsite.
+   ───────────────────────────────────────────────────────────── */
+.btn-primary {
+  display: block;
+  width: 100%;
+  padding: 1.25rem 1.5rem;
+  background-color: var(--color-brand);
+  color: var(--color-background);
+  font-family: var(--font-heading);
+  font-size: 1.5rem; /* 24px */
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  line-height: 1;
+  box-shadow: 4px 4px 0 0 var(--color-ink);
+  transition:
+    transform 150ms,
+    box-shadow 150ms,
+    background-color 150ms;
+  cursor: pointer;
+  border: none;
+}
+@media (min-width: 640px) {
+  .btn-primary {
+    font-size: 1.875rem; /* 30px */
+  }
+}
+.btn-primary:hover:not(:disabled) {
+  transform: translate(-2px, -2px);
+  box-shadow: 6px 6px 0 0 var(--color-ink);
+}
+.btn-primary:active:not(:disabled) {
+  transform: translate(0, 0);
+  box-shadow: 2px 2px 0 0 var(--color-ink);
+}
+.btn-primary:disabled {
+  cursor: not-allowed;
+  background-color: rgba(229, 168, 0, 0.5);
+  color: rgba(9, 9, 11, 0.7);
+}
+
 /* Tabular numerals — locks number widths so displaying changing
    balances doesn't cause the hero number to jitter pixel by pixel. */
 .num-tabular {

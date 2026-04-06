@@ -94,15 +94,43 @@ function ShieldIcon({ className }: { className?: string }) {
   );
 }
 
+function UserIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <circle cx="8" cy="5" r="3" />
+      <path d="M2 14c0-3.3 2.7-6 6-6s6 2.7 6 6" />
+    </svg>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Nav items
 // ---------------------------------------------------------------------------
 
+// Nav items. The auth item is the WalletConnect entry point and is
+// labelled "Sign in" / "Sign out" so it's unambiguous — the previous
+// labelAuth: 'Account' clashed with the new dedicated /account page,
+// which is where users go for stuck deposits, the session token, and
+// trust signals.
+//
+// `authOnly: true` means the item only renders when a session token
+// is present (the Account page has nothing to show without auth).
 const NAV_ITEMS = [
-  { label: 'Connect Wallet', labelAuth: 'Account', href: '/auth', Icon: WalletIcon, adminOnly: false },
-  { label: 'Dashboard', href: '/dashboard', Icon: GridIcon, adminOnly: false },
-  { label: 'Audit Trail', href: '/audit', Icon: DocumentIcon, adminOnly: false },
-  { label: 'Admin', href: '/admin', Icon: ShieldIcon, adminOnly: true },
+  { label: 'Sign in', labelAuth: 'Sign out', href: '/auth', Icon: WalletIcon, adminOnly: false, authOnly: false },
+  { label: 'Dashboard', href: '/dashboard', Icon: GridIcon, adminOnly: false, authOnly: false },
+  { label: 'Account', href: '/account', Icon: UserIcon, adminOnly: false, authOnly: true },
+  { label: 'Audit Trail', href: '/audit', Icon: DocumentIcon, adminOnly: false, authOnly: false },
+  { label: 'Admin', href: '/admin', Icon: ShieldIcon, adminOnly: true, authOnly: false },
 ];
 
 // ---------------------------------------------------------------------------
@@ -348,7 +376,11 @@ export function Sidebar() {
             - Label is Heebo at 14px (readable) with pixel font reserved
               for the active item marker */}
         <nav className="flex flex-1 flex-col gap-0.5 px-0 py-3">
-          {NAV_ITEMS.filter((item) => !item.adminOnly || isAdmin).map((item) => {
+          {NAV_ITEMS.filter((item) => {
+            if (item.adminOnly && !isAdmin) return false;
+            if (item.authOnly && !isAuthenticated) return false;
+            return true;
+          }).map((item) => {
             const isActive = pathname === item.href;
             return (
               <Link

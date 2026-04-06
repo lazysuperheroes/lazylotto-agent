@@ -9,6 +9,26 @@
  * they're network-scoped (lla:testnet:ratelimit:...) and cleaned up
  * automatically by Upstash's TTL.
  *
+ * ── Production vs local dev ──────────────────────────────────
+ *
+ * In production (Upstash Redis configured via UPSTASH_REDIS_REST_URL +
+ * UPSTASH_REDIS_REST_TOKEN), counters are shared across ALL warm Lambda
+ * instances. The limit you pass is the actual cluster-wide cap.
+ *
+ * In local dev with no Redis, getRedis() falls back to a per-process
+ * in-memory Map (src/auth/redis.ts). That means:
+ *   - CLI mode: a single counter in the one running process — fine.
+ *   - `npm run dev:web` mode: a single counter in the Next.js dev
+ *     server process — fine.
+ *   - Multiple workers / multiple processes: each has its own counter.
+ *     This only matters if you're load-testing locally.
+ *
+ * The fallback is intentional — local dev should not require Redis to
+ * boot. Anyone deploying to Vercel without Upstash configured gets a
+ * loud warning at boot from src/auth/redis.ts (`[Auth] No Upstash Redis
+ * configured`) and the rate limits silently degrade to per-Lambda.
+ * Don't deploy without Redis.
+ *
  * Usage inside a route:
  *   const ok = await checkRateLimit({
  *     request, action: 'refund', limit: 10, windowSec: 60,

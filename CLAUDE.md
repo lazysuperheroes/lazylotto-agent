@@ -127,6 +127,11 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Three deployment
 - Store: PersistentStore (JSON files in .custodial-data/) — works fully offline
 - Distributed locks: no-op in CLI mode (in-memory mutex is sufficient for single-process)
 - Deposits: DepositWatcher background polling (CLI) or on-demand (serverless)
+- Rate limits: per-process in-memory counters via the same Redis fallback. Production
+  (Upstash configured) shares counters across all warm Lambdas via Redis INCR — the
+  documented limit is the actual cluster-wide cap. Deploying to Vercel without Upstash
+  silently degrades rate limiting to per-Lambda; the boot warning from src/auth/redis.ts
+  is your only signal — don't ignore it.
 - All three modes work locally without Redis; Redis is only required for production/Vercel
 
 ## Commands

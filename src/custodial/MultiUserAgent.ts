@@ -4,7 +4,7 @@ import { LottoAgent } from '../agent/LottoAgent.js';
 import type { IStore } from './IStore.js';
 import { UserLedger } from './UserLedger.js';
 import { AccountingService } from './AccountingService.js';
-import { DepositWatcher } from './DepositWatcher.js';
+import { DepositWatcher, type DepositWatcherStats } from './DepositWatcher.js';
 import { NegotiationHandler } from './NegotiationHandler.js';
 import { GasTracker } from './GasTracker.js';
 import type {
@@ -32,6 +32,15 @@ export interface AgentHealth {
   uptime: number;
   depositWatcherRunning: boolean;
   depositDetection: 'background-poll' | 'on-demand';
+  /**
+   * Per-instance deposit watcher stats. In serverless mode these reset
+   * each time a Lambda cold-starts and only reflect that one container's
+   * activity since boot — not a global cluster total. They're still
+   * useful as a "did this Lambda see any deposits at all?" health check.
+   */
+  deposits: DepositWatcherStats;
+  /** Number of entries in the dead-letter queue (across all instances, persisted). */
+  deadLetterCount: number;
   totalUsers: number;
   activeUsers: number;
   pendingReserves: Record<string, number>;
@@ -726,6 +735,8 @@ export class MultiUserAgent {
         : 0,
       depositWatcherRunning: this.depositWatcher.isRunning(),
       depositDetection: this.depositWatcher.isRunning() ? 'background-poll' : 'on-demand',
+      deposits: this.depositWatcher.getStats(),
+      deadLetterCount: this.store.getDeadLetters().length,
       totalUsers: allUsers.length,
       activeUsers: allUsers.filter((u) => u.active).length,
       pendingReserves: reserveSummary(

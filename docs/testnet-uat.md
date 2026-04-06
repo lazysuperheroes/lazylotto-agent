@@ -95,10 +95,10 @@ Authorization: Bearer sk_YOUR_SESSION_TOKEN
 (Get the token from localStorage after step 2, or from the auth success response.)
 
 Verify:
-- [ ] Claude shows the MCP server as connected
-- [ ] Ask Claude: "What tools do you have from lazylotto?" — lists all tools
-- [ ] Ask Claude: "Check operator health" — calls `operator_health`
-- [ ] Response shows `mode: "serverless"` and `depositDetection: "on-demand"`
+- [X] Claude shows the MCP server as connected
+- [X] Ask Claude: "What tools do you have from lazylotto?" — lists all tools
+- [X] Ask Claude: "Check operator health" — calls `operator_health`
+- [X] Response shows `mode: "serverless"` and `depositDetection: "on-demand"`
 
 ---
 
@@ -115,14 +115,14 @@ Ask Claude: "Register me for LazyLotto. My EOA is 0.0.XXXXX"
 ```
 
 Verify:
-- [ ] Returns `status: "registered"`, a `userId`, and `deposit.memo`
-- [ ] Shows agent wallet address to send deposits to
+- [X] Returns `status: "registered"`, a `userId`, and `deposit.memo`
+- [X] Shows agent wallet address to send deposits to
 
 ```
 Ask Claude: "Register me again"
 ```
 
-- [ ] Returns `status: "already_registered"` with existing userId and memo
+- [X] Returns `status: "already_registered"` with existing userId and memo
 
 ---
 
@@ -139,12 +139,12 @@ Ask Claude: "Check my deposit info"
 ```
 
 Verify:
-- [ ] Calls `multi_user_deposit_info`
-- [ ] Balance shows deposited amount minus rake
-- [ ] Deposit memo is correct
+- [X] Calls `multi_user_deposit_info`
+- [X] Balance shows deposited amount minus rake
+- [X] Deposit memo is correct
 
 Also check the web dashboard at /dashboard:
-- [ ] Balance matches what Claude reported
+- [X] Balance matches what Claude reported
 
 ---
 
@@ -155,15 +155,15 @@ Ask Claude: "Play a lottery session for me"
 ```
 
 Verify:
-- [ ] Calls `multi_user_play` with your userId auto-resolved
-- [ ] Returns session result: pools evaluated, entries bought, wins/losses
-- [ ] Balance decreased by amount spent
+- [X] Calls `multi_user_play` with your userId auto-resolved
+- [X] Returns session result: pools evaluated, entries bought, wins/losses
+- [X] Balance decreased by amount spent
 
 ```
 Ask Claude: "Show my play history"
 ```
 
-- [ ] Returns the session with correct details
+- [X] Returns the session with correct details
 
 ---
 
@@ -254,6 +254,14 @@ curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
 ---
 
 ## 13. Rate Limiting
+
+Rate limit counters live in Upstash Redis (shared across all warm Lambdas
+via INCR + EXPIRE), so the limit you see here is the actual cluster-wide
+cap, not per-Lambda. If this test never trips, double-check that
+`UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` are set on Vercel
+— without them the in-memory fallback kicks in and limits silently
+degrade to per-Lambda (you'll see a `[Auth] No Upstash Redis configured`
+warning in the deploy logs).
 
 ```bash
 for i in $(seq 1 35); do

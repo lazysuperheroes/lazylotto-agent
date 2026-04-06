@@ -11,6 +11,40 @@ interface CreditInfo {
   token: string; // "hbar" or token ID
 }
 
+/**
+ * In-memory observability counters for the deposit watcher.
+ *
+ * These counters live for the lifetime of the watcher instance —
+ * meaning the lifetime of one Lambda warm container in serverless
+ * mode, or the lifetime of the CLI process. They give operators a
+ * single-call view into "is deposit detection working at all?"
+ * without having to grep logs.
+ *
+ * The counters intentionally distinguish between:
+ *   - `processed`: deposits credited to a registered user
+ *   - `skippedUnmatchedLazyMemo`: memo starts with `ll-` but no user
+ *     matches — suspicious, may indicate stale memos or a registration
+ *     race
+ *   - `skippedExceedsMaxBalance`: would push the user over the cap
+ *     — funds stay in wallet, requires operator action
+ *   - `skippedNonDeposit`: any other skip (no memo, non-`ll-` memo,
+ *     duplicate, non-success result) — these are normal background
+ *     noise and aren't surfaced individually
+ *   - `errors`: exceptions that bubbled out of `processTransaction`,
+ *     also recorded in the dead-letter queue
+ */
+export interface DepositWatcherStats {
+  processed: number;
+  skippedUnmatchedLazyMemo: number;
+  skippedExceedsMaxBalance: number;
+  skippedNonDeposit: number;
+  errors: number;
+  pollCount: number;
+  lastPollAt: string | null;
+  lastDepositAt: string | null;
+  lastError: { message: string; at: string } | null;
+}
+
 // ── Constants ────────────────────────────────────────────────────
 
 const TINYBARS_PER_HBAR = 1e8;
@@ -35,6 +69,17 @@ const TINYBARS_PER_HBAR = 1e8;
 export class DepositWatcher {
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private isPolling = false;
+  private stats: DepositWatcherStats = {
+    processed: 0,
+    skippedUnmatchedLazyMemo: 0,
+    skippedExceedsMaxBalance: 0,
+    skippedNonDeposit: 0,
+    errors: 0,
+    pollCount: 0,
+    lastPollAt: null,
+    lastDepositAt: null,
+    lastError: null,
+  };
 
   constructor(
     private agentAccountId: string,
@@ -42,6 +87,14 @@ export class DepositWatcher {
     private ledger: UserLedger,
     private config: CustodialConfig,
   ) {}
+
+  /**
+   * Snapshot of the in-memory observability counters. Returned by
+   * value so callers can't mutate internal state.
+   */
+  getStats(): DepositWatcherStats {
+    return { ...this.stats, lastError: this.stats.lastError && { ...this.stats.lastError } };
+  }
 
   // ── Lifecycle ───────────────────────────────────────────────
 
@@ -81,6 +134,8 @@ export class DepositWatcher {
   async pollOnce(): Promise<number> {
     if (this.isPolling) return 0;
     this.isPolling = true;
+    this.stats.pollCount++;
+    this.stats.lastPollAt = new Date().toISOString();
 
     try {
       let watermark = this.store.getWatermark();
@@ -108,12 +163,23 @@ export class DepositWatcher {
       for (const tx of txs) {
         try {
           const credited = await this.processTransaction(tx);
-          if (credited) processed++;
+          if (credited) {
+            processed++;
+            this.stats.processed++;
+            this.stats.lastDepositAt = new Date().toISOString();
+          }
         } catch (err) {
-          console.error(
-            `[DepositWatcher] FAILED to process transaction ${tx.transaction_id}:`,
-            err,
-          );
+          this.stats.errors++;
+          this.stats.lastError = {
+            message: err instanceof Error ? err.message : String(err),
+            at: new Date().toISOString(),
+          };
+          logger.error('deposit processing failed', {
+            component: 'DepositWatcher',
+            event: 'deposit_failed',
+            txId: tx.transaction_id,
+            error: err instanceof Error ? err : new Error(String(err)),
+          });
           // Add to dead-letter queue for operator review.
           // Capture sender + memo so users can find their stuck deposits.
           this.store.recordDeadLetter({
@@ -137,7 +203,16 @@ export class DepositWatcher {
 
       return processed;
     } catch (err) {
-      console.error('[DepositWatcher] Poll failed:', err);
+      this.stats.errors++;
+      this.stats.lastError = {
+        message: err instanceof Error ? err.message : String(err),
+        at: new Date().toISOString(),
+      };
+      logger.error('deposit poll failed', {
+        component: 'DepositWatcher',
+        event: 'poll_failed',
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
       return 0;
     } finally {
       this.isPolling = false;
@@ -152,34 +227,54 @@ export class DepositWatcher {
    */
   private async processTransaction(tx: MirrorTransaction): Promise<boolean> {
     // Only process successful transactions
-    if (tx.result !== 'SUCCESS') return false;
+    if (tx.result !== 'SUCCESS') {
+      this.stats.skippedNonDeposit++;
+      return false;
+    }
 
     // Idempotency: skip already-processed transactions
-    if (this.store.isTransactionProcessed(tx.transaction_id)) return false;
+    if (this.store.isTransactionProcessed(tx.transaction_id)) {
+      this.stats.skippedNonDeposit++;
+      return false;
+    }
 
     // Decode memo from base64
     const memo = this.decodeMemo(tx.memo_base64);
-    if (!memo) return false;
+    if (!memo) {
+      this.stats.skippedNonDeposit++;
+      return false;
+    }
 
     // Match memo to a registered user
     const user = this.store.getUserByMemo(memo);
     if (!user) {
-      // Only log if it looks like a lazylotto memo (ll- prefix) — otherwise
-      // it's just a regular transaction with an unrelated memo
+      // Only count + log if it looks like a lazylotto memo (ll- prefix).
+      // Other memos belong to refunds, withdrawals, or unrelated traffic
+      // and are normal background noise.
       if (memo.startsWith('ll-')) {
-        console.warn(
-          `[DepositWatcher] Deposit memo "${memo}" does not match any registered user (tx ${tx.transaction_id}). ` +
-            'This may be a deposit sent before registration completed, or a stale memo from a previous session.',
-        );
+        this.stats.skippedUnmatchedLazyMemo++;
+        logger.warn('deposit memo did not match any user', {
+          component: 'DepositWatcher',
+          event: 'deposit_unmatched_memo',
+          memo,
+          txId: tx.transaction_id,
+          hint: 'stale memo from previous session, or registration race',
+        });
+      } else {
+        this.stats.skippedNonDeposit++;
       }
       return false;
     }
 
     // Reject deposits to deregistered users — add to dead-letter for operator review
     if (!user.active) {
-      console.warn(
-        `[DepositWatcher] Deposit to inactive user ${user.userId} (memo: ${memo}). Added to dead-letter queue.`,
-      );
+      logger.warn('deposit to inactive user', {
+        component: 'DepositWatcher',
+        event: 'deposit_inactive_user',
+        userId: user.userId,
+        memo,
+        txId: tx.transaction_id,
+      });
       this.store.recordDeadLetter({
         transactionId: tx.transaction_id,
         timestamp: tx.consensus_timestamp,
@@ -192,17 +287,35 @@ export class DepositWatcher {
 
     // Determine credit amount and token type
     const credit = this.extractCredit(tx);
-    if (!credit || credit.amount <= 0) return false;
+    if (!credit || credit.amount <= 0) {
+      this.stats.skippedNonDeposit++;
+      return false;
+    }
 
     // Enforce max balance (check the specific token entry)
     const tokenEntry = user.balances.tokens[credit.token];
     const currentAvailable = tokenEntry?.available ?? 0;
     if (currentAvailable + credit.amount > this.config.maxUserBalance) {
-      console.warn(
-        `[DepositWatcher] Deposit would exceed max balance for user ${user.userId}: ` +
-          `current=${currentAvailable}, deposit=${credit.amount}, token=${credit.token}, ` +
-          `max=${this.config.maxUserBalance}`,
-      );
+      this.stats.skippedExceedsMaxBalance++;
+      logger.warn('deposit exceeds max balance', {
+        component: 'DepositWatcher',
+        event: 'deposit_exceeds_max',
+        userId: user.userId,
+        currentAvailable,
+        depositAmount: credit.amount,
+        token: credit.token,
+        max: this.config.maxUserBalance,
+        txId: tx.transaction_id,
+      });
+      // Funds stay in wallet for manual handling — record so operators
+      // can see this without scraping logs.
+      this.store.recordDeadLetter({
+        transactionId: tx.transaction_id,
+        timestamp: tx.consensus_timestamp,
+        error: `Deposit ${credit.amount} ${credit.token} would exceed max balance for user ${user.userId} (current: ${currentAvailable}, max: ${this.config.maxUserBalance}).`,
+        sender: this.extractSender(tx) ?? undefined,
+        memo,
+      });
       return false;
     }
 

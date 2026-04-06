@@ -2,12 +2,14 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { useToast } from '../components/Toast';
 import { Modal } from '../components/Modal';
 import { ComicPanel } from '../components/ComicPanel';
 import { SpeechBubble } from '../components/SpeechBubble';
 import { ActionBurst } from '../components/ActionBurst';
 import { GoldConfetti } from '../components/GoldConfetti';
+import { TopUpModal } from '../components/TopUpModal';
 import {
   PrizeNftCard,
   type PrizeNftRef,
@@ -108,11 +110,6 @@ interface HistoryResponse {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function maskToken(token: string): string {
-  if (token.length <= 8) return token;
-  return `${token.slice(0, 4)}${'*'.repeat(8)}${token.slice(-4)}`;
-}
 
 function tokenSymbol(tokenKey: string): string {
   if (tokenKey.toLowerCase() === 'hbar') return 'HBAR';
@@ -236,11 +233,12 @@ export default function DashboardPage() {
   const [notRegistered, setNotRegistered] = useState(false);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [sessions, setSessions] = useState<PlaySession[]>([]);
-  const [lockLoading, setLockLoading] = useState(false);
-  const [lockConfirming, setLockConfirming] = useState(false);
-  const [revokeLoading, setRevokeLoading] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const [depositsChecking, setDepositsChecking] = useState(false);
+  // Stuck deposit count — tiny badge in the dashboard header that links
+  // to /account where the full list lives. Just the count, not the
+  // entries themselves; we don't render details here anymore.
+  const [stuckCount, setStuckCount] = useState(0);
 
   // Self-serve register + withdraw + play state
   const [registerLoading, setRegisterLoading] = useState(false);
@@ -249,21 +247,10 @@ export default function DashboardPage() {
   const [withdrawToken, setWithdrawToken] = useState('hbar');
   const [withdrawLoading, setWithdrawLoading] = useState(false);
   const [playLoading, setPlayLoading] = useState(false);
-  // Deposit card collapse — starts closed; auto-opens on mount if the
-  // user has no balance (they need the info to fund). After that it's
-  // user-controlled via the header toggle.
-  const [depositCardOpen, setDepositCardOpen] = useState(false);
-  const [depositCardAutoDecided, setDepositCardAutoDecided] = useState(false);
-
-  // Stuck deposits (dead letters) belonging to this user
-  interface UserDeadLetter {
-    transactionId: string;
-    timestamp: string;
-    error: string;
-    sender?: string;
-    memo?: string;
-  }
-  const [deadLetters, setDeadLetters] = useState<UserDeadLetter[]>([]);
+  // Top-up modal — replaces the old in-page Fund Your Account
+  // collapsible. Triggered from the hero metadata "Top up" link
+  // (when funded) or the empty-state ribbon's Step 01 (when not).
+  const [topUpOpen, setTopUpOpen] = useState(false);
 
   // Public agent stats (for trust panel + operational status banner)
   interface PublicStats {
@@ -283,56 +270,6 @@ export default function DashboardPage() {
 
   // Overall "still loading something" flag for the full-page skeleton
   const loading = statusLoading && historyLoading;
-
-  // Support target for the dead-letter card and footer. Configurable via
-  // NEXT_PUBLIC_SUPPORT_URL so the operator can point users at Discord,
-  // a form, or an email address. Accepted formats:
-  //   - https://... / http://...  → opens in a new tab
-  //   - mailto:...                 → opens the user's mail client
-  //   - bare email (foo@bar.com)   → normalized to mailto: automatically
-  // Null when unset — the UI falls back to plain text.
-  const supportUrl = useMemo(() => {
-    const raw =
-      typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_SUPPORT_URL
-        ? process.env.NEXT_PUBLIC_SUPPORT_URL.trim()
-        : '';
-    if (!raw) return null;
-    // Already a proper URL scheme
-    if (/^(https?:|mailto:)/i.test(raw)) return raw;
-    // Bare email address — prepend mailto:
-    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) return `mailto:${raw}`;
-    // Anything else — best-effort pass-through
-    return raw;
-  }, []);
-  const supportIsMailto = supportUrl?.startsWith('mailto:') ?? false;
-
-  /**
-   * Build a per-deposit support URL. For mailto targets we prefill the
-   * subject + body with the stuck transaction ID so the user doesn't
-   * have to copy-paste, and support can triage faster. For https
-   * targets we return the raw URL — we can't prefill form fields on a
-   * third-party site.
-   */
-  const buildSupportLink = useCallback(
-    (transactionId?: string) => {
-      if (!supportUrl) return null;
-      if (!supportIsMailto || !transactionId) return supportUrl;
-      const subject = encodeURIComponent(
-        `LazyLotto stuck deposit refund — ${transactionId}`,
-      );
-      const body = encodeURIComponent(
-        `Hi,\n\nI have a stuck deposit on LazyLotto.\n\n` +
-          `Transaction ID: ${transactionId}\n` +
-          `Account: ${storedAccountId ?? '(not signed in)'}\n\n` +
-          `Please process a refund when you get a chance.\n\nThanks`,
-      );
-      // Append query params, respecting any existing ones the operator
-      // may have set (mailto:foo@bar.com?cc=ops@bar.com etc).
-      const sep = supportUrl.includes('?') ? '&' : '?';
-      return `${supportUrl}${sep}subject=${subject}&body=${body}`;
-    },
-    [supportUrl, supportIsMailto, storedAccountId],
-  );
 
   // Extract raw NFT refs from all sessions for lazy enrichment.
   // The hook dedupes internally by ${hederaId}!${serial} so duplicates are fine.
@@ -491,15 +428,18 @@ export default function DashboardPage() {
       }
     })();
 
-    // Background dead-letter check — surfaces stuck deposits to the user.
-    // Failure is silent, this is purely informational.
+    // Background dead-letter count — just the count, not the entries.
+    // Full details live on /account; the dashboard surfaces a small
+    // alert link in the header pointing there if any are present.
     void (async () => {
       try {
         const res = await fetch('/api/user/dead-letters', { headers });
         if (!res.ok) return;
-        const data = (await res.json()) as { deadLetters?: UserDeadLetter[] };
+        const data = (await res.json()) as {
+          deadLetters?: { transactionId: string }[];
+        };
         if (data.deadLetters && data.deadLetters.length > 0) {
-          setDeadLetters(data.deadLetters);
+          setStuckCount(data.deadLetters.length);
         }
       } catch {
         /* silent */
@@ -609,41 +549,6 @@ export default function DashboardPage() {
       setDepositsChecking(false);
     }
   }, [depositsChecking, router, toast]);
-
-  const handleLock = useCallback(async () => {
-    if (!sessionToken) return;
-    setLockLoading(true);
-    try {
-      const res = await fetch('/api/auth/lock', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionToken }),
-      });
-      if (res.status === 401) {
-        localStorage.removeItem('lazylotto:sessionToken');
-        localStorage.removeItem('lazylotto:accountId');
-        localStorage.removeItem('lazylotto:tier');
-        router.replace('/auth?expired=1');
-        return;
-      }
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(
-          (body as { error?: string }).error ?? `Lock failed (${res.status})`,
-        );
-      }
-      // Mark locked in localStorage so the AuthFlow already-auth state shows it
-      localStorage.setItem('lazylotto:locked', 'true');
-      localStorage.removeItem('lazylotto:expiresAt');
-      toast('API key locked — now permanent');
-      setLockConfirming(false);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      toast(`Lock failed: ${message}`, { variant: 'error' });
-    } finally {
-      setLockLoading(false);
-    }
-  }, [router, sessionToken, toast]);
 
   // Self-serve registration from the not-registered empty state
   const handleRegister = useCallback(async () => {
@@ -822,50 +727,6 @@ export default function DashboardPage() {
     }
   }, [router, toast]);
 
-  const handleRevoke = useCallback(async () => {
-    if (!sessionToken) return;
-    setRevokeLoading(true);
-    try {
-      const res = await fetch('/api/auth/revoke', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionToken }),
-      });
-      if (!res.ok) {
-        console.warn('Revoke returned non-OK status:', res.status);
-      }
-    } catch (err: unknown) {
-      console.warn('Revoke request failed:', err);
-    } finally {
-      localStorage.removeItem('lazylotto:sessionToken');
-      localStorage.removeItem('lazylotto:accountId');
-      localStorage.removeItem('lazylotto:tier');
-      localStorage.removeItem('lazylotto:expiresAt');
-      localStorage.removeItem('lazylotto:locked');
-      // Full reload intentional — clears all React state after revoke
-      window.location.href = '/auth';
-    }
-  }, [sessionToken]);
-
-  // Auto-open the deposit card once — on first status load, open it
-  // iff the user has no balance yet. After that, the user controls it
-  // manually via the header toggle. The `depositCardAutoDecided` flag
-  // prevents this effect from re-running and clobbering a deliberate
-  // user toggle when status refetches (e.g. after a play session).
-  //
-  // MUST live here — above the early returns — so React's Rules of
-  // Hooks is satisfied (hooks must be called in the same order on
-  // every render, regardless of which branch the component takes).
-  // We compute hasBalance inline from `status` rather than referencing
-  // the outer derivation, which is defined further down the function
-  // body after the early-return block.
-  useEffect(() => {
-    if (!status || depositCardAutoDecided) return;
-    const entries = Object.entries(status.balances.tokens);
-    const hasBalance = entries.some(([, e]) => e.available > 0);
-    setDepositCardOpen(!hasBalance);
-    setDepositCardAutoDecided(true);
-  }, [status, depositCardAutoDecided]);
 
   // --- Derived performance data ---
   const perfSummary = useMemo(() => {
@@ -922,21 +783,25 @@ export default function DashboardPage() {
   // --- No auth token ---
   if (!sessionToken) {
     return (
-      <div className="flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-md border-2 border-secondary p-8 text-center">
-          <p className="label-caps-brand-lg mb-3">Sign in required</p>
-          <h1 className="display-md mb-3 text-foreground">
-            Authentication Required
-          </h1>
-          <p className="type-body mb-6 text-muted">
-            Please authenticate with your Hedera wallet to access your dashboard.
-          </p>
-          <a
-            href="/auth"
-            className="inline-block border-2 border-brand bg-brand px-6 py-3 font-pixel text-[10px] uppercase tracking-wider text-background transition-opacity hover:opacity-90"
-          >
-            Go to Authentication
-          </a>
+      <div className="flex flex-1 items-center justify-center px-4 py-12">
+        <div className="w-full max-w-md">
+          <ComicPanel label="LOCKED" tone="muted" halftone="none">
+            <div className="p-8 text-center">
+              <p className="label-caps-lg mb-3">Sign in required</p>
+              <h1 className="display-md mb-3 text-foreground">
+                Welcome back
+              </h1>
+              <p className="type-body mb-6 text-muted">
+                Authenticate with your Hedera wallet to open the dashboard.
+              </p>
+              <a
+                href="/auth"
+                className="inline-block border-2 border-brand bg-brand px-6 py-3 font-pixel text-[10px] uppercase tracking-wider text-background panel-shadow-sm transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-[6px_6px_0_0_var(--color-ink)]"
+              >
+                Sign in →
+              </a>
+            </div>
+          </ComicPanel>
         </div>
       </div>
     );
@@ -945,30 +810,34 @@ export default function DashboardPage() {
   // --- Not registered state ---
   if (notRegistered) {
     return (
-      <div className="flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-md border-2 border-brand bg-brand/5 p-8 text-center panel-shadow-sm">
-          <p className="label-caps-brand-lg mb-3">Welcome</p>
-          <h1 className="display-md mb-3 text-foreground">
-            {storedAccountId ?? 'Explorer'}
-          </h1>
-          <p className="type-body mb-6 text-muted">
-            You&apos;re signed in but haven&apos;t registered as a player yet.
-            One click and you&apos;ll get a deposit memo so you can fund your
-            account and start playing.
-          </p>
-          <button
-            type="button"
-            onClick={handleRegister}
-            disabled={registerLoading}
-            className="inline-block border-2 border-brand bg-brand px-6 py-3 font-pixel text-[10px] uppercase tracking-wider text-background transition-opacity hover:opacity-90 disabled:opacity-50"
-          >
-            {registerLoading ? 'Registering…' : 'Register Now'}
-          </button>
-          <p className="type-caption mt-4">
-            You&apos;ll be using the{' '}
-            <span className="text-foreground font-semibold">balanced</span> strategy by
-            default. You can change it later from the dashboard.
-          </p>
+      <div className="flex flex-1 items-center justify-center px-4 py-12">
+        <div className="w-full max-w-md">
+          <ComicPanel label="ISSUE #00" halftone="dense">
+            <div className="p-8 text-center">
+              <p className="label-caps-brand-lg mb-3">Welcome</p>
+              <h1 className="display-md mb-3 text-foreground">
+                {storedAccountId ?? 'Explorer'}
+              </h1>
+              <p className="type-body prose-width mx-auto mb-6 text-muted">
+                You&apos;re signed in but haven&apos;t registered as a player
+                yet. One click and you&apos;ll get a deposit memo so you can
+                fund your account and start playing.
+              </p>
+              <button
+                type="button"
+                onClick={handleRegister}
+                disabled={registerLoading}
+                className="inline-block border-2 border-brand bg-brand px-6 py-3 font-pixel text-[10px] uppercase tracking-wider text-background panel-shadow-sm transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-[6px_6px_0_0_var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {registerLoading ? 'Registering…' : 'Register now'}
+              </button>
+              <p className="type-caption mt-4">
+                You&apos;ll be using the{' '}
+                <span className="font-semibold text-foreground">balanced</span>{' '}
+                strategy by default. You can change it later.
+              </p>
+            </div>
+          </ComicPanel>
         </div>
       </div>
     );
@@ -1073,30 +942,52 @@ export default function DashboardPage() {
             strategy badge (it moved into the hero metadata row).
             The page title functions more like a chapter header on
             a comic book page than a dashboard nameplate. */}
-        <header className="mb-10 flex items-baseline justify-between gap-4">
+        <header className="mb-10 flex flex-wrap items-baseline justify-between gap-4">
           <div>
             <p className="label-caps-lg mb-2">Your agent</p>
             <h1 className="display-lg text-foreground">Dashboard</h1>
           </div>
+
+          {/* Stuck deposits alert — small destructive chip linking to
+              /account where the full list and contact-support actions
+              live. Only rendered when there's actually something stuck.
+              The chip is a sentinel: present means "go look", absent
+              means "everything's fine, no need to think about this." */}
+          {stuckCount > 0 && (
+            <Link
+              href="/account"
+              className="group inline-flex items-center gap-2 border-2 border-destructive bg-destructive/10 px-3 py-2 text-xs text-destructive transition-colors hover:bg-destructive/20"
+            >
+              <span
+                className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-destructive"
+                aria-hidden="true"
+              />
+              <span className="label-caps-destructive">
+                {stuckCount === 1
+                  ? '1 stuck deposit'
+                  : `${stuckCount} stuck deposits`}
+              </span>
+              <span aria-hidden="true">→</span>
+            </Link>
+          )}
           {/* Account chip — shows the user's Hedera account ID and
               acts as the disconnect button. Standard dApp convention:
-              your address is in the corner, click to sign out. */}
+              your address is in the corner, click to sign out. No
+              confirm dialog: signing back in is one click and the
+              native window.confirm() is jarring against the comic
+              vocabulary. The Sidebar Disconnect button uses the
+              identical flow. */}
           {status?.hederaAccountId && (
             <button
               type="button"
               onClick={() => {
-                if (
-                  typeof window !== 'undefined' &&
-                  window.confirm('Disconnect from this dashboard? You can sign back in anytime.')
-                ) {
-                  localStorage.removeItem('lazylotto:sessionToken');
-                  localStorage.removeItem('lazylotto:accountId');
-                  localStorage.removeItem('lazylotto:tier');
-                  localStorage.removeItem('lazylotto:expiresAt');
-                  localStorage.removeItem('lazylotto:locked');
-                  // Full reload to clear React state across the app
-                  window.location.href = '/auth';
-                }
+                localStorage.removeItem('lazylotto:sessionToken');
+                localStorage.removeItem('lazylotto:accountId');
+                localStorage.removeItem('lazylotto:tier');
+                localStorage.removeItem('lazylotto:expiresAt');
+                localStorage.removeItem('lazylotto:locked');
+                // Full reload to clear React state across the app
+                window.location.href = '/auth';
               }}
               title="Click to disconnect"
               className="group hidden items-center gap-2 border border-secondary bg-[var(--color-panel)] px-3 py-2 transition-colors hover:border-destructive sm:inline-flex"
@@ -1160,18 +1051,6 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* ---- Hero Performance Summary ---- */}
-        {perfSummary && (
-          <p className="mb-8 text-lg text-muted">
-            You&apos;ve played {perfSummary.totalSpentAll > 0 ? sessions.length : 0} session{sessions.length !== 1 ? 's' : ''}, won{' '}
-            <span className="text-brand">{perfSummary.totalWinSessions}</span>{' '}
-            time{perfSummary.totalWinSessions !== 1 ? 's' : ''}, and are{' '}
-            <span className={perfSummary.net >= 0 ? 'text-success' : 'text-destructive'}>
-              {perfSummary.net >= 0 ? 'up' : 'down'} {formatAmount(Math.abs(perfSummary.net))} {perfSummary.primaryToken}
-            </span>.
-          </p>
-        )}
-
         {/* Non-fatal error banner */}
         {error && status && (
           <div className="mb-6 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
@@ -1229,20 +1108,20 @@ export default function DashboardPage() {
                     </span>
                   )}
                 </div>
-                <p className="mt-2 text-center font-pixel text-[9px] uppercase tracking-wider text-brand">
-                  {character.name}
-                </p>
+                {/* Character name removed from under the mascot — the
+                    speech bubble cite line below is the more meaningful
+                    placement. Two name labels was redundant. */}
               </div>
 
               {/* Hero content */}
               <div className="min-w-0">
-                {/* Metadata row — small caps lg for prominence */}
+                {/* Eyebrow row — single label + the optional checking-
+                    deposits pulse. Strategy and rake percent moved into
+                    the bottom metadata strip; they're reference info,
+                    not hero-row context. The fewer chips above the
+                    display number, the faster the eye reaches the pot. */}
                 <div className="mb-5 flex flex-wrap items-center gap-x-5 gap-y-2">
                   <span className="label-caps-lg">Your agent</span>
-                  <span className="label-caps-brand-lg">
-                    Strategy · {status.strategyName}
-                  </span>
-                  <span className="label-caps-lg">Rake {status.rakePercent}%</span>
                   {depositsChecking && (
                     <span className="label-caps-brand inline-flex items-center gap-1.5">
                       <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
@@ -1251,12 +1130,14 @@ export default function DashboardPage() {
                   )}
                 </div>
 
-                {/* Display number — the hero moment. Always render, even
-                    when the user has no token entries yet: show a muted
-                    zero so the hero feels committed instead of broken.
-                    Uses the formal .display-xl scale utility so the
-                    hero balance is the ONE place in the app that uses
-                    this size — no accidental duplication elsewhere. */}
+                {/* Display number — the hero moment. Always renders so
+                    the hero feels committed instead of broken when the
+                    user has no balance yet. Uses the formal .display-xl
+                    scale utility — the ONE place in the app that uses
+                    this size, no accidental duplication elsewhere.
+                    "Pot" label stays the same in both states (instead of
+                    "Empty" / "Pot") so the empty state reads as "the pot
+                    is currently zero" rather than as an accusation. */}
                 {(() => {
                   const displayAvailable = primaryBalanceEntry?.[1].available ?? 0;
                   const displayReserved = primaryBalanceEntry?.[1].reserved ?? 0;
@@ -1266,16 +1147,14 @@ export default function DashboardPage() {
                   const isEmpty = displayAvailable === 0 && displayReserved === 0;
                   return (
                     <div className="mb-2">
-                      <p className="label-caps-lg mb-2">
-                        {isEmpty ? 'Empty' : 'Pot'}
-                      </p>
+                      <p className="label-caps-lg mb-2">Pot</p>
                       <p
                         className={`display-xl ${
                           isEmpty ? 'text-muted/40' : 'text-brand'
                         }`}
                         aria-label={
                           isEmpty
-                            ? `Balance is empty`
+                            ? `Pot is currently empty`
                             : `Primary balance ${formatAmount(displayAvailable)} ${displayToken}`
                         }
                       >
@@ -1287,12 +1166,17 @@ export default function DashboardPage() {
                         }`}
                       >
                         {displayToken}
-                        {displayReserved > 0 && (
-                          <span className="type-caption num-tabular ml-3 font-normal">
-                            {formatAmount(displayReserved)} reserved
-                          </span>
-                        )}
                       </p>
+                      {/* Reserved-amount annotation moved to its own
+                          line with an "(in play)" label so users don't
+                          read it as part of the token symbol. Only
+                          shown when something's actually reserved. */}
+                      {displayReserved > 0 && (
+                        <p className="type-caption num-tabular mt-2">
+                          {formatAmount(displayReserved)} {displayToken}{' '}
+                          <span className="label-caps ml-1">in play</span>
+                        </p>
+                      )}
                     </div>
                   );
                 })()}
@@ -1340,7 +1224,7 @@ export default function DashboardPage() {
                       disabled={playLoading || agentClosed}
                       aria-disabled={playLoading || agentClosed ? 'true' : undefined}
                       aria-describedby={agentClosed ? 'agent-status-banner' : undefined}
-                      className="group relative w-full bg-brand px-6 py-5 font-heading text-2xl font-extrabold uppercase tracking-[0.15em] text-background panel-shadow-sm transition-all duration-150 hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-[6px_6px_0_0_var(--color-ink)] active:translate-x-0 active:translate-y-0 active:shadow-[2px_2px_0_0_var(--color-ink)] disabled:cursor-not-allowed disabled:bg-brand/50 disabled:text-background/70 disabled:panel-shadow-sm disabled:hover:translate-x-0 disabled:hover:translate-y-0 sm:text-3xl"
+                      className="btn-primary"
                       title={
                         agentClosed
                           ? 'Agent is temporarily closed to new plays'
@@ -1363,46 +1247,62 @@ export default function DashboardPage() {
                     </div>
                   </div>
                 ) : (
-                  // Zero-balance state — show the inline 3-step ribbon
-                  // that teaches the loop. Step 1 (Fund) is the active
-                  // step since the user hasn't funded yet. The ribbon
-                  // replaces the old dashed Step 1 block AND the
-                  // separate top-of-page orientation strip — one
-                  // welcome, one teaching moment, tied to the mascot.
+                  // Zero-balance state — the 3-step ribbon teaches the
+                  // loop. Step 01 (Fund) is both active AND clickable —
+                  // it opens the TopUpModal directly. Steps 02 + 03 are
+                  // disabled previews so users see what's coming. No
+                  // separate "↓ Start by funding below" arrow because
+                  // the active button IS the call to action; an arrow
+                  // pointing at a section that no longer exists would
+                  // be a left-over teaching layer. One mechanism, not
+                  // four. */}
                   <div className="mt-6 border-t-2 border-brand/30 pt-5">
                     <p className="label-caps-brand mb-3">The loop</p>
                     <ol className="flex items-center gap-1 sm:gap-3">
                       {[
-                        { n: '01', label: 'Fund', active: true, done: false },
-                        { n: '02', label: 'Play', active: false, done: false },
-                        { n: '03', label: 'Withdraw', active: false, done: false },
+                        {
+                          n: '01',
+                          label: 'Fund',
+                          active: true,
+                          onClick: () => setTopUpOpen(true),
+                        },
+                        { n: '02', label: 'Play', active: false },
+                        { n: '03', label: 'Withdraw', active: false },
                       ].map((step, i, arr) => (
                         <li
                           key={step.n}
                           className="flex flex-1 items-center gap-1 sm:gap-3"
                         >
-                          <div
-                            className={`flex min-w-0 flex-1 items-baseline gap-2 border-2 px-3 py-2 ${
-                              step.active
-                                ? 'border-brand bg-brand/10 panel-shadow-sm'
-                                : 'border-secondary bg-[var(--color-panel)]'
-                            }`}
-                          >
-                            <span
-                              className={`font-pixel text-[9px] ${
-                                step.active ? 'text-brand' : 'text-muted/60'
-                              }`}
+                          {step.active ? (
+                            <button
+                              type="button"
+                              onClick={step.onClick}
+                              className="group flex min-w-0 flex-1 items-baseline gap-2 border-2 border-brand bg-brand/10 px-3 py-2 panel-shadow-sm transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:bg-brand/20 hover:shadow-[6px_6px_0_0_var(--color-ink)]"
+                              title="Open the top-up panel"
                             >
-                              {step.n}
-                            </span>
-                            <span
-                              className={`font-heading text-sm font-extrabold uppercase tracking-wider ${
-                                step.active ? 'text-foreground' : 'text-muted'
-                              }`}
-                            >
-                              {step.label}
-                            </span>
-                          </div>
+                              <span className="font-pixel text-[9px] text-brand">
+                                {step.n}
+                              </span>
+                              <span className="font-heading text-sm font-extrabold uppercase tracking-wider text-foreground">
+                                {step.label}
+                              </span>
+                              <span
+                                className="ml-auto font-pixel text-[10px] text-brand transition-transform group-hover:translate-x-0.5"
+                                aria-hidden="true"
+                              >
+                                →
+                              </span>
+                            </button>
+                          ) : (
+                            <div className="flex min-w-0 flex-1 items-baseline gap-2 border-2 border-secondary bg-[var(--color-panel)] px-3 py-2">
+                              <span className="font-pixel text-[9px] text-muted/60">
+                                {step.n}
+                              </span>
+                              <span className="font-heading text-sm font-extrabold uppercase tracking-wider text-muted">
+                                {step.label}
+                              </span>
+                            </div>
+                          )}
                           {i < arr.length - 1 && (
                             <span
                               className="hidden font-pixel text-[10px] text-brand/40 sm:inline"
@@ -1414,19 +1314,33 @@ export default function DashboardPage() {
                         </li>
                       ))}
                     </ol>
-                    <p className="label-caps-brand mt-3">
-                      ↓ Start by funding below
-                    </p>
                   </div>
                 )}
               </div>
             </div>
 
             {/* Metadata strip — runs across the bottom of the panel.
-                Thin divider in brand gold to tie it to the panel border. */}
+                Holds the reference info (strategy, rake percent,
+                deposited, rake paid) plus the inline "Top up" action
+                so users can add funds without leaving the page. The
+                old Fund Your Account collapsible is gone — its
+                content lives in TopUpModal now, which the link below
+                opens. */}
             {status && hasPlayableBalance && (
               <div className="border-t-2 border-brand/30 px-6 py-4 sm:px-8">
-                <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+                  <div>
+                    <p className="label-caps mb-0.5">Strategy</p>
+                    <p className="text-sm text-foreground">
+                      {status.strategyName}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="label-caps mb-0.5">Rake</p>
+                    <p className="text-sm text-foreground num-tabular">
+                      {status.rakePercent}%
+                    </p>
+                  </div>
                   <div>
                     <p className="label-caps mb-0.5">Deposited</p>
                     <p className="text-sm text-foreground num-tabular">
@@ -1439,10 +1353,17 @@ export default function DashboardPage() {
                       {totalRakePaid}
                     </p>
                   </div>
-                  <p className="ml-auto max-w-xs text-[11px] italic text-muted">
-                    We take a rake to cover all gas and infrastructure costs.
-                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setTopUpOpen(true)}
+                    className="ml-auto inline-flex items-center gap-2 border-2 border-brand bg-brand/10 px-4 py-2 font-pixel text-[9px] uppercase tracking-wider text-brand transition-colors hover:bg-brand hover:text-background"
+                  >
+                    Top up <span aria-hidden="true">+</span>
+                  </button>
                 </div>
+                <p className="mt-3 text-[11px] italic text-muted">
+                  We take a rake to cover all gas and infrastructure costs.
+                </p>
               </div>
             )}
           </ComicPanel>
@@ -1471,248 +1392,13 @@ export default function DashboardPage() {
         )}
 
         {/* ---- Sections below the hero ────────────────────
-            Flattened from a 2-col grid into a vertical stack since
-            every child already spanned both columns. Generous gaps
-            between distinct sections (space-y-10) give the page
-            rhythm — hero breathes, fund card breathes, stuck
-            deposits / history each land as their own beat. --- */}
+            Brave version: only Recent Plays. Fund Your Account is
+            now a TopUpModal triggered from the hero metadata strip
+            and the empty-state ribbon. Stuck deposits, the session
+            token, and proof-of-operation links all live on /account.
+            The dashboard does ONE thing — show the pot and let you
+            play it. --- */}
         <div className="space-y-10">
-
-          {/* ---- Fund Your Account — collapsible ──────────────
-              Spans full width. Defaults open when the user has no
-              balance (they need the deposit info to get started),
-              collapses once they have funds (they're past this step).
-              Header row has title + chevron toggle + persistent
-              "Check for deposits" button that works in either state. */}
-          <section className="border-2 border-secondary">
-            {/* Clickable header — whole row toggles collapse except the
-                refresh button which has its own click target. */}
-            <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4">
-              <button
-                type="button"
-                onClick={() => setDepositCardOpen((o) => !o)}
-                aria-expanded={depositCardOpen}
-                aria-controls="fund-your-account-body"
-                className="group flex min-w-0 flex-1 items-center gap-3 text-left"
-              >
-                <span
-                  className={`inline-block font-pixel text-[10px] text-brand transition-transform ${
-                    depositCardOpen ? 'rotate-90' : ''
-                  }`}
-                  aria-hidden="true"
-                >
-                  ▸
-                </span>
-                <div className="min-w-0">
-                  <h2 className="heading-1 text-foreground">
-                    Fund Your Account
-                  </h2>
-                  <p className="label-caps mt-1">
-                    {depositCardOpen
-                      ? 'Agent wallet & deposit memo'
-                      : hasPlayableBalance
-                        ? 'You\u2019re funded — tap to top up'
-                        : 'Tap to see deposit instructions'}
-                  </p>
-                </div>
-              </button>
-              {/* Manual refresh — always visible so the user can nudge
-                  the deposit watcher even while the card is collapsed. */}
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void handleCheckDeposits();
-                }}
-                disabled={depositsChecking}
-                className="shrink-0 inline-flex items-center gap-2 border-2 border-brand bg-brand/10 px-4 py-2 font-pixel text-[9px] uppercase tracking-wider text-brand transition-colors hover:bg-brand hover:text-background disabled:cursor-not-allowed disabled:opacity-50"
-                aria-live="polite"
-              >
-                <span
-                  className={`inline-block h-1.5 w-1.5 rounded-full bg-brand ${
-                    depositsChecking ? 'animate-pulse' : ''
-                  }`}
-                  aria-hidden="true"
-                />
-                {depositsChecking ? 'Checking…' : 'Check for deposits'}
-              </button>
-            </div>
-
-            {/* Collapsible body — grid-template-rows transition so
-                we're not animating layout props. */}
-            <div
-              id="fund-your-account-body"
-              className="collapsible-grid"
-              data-open={depositCardOpen ? 'true' : 'false'}
-            >
-              <div className="collapsible-inner">
-                {status && (
-                  <div className="space-y-5 border-t border-secondary px-6 py-5">
-                    <p className="type-body prose-width text-muted">
-                      Send HBAR or LAZY to the agent wallet below with your
-                      unique deposit memo. Deposits usually arrive within ~10
-                      seconds — hit{' '}
-                      <span className="font-semibold text-brand">Check for deposits</span>{' '}
-                      above to pull them in.
-                    </p>
-
-                    {agentWallet && (
-                      <div>
-                        <label className="label-caps mb-2 block">Agent Wallet</label>
-                        <div className="flex items-center gap-2 border border-secondary bg-[var(--color-panel)] px-4 py-3">
-                          <code className="flex-1 break-all font-mono text-sm text-brand">
-                            {agentWallet}
-                          </code>
-                          <button
-                            type="button"
-                            onClick={() => handleCopy(agentWallet, 'Agent wallet')}
-                            className="shrink-0 border border-secondary px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted transition-colors hover:border-brand hover:text-brand"
-                          >
-                            Copy
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    <div>
-                      <label className="label-caps mb-2 block">Deposit Memo</label>
-                      <div className="flex items-center gap-2 border border-secondary bg-[var(--color-panel)] px-4 py-3">
-                        <code className="flex-1 break-all font-mono text-sm text-brand">
-                          {status.depositMemo}
-                        </code>
-                        <button
-                          type="button"
-                          onClick={() => handleCopy(status.depositMemo, 'Deposit memo')}
-                          className="shrink-0 border border-secondary px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted transition-colors hover:border-brand hover:text-brand"
-                        >
-                          Copy
-                        </button>
-                      </div>
-                    </div>
-
-                    <p className="border-l-2 border-brand bg-brand/10 px-4 py-3 text-xs text-brand">
-                      <span className="font-semibold">Important:</span> always include the
-                      deposit memo when sending tokens. Transfers without the correct memo
-                      cannot be automatically credited.
-                    </p>
-
-                    {/* Wallet-specific instructions */}
-                    <details className="border border-secondary bg-[var(--color-panel)] px-4 py-3 text-xs text-muted">
-                      <summary className="cursor-pointer font-pixel text-[10px] uppercase tracking-wider text-foreground">
-                        How do I add the memo in my wallet?
-                      </summary>
-                      <div className="mt-3 space-y-3">
-                        <div>
-                          <p className="font-semibold text-foreground">HashPack</p>
-                          <p>
-                            On the Send screen, tap <span className="text-foreground">Advanced</span> →
-                            paste the memo into the <span className="text-foreground">Memo</span> field
-                            before confirming.
-                          </p>
-                        </div>
-                        <div>
-                          <p className="font-semibold text-foreground">Blade</p>
-                          <p>
-                            On the Send screen, expand <span className="text-foreground">Optional Fields</span> and
-                            paste the memo into the <span className="text-foreground">Memo</span> field
-                            before confirming.
-                          </p>
-                        </div>
-                        <div>
-                          <p className="font-semibold text-foreground">Other wallets</p>
-                          <p>
-                            Look for a <span className="text-foreground">Memo</span> or
-                            <span className="text-foreground"> Note</span> field on the send screen.
-                            It&apos;s often hidden under an &quot;Advanced&quot; or &quot;Optional&quot; toggle.
-                          </p>
-                        </div>
-                      </div>
-                    </details>
-                  </div>
-                )}
-              </div>
-            </div>
-          </section>
-
-          {/* ---- Stuck deposits (dead letters) ──────────────
-              Only rendered when the user has actual stuck deposits.
-              ComicPanel with destructive tone + halftone none (data-
-              dense, not a hero moment). "STUCK" corner sticker so
-              users can't miss it. */}
-          {deadLetters.length > 0 && (
-            <ComicPanel
-              label="STUCK"
-              tone="destructive"
-              halftone="none"
-            >
-              <div className="border-b border-destructive/40 px-5 py-4">
-                <p className="label-caps-brand mb-1 text-destructive">
-                  Stuck deposits
-                </p>
-                <p className="text-xs text-muted">
-                  {deadLetters.length === 1 ? 'A deposit' : 'These deposits'} from your
-                  wallet couldn&apos;t be credited automatically. The funds are still
-                  in the agent wallet.{' '}
-                  {supportUrl
-                    ? supportIsMailto
-                      ? 'Click Contact Support on a row below to email the operator — the transaction ID will be prefilled for you.'
-                      : 'Click Contact Support on a row below to reach the operator.'
-                    : 'Contact the operator with the transaction ID below to request a refund.'}
-                </p>
-              </div>
-              <ul className="divide-y divide-destructive/20">
-                {deadLetters.map((dl) => {
-                  const network =
-                    (typeof process !== 'undefined' &&
-                      process.env?.NEXT_PUBLIC_HEDERA_NETWORK) ||
-                    'testnet';
-                  const hashscanUrl =
-                    network === 'mainnet'
-                      ? `https://hashscan.io/mainnet/transaction/${dl.transactionId}`
-                      : `https://hashscan.io/${network}/transaction/${dl.transactionId}`;
-                  const rowSupportUrl = buildSupportLink(dl.transactionId);
-                  return (
-                    <li key={dl.transactionId} className="px-5 py-3">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <code className="break-all font-mono text-xs text-destructive">
-                          {dl.transactionId}
-                        </code>
-                        <div className="flex shrink-0 items-center gap-2">
-                          {rowSupportUrl && (
-                            <a
-                              href={rowSupportUrl}
-                              target={supportIsMailto ? undefined : '_blank'}
-                              rel={
-                                supportIsMailto ? undefined : 'noopener noreferrer'
-                              }
-                              className="border-2 border-destructive bg-destructive/20 px-3 py-1.5 label-caps-destructive transition-colors hover:bg-destructive/40"
-                            >
-                              Contact Support
-                            </a>
-                          )}
-                          <a
-                            href={hashscanUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="border border-destructive/40 px-3 py-1.5 label-caps-destructive transition-colors hover:bg-destructive/10"
-                          >
-                            HashScan ↗
-                          </a>
-                        </div>
-                      </div>
-                      <p className="mt-2 text-xs text-muted">{dl.error}</p>
-                      {dl.memo && (
-                        <p className="mt-1 text-[10px] text-muted">
-                          <span className="label-caps mr-2">Memo</span>
-                          <code className="font-mono">{dl.memo || '(none)'}</code>
-                        </p>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            </ComicPanel>
-          )}
 
           {/* ---- Play History — wrapped as a ComicPanel so the
                vocabulary carries from the hero to the rest of the
@@ -1972,122 +1658,48 @@ export default function DashboardPage() {
           </ComicPanel>
         </div>
 
-        {/* ── Proof of operation — compact footer bar ───────────
-            Dropped the operator stats (TVL, active user count, rake
-            rate — the last is already in the hero metadata strip).
-            Users only care about the three links: they can verify
-            the agent wallet on HashScan, read the HCS-20 audit trail,
-            and browse our on-chain audit page. Styled as a single
-            pixel-font imprint row — reads like the credits line on
-            the back cover of a comic book. */}
-        {publicStats && (
-          <div className="mt-10 border-t-2 border-brand/20 pt-5">
-            <p className="mb-3 font-pixel text-[9px] uppercase tracking-wider text-brand">
-              Proof of operation
-            </p>
-            <div className="flex flex-wrap gap-3">
-              {publicStats.agentWallet && (
-                <a
-                  href={`https://hashscan.io/${publicStats.network === 'mainnet' ? 'mainnet' : publicStats.network}/account/${publicStats.agentWallet}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-2 border border-secondary bg-[var(--color-panel)] px-3 py-2 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
-                >
-                  Agent wallet <span aria-hidden="true">↗</span>
-                </a>
-              )}
-              {publicStats.hcs20TopicId && (
-                <a
-                  href={`https://hashscan.io/${publicStats.network === 'mainnet' ? 'mainnet' : publicStats.network}/topic/${publicStats.hcs20TopicId}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-2 border border-secondary bg-[var(--color-panel)] px-3 py-2 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
-                >
-                  HCS-20 trail <span aria-hidden="true">↗</span>
-                </a>
-              )}
-              <a
-                href="/audit"
-                className="inline-flex items-center gap-2 border border-secondary bg-[var(--color-panel)] px-3 py-2 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
-              >
-                On-chain log <span aria-hidden="true">→</span>
-              </a>
-            </div>
-          </div>
-        )}
-
-        {/* ---- Session Section (compact, demoted) ---- */}
-        <div className="mt-10 border-t border-secondary/60 pt-6">
-          <p className="label-caps mb-3">Session</p>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <code className="font-mono text-sm text-muted">
-              {maskToken(sessionToken)}
-            </code>
-
-            <button
-              type="button"
-              onClick={() => handleCopy(sessionToken, 'Session token')}
-              className="shrink-0 rounded-md border border-secondary px-3 py-1.5 text-xs text-muted transition-colors hover:text-foreground"
+        {/* ── Page footer ────────────────────────────────────
+            One line: "Manage account →". Everything that used to
+            live in the proof-of-operation footer (HashScan, HCS-20,
+            audit) and the session card (token, lock, revoke) now
+            lives on /account. The dashboard footer is just the
+            doorway. */}
+        <div className="mt-12 border-t border-brand/20 pt-5">
+          <Link
+            href="/account"
+            className="group inline-flex items-center gap-2 font-pixel text-[10px] uppercase tracking-wider text-muted transition-colors hover:text-brand"
+          >
+            Manage account
+            <span
+              className="transition-transform group-hover:translate-x-1"
+              aria-hidden="true"
             >
-              Copy
-            </button>
-
-            {lockConfirming ? (
-              <>
-                <span className="text-xs text-muted">
-                  Make this token permanent (never expires, can&apos;t be auto-revoked)?
-                </span>
-                <button
-                  type="button"
-                  onClick={() => void handleLock()}
-                  disabled={lockLoading}
-                  className="rounded-md bg-brand px-4 py-1.5 text-xs font-semibold text-background transition-opacity hover:opacity-90 disabled:opacity-50"
-                >
-                  {lockLoading ? 'Locking…' : 'Confirm — Make Permanent'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setLockConfirming(false)}
-                  disabled={lockLoading}
-                  className="text-xs text-muted underline transition-colors hover:text-foreground"
-                >
-                  Cancel
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setLockConfirming(true)}
-                  className="rounded-md bg-brand px-4 py-1.5 text-xs font-semibold text-background transition-opacity hover:opacity-90"
-                  title="Make this token permanent — never expires, can't be revoked"
-                >
-                  Lock API Key
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => void handleRevoke()}
-                  disabled={revokeLoading}
-                  className="rounded-md border border-destructive/50 px-4 py-1.5 text-xs font-medium text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
-                >
-                  {revokeLoading ? 'Revoking…' : 'Revoke & Re-authenticate'}
-                </button>
-              </>
-            )}
-          </div>
-
-          {status && (
-            <p className="mt-2 text-xs text-muted">
-              Registered {formatTimestamp(status.registeredAt)}.
-              {status.lastPlayedAt
-                ? ` Last played ${formatTimestamp(status.lastPlayedAt)}.`
-                : ' No play sessions yet.'}
-            </p>
-          )}
+              →
+            </span>
+          </Link>
         </div>
       </div>
+
+      {/* ── Top up modal ─────────────────────────────────────
+          Fed by the hero metadata "Top up" button (when funded)
+          and by Step 01 in the empty-state ribbon (when not).
+          Holds the agent wallet, deposit memo, and wallet-specific
+          instructions — same content the old in-page Fund Your
+          Account collapsible used to show, just behind a focused
+          modal so the dashboard hero owns the whole viewport. */}
+      <TopUpModal
+        open={topUpOpen}
+        onClose={() => setTopUpOpen(false)}
+        agentWallet={agentWallet}
+        depositMemo={status?.depositMemo ?? ''}
+        framingNote={
+          !hasPlayableBalance
+            ? 'Send any amount to get started — your first deposit funds Step 01.'
+            : undefined
+        }
+        onCheckDeposits={() => void handleCheckDeposits()}
+        checking={depositsChecking}
+      />
 
       {/* ── Withdraw modal ───────────────────────────────────── */}
       <Modal
