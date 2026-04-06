@@ -21,6 +21,7 @@ import { getClient } from '../../_lib/hedera';
 import { getOperatorAccountId } from '~/hedera/wallet';
 import { withChecksum } from '~/utils/checksum';
 import { loadCustodialConfig } from '~/custodial/types';
+import { getKillSwitchState } from '~/lib/killswitch';
 
 // Public endpoint — wide-open CORS so any frontend can read
 const CORS_HEADERS = {
@@ -71,6 +72,18 @@ export async function GET() {
       /* env not configured — null is fine */
     }
 
+    // Public-facing status framing. Internal operators call this the
+    // "kill switch"; users see it as "open for business" vs "temporarily
+    // closed for maintenance", which is less alarming for a routine
+    // pause. `acceptingOperations` is the boolean the frontend uses to
+    // render banners; `statusMessage` is the copy; `statusReason` is
+    // the operator's free-text explanation if provided.
+    const killState = await getKillSwitchState();
+    const acceptingOperations = !killState.enabled;
+    const statusMessage = acceptingOperations
+      ? 'Agent open for business'
+      : 'Agent temporarily closed to new plays and registrations';
+
     return NextResponse.json(
       {
         agentName: 'LazyLotto Agent',
@@ -88,12 +101,17 @@ export async function GET() {
         tvl: tvlRounded,
         hcs20TopicId: config.hcs20TopicId,
         operatorWithdrawAddress: process.env.OPERATOR_WITHDRAW_ADDRESS || null,
+        // User-facing operational status
+        acceptingOperations,
+        statusMessage,
+        statusReason: killState.enabled ? (killState.reason ?? null) : null,
       },
       {
         headers: {
           ...CORS_HEADERS,
-          // Cache aggressively — this is public data, no per-user variance
-          'Cache-Control': 'public, max-age=60, s-maxage=300',
+          // Short cache — status should update within a minute of an
+          // operator toggling the kill switch, not after 5 minutes.
+          'Cache-Control': 'public, max-age=15, s-maxage=30',
         },
       },
     );

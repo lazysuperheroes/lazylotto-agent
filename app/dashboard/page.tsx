@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useToast } from '../components/Toast';
+import { Modal } from '../components/Modal';
 import {
   PrizeNftCard,
   type PrizeNftRef,
@@ -26,6 +27,12 @@ interface UserBalances {
   tokens: Record<string, TokenBalanceEntry>;
 }
 
+interface VelocityState {
+  cap: number | null;
+  usedToday: number;
+  remaining: number | null;
+}
+
 interface StatusResponse {
   userId: string;
   hederaAccountId: string;
@@ -39,6 +46,8 @@ interface StatusResponse {
   registeredAt: string;
   lastPlayedAt: string | null;
   agentWallet?: string;
+  /** Per-token 24h withdrawal velocity counters (cap + used + remaining). */
+  velocity?: Record<string, VelocityState>;
 }
 
 interface PrizeDetail {
@@ -220,12 +229,13 @@ export default function DashboardPage() {
   const [showAll, setShowAll] = useState(false);
   const [depositsChecking, setDepositsChecking] = useState(false);
 
-  // Self-serve register + withdraw state
+  // Self-serve register + withdraw + play state
   const [registerLoading, setRegisterLoading] = useState(false);
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [withdrawAmount, setWithdrawAmount] = useState('');
   const [withdrawToken, setWithdrawToken] = useState('hbar');
   const [withdrawLoading, setWithdrawLoading] = useState(false);
+  const [playLoading, setPlayLoading] = useState(false);
 
   // Stuck deposits (dead letters) belonging to this user
   interface UserDeadLetter {
@@ -237,7 +247,7 @@ export default function DashboardPage() {
   }
   const [deadLetters, setDeadLetters] = useState<UserDeadLetter[]>([]);
 
-  // Public agent stats (for trust panel)
+  // Public agent stats (for trust panel + operational status banner)
   interface PublicStats {
     agentName: string;
     network: string;
@@ -246,11 +256,65 @@ export default function DashboardPage() {
     rake: { defaultPercent: number };
     tvl: Record<string, number>;
     hcs20TopicId: string | null;
+    // Operational status — "open for business" / "temporarily closed"
+    acceptingOperations?: boolean;
+    statusMessage?: string;
+    statusReason?: string | null;
   }
   const [publicStats, setPublicStats] = useState<PublicStats | null>(null);
 
   // Overall "still loading something" flag for the full-page skeleton
   const loading = statusLoading && historyLoading;
+
+  // Support target for the dead-letter card and footer. Configurable via
+  // NEXT_PUBLIC_SUPPORT_URL so the operator can point users at Discord,
+  // a form, or an email address. Accepted formats:
+  //   - https://... / http://...  → opens in a new tab
+  //   - mailto:...                 → opens the user's mail client
+  //   - bare email (foo@bar.com)   → normalized to mailto: automatically
+  // Null when unset — the UI falls back to plain text.
+  const supportUrl = useMemo(() => {
+    const raw =
+      typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_SUPPORT_URL
+        ? process.env.NEXT_PUBLIC_SUPPORT_URL.trim()
+        : '';
+    if (!raw) return null;
+    // Already a proper URL scheme
+    if (/^(https?:|mailto:)/i.test(raw)) return raw;
+    // Bare email address — prepend mailto:
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) return `mailto:${raw}`;
+    // Anything else — best-effort pass-through
+    return raw;
+  }, []);
+  const supportIsMailto = supportUrl?.startsWith('mailto:') ?? false;
+
+  /**
+   * Build a per-deposit support URL. For mailto targets we prefill the
+   * subject + body with the stuck transaction ID so the user doesn't
+   * have to copy-paste, and support can triage faster. For https
+   * targets we return the raw URL — we can't prefill form fields on a
+   * third-party site.
+   */
+  const buildSupportLink = useCallback(
+    (transactionId?: string) => {
+      if (!supportUrl) return null;
+      if (!supportIsMailto || !transactionId) return supportUrl;
+      const subject = encodeURIComponent(
+        `LazyLotto stuck deposit refund — ${transactionId}`,
+      );
+      const body = encodeURIComponent(
+        `Hi,\n\nI have a stuck deposit on LazyLotto.\n\n` +
+          `Transaction ID: ${transactionId}\n` +
+          `Account: ${storedAccountId ?? '(not signed in)'}\n\n` +
+          `Please process a refund when you get a chance.\n\nThanks`,
+      );
+      // Append query params, respecting any existing ones the operator
+      // may have set (mailto:foo@bar.com?cc=ops@bar.com etc).
+      const sep = supportUrl.includes('?') ? '&' : '?';
+      return `${supportUrl}${sep}subject=${subject}&body=${body}`;
+    },
+    [supportUrl, supportIsMailto, storedAccountId],
+  );
 
   // Extract raw NFT refs from all sessions for lazy enrichment.
   // The hook dedupes internally by ${hederaId}!${serial} so duplicates are fine.
@@ -546,6 +610,73 @@ export default function DashboardPage() {
     }
   }, [router, withdrawAmount, withdrawToken, toast]);
 
+  // Self-serve play session
+  const handlePlay = useCallback(async () => {
+    const token = localStorage.getItem('lazylotto:sessionToken');
+    if (!token) {
+      router.replace('/auth');
+      return;
+    }
+    setPlayLoading(true);
+    try {
+      const res = await fetch('/api/user/play', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 503) {
+        // Kill switch engaged — use the operator's reason
+        const reason = (body as { reason?: string }).reason;
+        toast(
+          reason
+            ? `Agent temporarily closed: ${reason}`
+            : 'Agent temporarily closed to new plays',
+          { variant: 'info' },
+        );
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(
+          (body as { error?: string }).error ?? `Play failed (${res.status})`,
+        );
+      }
+      const { session, balances } = body as {
+        session: { totalWins: number; totalSpent: number; poolsPlayed: number };
+        balances?: StatusResponse['balances'];
+      };
+      toast(
+        `Played ${session.poolsPlayed} pool(s), ${session.totalWins} win(s)`,
+      );
+      // Update balance in place so the user sees the effect immediately
+      if (balances) {
+        setStatus((prev) => (prev ? { ...prev, balances } : prev));
+      }
+      // Refetch history so the new session shows up in the list. Fire
+      // and forget — failure is silent; the session is already persisted.
+      void (async () => {
+        try {
+          const hres = await fetch('/api/user/history', {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (hres.ok) {
+            const data = (await hres.json()) as { sessions?: PlaySession[] };
+            setSessions(data.sessions ?? []);
+          }
+        } catch {
+          /* silent */
+        }
+      })();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast(`Play failed: ${message}`, { variant: 'error' });
+    } finally {
+      setPlayLoading(false);
+    }
+  }, [router, toast]);
+
   const handleRevoke = useCallback(async () => {
     if (!sessionToken) return;
     setRevokeLoading(true);
@@ -674,7 +805,7 @@ export default function DashboardPage() {
           </button>
           <p className="mt-4 text-xs text-muted">
             You&apos;ll be using the <span className="text-foreground">balanced</span> strategy by default.
-            You can switch later via Claude Desktop.
+            You can change it later from the dashboard.
           </p>
         </div>
       </div>
@@ -726,9 +857,25 @@ export default function DashboardPage() {
       <div className="mx-auto max-w-6xl">
         {/* ---- Top Bar ---- */}
         <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <h1 className="font-heading text-2xl text-foreground">
-            Dashboard
-          </h1>
+          <div className="flex items-center gap-3">
+            <h1 className="font-heading text-2xl text-foreground">
+              Dashboard
+            </h1>
+            {/* Persistent network badge so users never lose context about
+                which network they're on, even after navigating away from /auth. */}
+            {publicStats?.network && (
+              <span
+                className={`rounded px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${
+                  publicStats.network === 'mainnet'
+                    ? 'bg-brand/15 text-brand'
+                    : 'bg-secondary text-muted'
+                }`}
+                title={`Hedera ${publicStats.network}`}
+              >
+                {publicStats.network}
+              </span>
+            )}
+          </div>
 
           {status && (
             <span className="rounded bg-brand px-2 py-0.5 text-xs font-semibold text-background">
@@ -736,6 +883,34 @@ export default function DashboardPage() {
             </span>
           )}
         </header>
+
+        {/* ---- Agent operational status ----
+            Surfaces the operator's kill switch to users under friendlier
+            "open for business" framing. When closed, users still see their
+            balance and can withdraw — only new plays/registrations are
+            blocked. The banner explains exactly that. */}
+        {publicStats && publicStats.acceptingOperations === false && (
+          <div className="mb-6 rounded-xl border border-destructive/40 bg-destructive/10 p-4">
+            <div className="flex items-start gap-3">
+              <span className="mt-1 inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-destructive" />
+              <div className="min-w-0 flex-1">
+                <p className="font-heading text-sm text-foreground">
+                  {publicStats.statusMessage ?? 'Agent temporarily closed'}
+                </p>
+                <p className="mt-1 text-xs text-muted">
+                  New plays and registrations are paused.
+                  Your balance is safe and withdrawals remain available.
+                </p>
+                {publicStats.statusReason && (
+                  <p className="mt-2 rounded bg-background/40 px-2 py-1 text-xs text-foreground">
+                    <span className="text-muted">Reason:</span>{' '}
+                    <span className="font-mono">{publicStats.statusReason}</span>
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ---- Hero Performance Summary ---- */}
         {perfSummary && (
@@ -850,15 +1025,40 @@ export default function DashboardPage() {
                   </div>
                 </div>
 
-                {/* Withdraw button */}
+                {/* Action buttons — Play and Withdraw */}
                 {balanceEntries.some(([, e]) => e.available > 0) && (
-                  <button
-                    type="button"
-                    onClick={() => setWithdrawOpen(true)}
-                    className="w-full rounded-lg border border-brand bg-brand/10 px-4 py-2.5 text-sm font-semibold text-brand transition-colors hover:bg-brand/20"
-                  >
-                    Withdraw Funds
-                  </button>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={handlePlay}
+                      disabled={
+                        playLoading ||
+                        (publicStats && publicStats.acceptingOperations === false) ||
+                        false
+                      }
+                      className="rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                      title={
+                        publicStats && publicStats.acceptingOperations === false
+                          ? 'Agent is temporarily closed to new plays'
+                          : 'Run a play session now'
+                      }
+                    >
+                      {playLoading ? 'Playing…' : 'Play Now'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWithdrawOpen(true)}
+                      className="rounded-lg border border-brand bg-brand/10 px-4 py-2.5 text-sm font-semibold text-brand transition-colors hover:bg-brand/20"
+                    >
+                      Withdraw
+                    </button>
+                  </div>
+                )}
+                {/* Empty-state hint when balance is zero */}
+                {balanceEntries.every(([, e]) => e.available <= 0) && (
+                  <div className="rounded-lg border border-dashed border-secondary bg-secondary/20 px-4 py-3 text-xs text-muted">
+                    Fund your account below, then come back to play.
+                  </div>
                 )}
               </div>
             )}
@@ -963,8 +1163,11 @@ export default function DashboardPage() {
               <p className="mb-4 text-xs text-muted">
                 {deadLetters.length === 1 ? 'A deposit' : 'These deposits'} from your wallet
                 couldn&apos;t be credited automatically. The funds are still in the agent
-                wallet — contact the operator with the transaction ID below to request
-                a refund.
+                wallet. {supportUrl
+                  ? supportIsMailto
+                    ? 'Click Contact Support on a row below to email the operator — the transaction ID will be prefilled for you.'
+                    : 'Click Contact Support on a row below to reach the operator.'
+                  : 'Contact the operator with the transaction ID below to request a refund.'}
               </p>
               <div className="space-y-2">
                 {deadLetters.map((dl) => {
@@ -972,20 +1175,34 @@ export default function DashboardPage() {
                   const hashscanUrl = network === 'mainnet'
                     ? `https://hashscan.io/mainnet/transaction/${dl.transactionId}`
                     : `https://hashscan.io/${network}/transaction/${dl.transactionId}`;
+                  const rowSupportUrl = buildSupportLink(dl.transactionId);
                   return (
                     <div key={dl.transactionId} className="rounded-lg bg-secondary/30 p-3">
-                      <div className="flex items-center justify-between gap-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
                         <code className="break-all font-mono text-xs text-destructive">
                           {dl.transactionId}
                         </code>
-                        <a
-                          href={hashscanUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="shrink-0 rounded border border-destructive/40 px-2 py-1 text-[10px] font-semibold text-destructive transition-colors hover:bg-destructive/10"
-                        >
-                          HashScan
-                        </a>
+                        <div className="flex shrink-0 items-center gap-2">
+                          {rowSupportUrl && (
+                            <a
+                              href={rowSupportUrl}
+                              // mailto: links don't need a new tab; https ones do
+                              target={supportIsMailto ? undefined : '_blank'}
+                              rel={supportIsMailto ? undefined : 'noopener noreferrer'}
+                              className="rounded bg-destructive px-2 py-1 text-[10px] font-semibold text-white transition-opacity hover:opacity-90"
+                            >
+                              Contact Support
+                            </a>
+                          )}
+                          <a
+                            href={hashscanUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="rounded border border-destructive/40 px-2 py-1 text-[10px] font-semibold text-destructive transition-colors hover:bg-destructive/10"
+                          >
+                            HashScan
+                          </a>
+                        </div>
                       </div>
                       <p className="mt-1.5 text-xs text-muted">
                         {dl.error}
@@ -1360,79 +1577,113 @@ export default function DashboardPage() {
       </div>
 
       {/* ── Withdraw modal ───────────────────────────────────── */}
-      {withdrawOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
-          onClick={() => !withdrawLoading && setWithdrawOpen(false)}
-        >
-          <div
-            className="w-full max-w-md rounded-xl border border-secondary bg-background p-6 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="mb-2 font-heading text-lg text-foreground">
-              Withdraw Funds
-            </h3>
-            <p className="mb-5 text-xs text-muted">
-              Funds will be sent to your registered Hedera account.
-            </p>
+      <Modal
+        open={withdrawOpen}
+        onClose={() => setWithdrawOpen(false)}
+        locked={withdrawLoading}
+        title="Withdraw Funds"
+        description="Funds will be sent to your registered Hedera account."
+      >
+        {(() => {
+          // Per-token velocity state — shows "remaining today" counter
+          // so users know the daily cap before they hit submit.
+          const velocity = status?.velocity?.[withdrawToken];
+          const amountNum = Number(withdrawAmount);
+          const overCap =
+            velocity?.remaining != null &&
+            Number.isFinite(amountNum) &&
+            amountNum > 0 &&
+            amountNum > velocity.remaining;
+          return (
+            <>
+              <div className="mb-4">
+                <label htmlFor="withdraw-token" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+                  Token
+                </label>
+                <select
+                  id="withdraw-token"
+                  value={withdrawToken}
+                  onChange={(e) => setWithdrawToken(e.target.value)}
+                  disabled={withdrawLoading}
+                  className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-brand focus:outline-none disabled:opacity-50"
+                >
+                  {balanceEntries.map(([key, entry]) => (
+                    <option key={key} value={key}>
+                      {tokenSymbol(key)} (available: {formatAmount(entry.available)})
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-            <div className="mb-4">
-              <label htmlFor="withdraw-token" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
-                Token
-              </label>
-              <select
-                id="withdraw-token"
-                value={withdrawToken}
-                onChange={(e) => setWithdrawToken(e.target.value)}
-                disabled={withdrawLoading}
-                className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-brand focus:outline-none disabled:opacity-50"
-              >
-                {balanceEntries.map(([key, entry]) => (
-                  <option key={key} value={key}>
-                    {tokenSymbol(key)} (available: {formatAmount(entry.available)})
-                  </option>
-                ))}
-              </select>
-            </div>
+              <div className="mb-2">
+                <label htmlFor="withdraw-amount" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+                  Amount
+                </label>
+                <input
+                  id="withdraw-amount"
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={withdrawAmount}
+                  onChange={(e) => setWithdrawAmount(e.target.value)}
+                  disabled={withdrawLoading}
+                  placeholder="0.00"
+                  aria-invalid={overCap || undefined}
+                  aria-describedby={velocity?.cap != null ? 'withdraw-velocity' : undefined}
+                  className={`w-full rounded-lg border px-4 py-2.5 text-sm text-foreground placeholder:text-muted focus:outline-none disabled:opacity-50 ${
+                    overCap
+                      ? 'border-destructive bg-destructive/10 focus:border-destructive'
+                      : 'border-secondary bg-secondary/30 focus:border-brand'
+                  }`}
+                />
+              </div>
 
-            <div className="mb-5">
-              <label htmlFor="withdraw-amount" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
-                Amount
-              </label>
-              <input
-                id="withdraw-amount"
-                type="number"
-                min="0"
-                step="any"
-                value={withdrawAmount}
-                onChange={(e) => setWithdrawAmount(e.target.value)}
-                disabled={withdrawLoading}
-                placeholder="0.00"
-                className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground placeholder:text-muted focus:border-brand focus:outline-none disabled:opacity-50"
-              />
-            </div>
+              {/* Daily velocity cap counter — shown only when a cap is set */}
+              {velocity?.cap != null && (
+                <p
+                  id="withdraw-velocity"
+                  className={`mb-5 text-xs ${overCap ? 'text-destructive' : 'text-muted'}`}
+                >
+                  Daily limit: {formatAmount(velocity.usedToday)} /{' '}
+                  {formatAmount(velocity.cap)} {tokenSymbol(withdrawToken)} used
+                  {velocity.remaining != null && (
+                    <>
+                      {' '}
+                      — <span className="text-foreground">{formatAmount(velocity.remaining)}</span> remaining today
+                    </>
+                  )}
+                </p>
+              )}
 
-            <div className="flex gap-3">
-              <button
-                type="button"
-                onClick={() => setWithdrawOpen(false)}
-                disabled={withdrawLoading}
-                className="flex-1 rounded-lg border border-secondary px-4 py-2.5 text-sm font-medium text-muted transition-colors hover:text-foreground disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleWithdraw}
-                disabled={withdrawLoading || !withdrawAmount}
-                className="flex-1 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-primary/90 disabled:opacity-50"
-              >
-                {withdrawLoading ? 'Withdrawing…' : 'Confirm Withdraw'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+              {overCap && (
+                <p className="mb-4 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  Amount exceeds your remaining daily limit. Try a smaller amount
+                  or wait for the 24-hour rolling window to refresh.
+                </p>
+              )}
+
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => setWithdrawOpen(false)}
+                  disabled={withdrawLoading}
+                  className="flex-1 rounded-lg border border-secondary px-4 py-2.5 text-sm font-medium text-muted transition-colors hover:text-foreground disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleWithdraw}
+                  disabled={withdrawLoading || !withdrawAmount || overCap}
+                  className="flex-1 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-primary/90 disabled:opacity-50"
+                >
+                  {withdrawLoading ? 'Withdrawing…' : 'Confirm Withdraw'}
+                </button>
+              </div>
+            </>
+          );
+        })()}
+      </Modal>
     </div>
   );
 }

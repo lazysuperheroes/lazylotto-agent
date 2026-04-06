@@ -12,6 +12,7 @@ import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
 import { getClient } from '../../_lib/hedera';
+import { getAgentContext } from '../../_lib/mcp';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { getOperatorAccountId } from '~/hedera/wallet';
 import { withChecksum } from '~/utils/checksum';
@@ -73,6 +74,24 @@ export async function GET(request: Request) {
     // Agent wallet address for deposits
     const agentWallet = withChecksum(getOperatorAccountId(getClient()));
 
+    // Withdrawal velocity counters per token. Surfaces "remaining today"
+    // in the Withdraw modal so users don't get a raw backend error at
+    // submit time when they'd exceed the daily cap.
+    // Skip on any failure — counters are informational, not load-bearing.
+    const velocity: Record<string, { cap: number | null; usedToday: number; remaining: number | null }> = {};
+    try {
+      const { multiUser } = await getAgentContext();
+      // Query the tokens the user actually holds so we don't waste
+      // Redis round-trips on empty balances.
+      const tokensToQuery = Object.keys(user.balances.tokens);
+      if (!tokensToQuery.includes('hbar')) tokensToQuery.push('hbar');
+      for (const token of tokensToQuery) {
+        velocity[token] = await multiUser.getWithdrawalVelocityState(user.userId, token);
+      }
+    } catch {
+      /* informational only — leave velocity empty */
+    }
+
     return NextResponse.json(
       {
         userId: user.userId,
@@ -87,6 +106,7 @@ export async function GET(request: Request) {
         active: user.active,
         registeredAt: user.registeredAt,
         lastPlayedAt: user.lastPlayedAt,
+        velocity,
       },
       { headers: CORS_HEADERS },
     );

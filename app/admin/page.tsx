@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useToast } from '../components/Toast';
+import { Modal } from '../components/Modal';
 
 // ---------------------------------------------------------------------------
 // Types -- shaped to match actual API responses
@@ -234,6 +235,8 @@ export default function AdminPage() {
   }
   const [killSwitch, setKillSwitch] = useState<KillSwitchState | null>(null);
   const [killSwitchLoading, setKillSwitchLoading] = useState(false);
+  const [killSwitchModalOpen, setKillSwitchModalOpen] = useState(false);
+  const [killSwitchReason, setKillSwitchReason] = useState('');
 
   const [sortColumn, setSortColumn] = useState<string>('hederaAccountId');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
@@ -546,23 +549,26 @@ export default function AdminPage() {
   }, [withdrawFeesAmount, withdrawFeesTo, withdrawFeesToken, authFetch, toast]);
 
   // --- Kill switch ---
-  const handleEnableKillSwitch = useCallback(async () => {
-    // Browser prompt is fine here — this is an admin-only emergency flow and
-    // the two-click confirm (prompt + then it takes effect) beats a bespoke
-    // modal for a tool that should ship fast and be rarely used.
-    // eslint-disable-next-line no-alert
-    const reason = window.prompt(
-      'Enable kill switch?\n\nThis will immediately block new plays and registrations. ' +
-        'Withdrawals and reads will stay working.\n\nReason (shown to users):',
-    );
-    if (!reason || !reason.trim()) return;
+  // Opens the reason-prompt modal. Submission happens in submitEnableKillSwitch
+  // below so the UX matches the rest of the app (branded modal, focus trap,
+  // Escape to cancel) rather than the unstyled, untrappable window.prompt.
+  const handleEnableKillSwitch = useCallback(() => {
+    setKillSwitchReason('');
+    setKillSwitchModalOpen(true);
+  }, []);
 
+  const submitEnableKillSwitch = useCallback(async () => {
+    const reason = killSwitchReason.trim();
+    if (!reason) {
+      toast('Reason is required', { variant: 'error' });
+      return;
+    }
     setKillSwitchLoading(true);
     try {
       const res = await authFetch('/api/admin/killswitch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: reason.trim() }),
+        body: JSON.stringify({ reason }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -572,13 +578,15 @@ export default function AdminPage() {
       }
       setKillSwitch(body as KillSwitchState);
       toast('Kill switch ENABLED — new plays and registrations blocked');
+      setKillSwitchModalOpen(false);
+      setKillSwitchReason('');
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       toast(`Kill switch enable failed: ${message}`, { variant: 'error' });
     } finally {
       setKillSwitchLoading(false);
     }
-  }, [authFetch, toast]);
+  }, [authFetch, killSwitchReason, toast]);
 
   const handleDisableKillSwitch = useCallback(async () => {
     setKillSwitchLoading(true);
@@ -649,10 +657,28 @@ export default function AdminPage() {
     <div className="w-full px-4 py-8 sm:px-6 lg:px-8">
       <div className="mx-auto max-w-7xl">
         {/* ---- Top Bar ---- */}
-        <header className="mb-8">
+        <header className="mb-8 flex items-center gap-3">
           <h1 className="font-heading text-2xl text-foreground">
             Agent Administration
           </h1>
+          {/* Persistent network badge — matches dashboard framing */}
+          {(() => {
+            const network =
+              (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_HEDERA_NETWORK) ||
+              'testnet';
+            return (
+              <span
+                className={`rounded px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${
+                  network === 'mainnet'
+                    ? 'bg-brand/15 text-brand'
+                    : 'bg-secondary text-muted'
+                }`}
+                title={`Hedera ${network}`}
+              >
+                {network}
+              </span>
+            );
+          })()}
         </header>
 
         {/* ---- Kill Switch ---- */}
@@ -1141,93 +1167,127 @@ export default function AdminPage() {
       </div>
 
       {/* ── Withdraw Fees modal ─────────────────────────────── */}
-      {withdrawFeesOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
-          onClick={() => !withdrawFeesLoading && setWithdrawFeesOpen(false)}
-        >
-          <div
-            className="w-full max-w-md rounded-xl border border-secondary bg-background p-6 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
+      <Modal
+        open={withdrawFeesOpen}
+        onClose={() => setWithdrawFeesOpen(false)}
+        locked={withdrawFeesLoading}
+        title="Withdraw Operator Fees"
+        description="Sends accumulated rake from the agent wallet to the operator withdrawal address. If OPERATOR_WITHDRAW_ADDRESS is set in the environment, it overrides the recipient field below."
+      >
+        <div className="mb-4">
+          <label htmlFor="wf-token" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+            Token
+          </label>
+          <select
+            id="wf-token"
+            value={withdrawFeesToken}
+            onChange={(e) => setWithdrawFeesToken(e.target.value as 'HBAR' | 'LAZY')}
+            disabled={withdrawFeesLoading}
+            className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-brand focus:outline-none disabled:opacity-50"
           >
-            <h3 className="mb-2 font-heading text-lg text-foreground">
-              Withdraw Operator Fees
-            </h3>
-            <p className="mb-5 text-xs text-muted">
-              Sends accumulated rake from the agent wallet to the operator
-              withdrawal address. If <code className="font-mono">OPERATOR_WITHDRAW_ADDRESS</code>{' '}
-              is set in the environment, it overrides the recipient field below.
-            </p>
-
-            <div className="mb-4">
-              <label htmlFor="wf-token" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
-                Token
-              </label>
-              <select
-                id="wf-token"
-                value={withdrawFeesToken}
-                onChange={(e) => setWithdrawFeesToken(e.target.value as 'HBAR' | 'LAZY')}
-                disabled={withdrawFeesLoading}
-                className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-brand focus:outline-none disabled:opacity-50"
-              >
-                <option value="HBAR">HBAR</option>
-                <option value="LAZY">LAZY</option>
-              </select>
-            </div>
-
-            <div className="mb-4">
-              <label htmlFor="wf-amount" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
-                Amount
-              </label>
-              <input
-                id="wf-amount"
-                type="number"
-                min="0"
-                step="any"
-                value={withdrawFeesAmount}
-                onChange={(e) => setWithdrawFeesAmount(e.target.value)}
-                disabled={withdrawFeesLoading}
-                placeholder="0.00"
-                className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground placeholder:text-muted focus:border-brand focus:outline-none disabled:opacity-50"
-              />
-            </div>
-
-            <div className="mb-5">
-              <label htmlFor="wf-to" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
-                Recipient (optional — env var overrides)
-              </label>
-              <input
-                id="wf-to"
-                type="text"
-                value={withdrawFeesTo}
-                onChange={(e) => setWithdrawFeesTo(e.target.value)}
-                disabled={withdrawFeesLoading}
-                placeholder="0.0.XXXXXX"
-                className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground placeholder:text-muted focus:border-brand focus:outline-none disabled:opacity-50"
-              />
-            </div>
-
-            <div className="flex gap-3">
-              <button
-                type="button"
-                onClick={() => setWithdrawFeesOpen(false)}
-                disabled={withdrawFeesLoading}
-                className="flex-1 rounded-lg border border-secondary px-4 py-2.5 text-sm font-medium text-muted transition-colors hover:text-foreground disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={submitWithdrawFees}
-                disabled={withdrawFeesLoading || !withdrawFeesAmount}
-                className="flex-1 rounded-lg bg-brand px-4 py-2.5 text-sm font-semibold text-background transition-opacity hover:opacity-90 disabled:opacity-50"
-              >
-                {withdrawFeesLoading ? 'Withdrawing…' : 'Confirm Withdraw'}
-              </button>
-            </div>
-          </div>
+            <option value="HBAR">HBAR</option>
+            <option value="LAZY">LAZY</option>
+          </select>
         </div>
-      )}
+
+        <div className="mb-4">
+          <label htmlFor="wf-amount" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+            Amount
+          </label>
+          <input
+            id="wf-amount"
+            type="number"
+            min="0"
+            step="any"
+            value={withdrawFeesAmount}
+            onChange={(e) => setWithdrawFeesAmount(e.target.value)}
+            disabled={withdrawFeesLoading}
+            placeholder="0.00"
+            className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground placeholder:text-muted focus:border-brand focus:outline-none disabled:opacity-50"
+          />
+        </div>
+
+        <div className="mb-5">
+          <label htmlFor="wf-to" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+            Recipient (optional — env var overrides)
+          </label>
+          <input
+            id="wf-to"
+            type="text"
+            value={withdrawFeesTo}
+            onChange={(e) => setWithdrawFeesTo(e.target.value)}
+            disabled={withdrawFeesLoading}
+            placeholder="0.0.XXXXXX"
+            className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground placeholder:text-muted focus:border-brand focus:outline-none disabled:opacity-50"
+          />
+        </div>
+
+        <div className="flex gap-3">
+          <button
+            type="button"
+            onClick={() => setWithdrawFeesOpen(false)}
+            disabled={withdrawFeesLoading}
+            className="flex-1 rounded-lg border border-secondary px-4 py-2.5 text-sm font-medium text-muted transition-colors hover:text-foreground disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submitWithdrawFees}
+            disabled={withdrawFeesLoading || !withdrawFeesAmount}
+            className="flex-1 rounded-lg bg-brand px-4 py-2.5 text-sm font-semibold text-background transition-opacity hover:opacity-90 disabled:opacity-50"
+          >
+            {withdrawFeesLoading ? 'Withdrawing…' : 'Confirm Withdraw'}
+          </button>
+        </div>
+      </Modal>
+
+      {/* ── Kill Switch reason modal ────────────────────────── */}
+      <Modal
+        open={killSwitchModalOpen}
+        onClose={() => setKillSwitchModalOpen(false)}
+        locked={killSwitchLoading}
+        title="Engage Kill Switch"
+        description="This will immediately block new plays and new registrations. Withdrawals, deregistration, and reads will stay working. Users will see the reason below on the dashboard."
+      >
+        <div className="mb-5">
+          <label htmlFor="ks-reason" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+            Reason (shown to users)
+          </label>
+          <textarea
+            id="ks-reason"
+            value={killSwitchReason}
+            onChange={(e) => setKillSwitchReason(e.target.value.slice(0, 200))}
+            disabled={killSwitchLoading}
+            rows={3}
+            maxLength={200}
+            placeholder="e.g. Emergency maintenance — investigating a dApp contract issue"
+            className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground placeholder:text-muted focus:border-brand focus:outline-none disabled:opacity-50"
+          />
+          <p className="mt-1 text-right text-[10px] text-muted">
+            {killSwitchReason.length} / 200
+          </p>
+        </div>
+
+        <div className="flex gap-3">
+          <button
+            type="button"
+            onClick={() => setKillSwitchModalOpen(false)}
+            disabled={killSwitchLoading}
+            className="flex-1 rounded-lg border border-secondary px-4 py-2.5 text-sm font-medium text-muted transition-colors hover:text-foreground disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submitEnableKillSwitch}
+            disabled={killSwitchLoading || !killSwitchReason.trim()}
+            className="flex-1 rounded-lg bg-destructive px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+          >
+            {killSwitchLoading ? 'Engaging…' : 'Engage Kill Switch'}
+          </button>
+        </div>
+      </Modal>
     </div>
   );
 }
