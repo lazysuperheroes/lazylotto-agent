@@ -1,6 +1,7 @@
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Strategy } from '../config/strategy.js';
+import type { PrizeDetail } from '../agent/ReportGenerator.js';
 
 // ── User ──────────────────────────────────────────────────────
 
@@ -131,7 +132,7 @@ export interface PlaySessionResult {
     amountSpent: number;
     rolled: boolean;
     wins: number;
-    prizeDetails: { fungibleAmount?: number; fungibleToken?: string; nftCount?: number }[];
+    prizeDetails: PrizeDetail[];
   }[];
   totalSpent: number;
   totalWins: number;

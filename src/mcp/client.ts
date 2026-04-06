@@ -108,10 +108,32 @@ export interface PoolDetail extends PoolSummary {
   feeTokenId: string;
 }
 
+/**
+ * A specific NFT (or batch of serials from the same collection) won in a pool.
+ * Shape matches lazylotto_get_user_state.pendingPrizes[].nfts as documented in
+ * lazy-dapp-v3/docs/features/MCP_NFT_PRIZE_ENRICHMENT.md
+ */
+export interface NftPrizeRef {
+  /** On-chain symbol from mirror node (e.g. "HSuite", "LSH Comic #1"). */
+  token: string;
+  /** Hedera token ID ("0.0.X") — the canonical lookup key. */
+  hederaId: string;
+  /** Serial numbers the user has won for this token. */
+  serials: number[];
+}
+
+export interface PendingPrize {
+  poolId: number;
+  asNFT: boolean;
+  fungiblePrize: { token: string; amount: number };
+  /** NFTs awarded in this prize. Empty array if pure fungible. */
+  nfts: NftPrizeRef[];
+}
+
 export interface UserState {
   entriesByPool: Record<number, number>;
   pendingPrizesCount: number;
-  pendingPrizes: unknown[];
+  pendingPrizes: PendingPrize[];
   boost: number | { rawBps: number; percent: number };
 }
 
@@ -221,10 +243,29 @@ function mapUserState(raw: any): UserState {
     entriesByPool = raw.entriesByPool;
   }
 
+  // Map pendingPrizes with the new NFT enrichment shape.
+  // Backward compat: older dApp builds returned nftPrizes as a count;
+  // new builds return nfts: NftPrizeRef[]. We prefer nfts when present.
+  const pendingPrizes: PendingPrize[] = (raw.pendingPrizes ?? []).map((p: any) => ({
+    poolId: p.poolId ?? 0,
+    asNFT: p.asNFT ?? false,
+    fungiblePrize: {
+      token: p.fungiblePrize?.token ?? 'HBAR',
+      amount: Number(p.fungiblePrize?.amount ?? 0),
+    },
+    nfts: Array.isArray(p.nfts)
+      ? p.nfts.map((n: any) => ({
+          token: String(n.token ?? ''),
+          hederaId: String(n.hederaId ?? ''),
+          serials: Array.isArray(n.serials) ? n.serials.map((s: unknown) => Number(s)) : [],
+        }))
+      : [],
+  }));
+
   return {
     entriesByPool,
     pendingPrizesCount: raw.pendingPrizesCount ?? 0,
-    pendingPrizes: raw.pendingPrizes ?? [],
+    pendingPrizes,
     boost: raw.boost ?? 0,
   };
 }

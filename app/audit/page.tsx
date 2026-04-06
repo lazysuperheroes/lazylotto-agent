@@ -11,10 +11,25 @@ interface BurnEntry {
   memo: string;
 }
 
+interface EnrichedPrizeNft {
+  hederaId: string;
+  serial: number;
+  nftName: string;
+  collection: string;
+  niceName: string;
+  showNiceName: boolean;
+  verificationLevel: 'lazysuperheroes' | 'complete' | 'simple' | 'unverified';
+  image: string;
+  source: 'directus' | 'mirror' | 'fallback';
+  tokenUrl: string;
+  serialUrl: string;
+}
+
 interface PoolWinResult {
   poolName: string;
   wins: number;
   prizeDetails: unknown[];
+  enrichedNfts?: EnrichedPrizeNft[];
 }
 
 interface AuditEntry {
@@ -53,6 +68,103 @@ interface AuditResponse {
   // Admin-only fields
   filteredBy?: string | null;
   users?: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Verification badge — mirrors lazy-dapp-v3's VerificationBadge.tsx tiers
+// ---------------------------------------------------------------------------
+
+const VERIFICATION_BADGE: Record<
+  EnrichedPrizeNft['verificationLevel'],
+  { label: string; className: string; tooltip: string; icon: string }
+> = {
+  lazysuperheroes: {
+    label: 'LSH Verified',
+    className: 'bg-brand/20 text-brand border-brand/40',
+    tooltip: 'Verified token, part of the Lazy Superheroes ecosystem',
+    icon: '🛡',
+  },
+  complete: {
+    label: 'Verified',
+    className: 'bg-success/20 text-success border-success/40',
+    tooltip: 'Known and fully verified token',
+    icon: '🛡',
+  },
+  simple: {
+    label: 'Known',
+    className: 'bg-blue-500/20 text-blue-300 border-blue-500/40',
+    tooltip: 'Known token in the Hedera ecosystem but has not been verified',
+    icon: 'ℹ',
+  },
+  unverified: {
+    label: 'Unverified',
+    className: 'bg-muted/20 text-muted border-muted/40',
+    tooltip: 'This token has not been verified',
+    icon: '?',
+  },
+};
+
+function PrizeNftBadge({ nft }: { nft: EnrichedPrizeNft }) {
+  const badge = VERIFICATION_BADGE[nft.verificationLevel];
+  const displayCollection = nft.showNiceName
+    ? nft.niceName
+    : `${nft.hederaId.slice(0, 6)}…${nft.hederaId.slice(-4)}`;
+
+  return (
+    <div className="flex items-center gap-2 rounded border border-secondary bg-[#111113] p-1.5 pr-2">
+      <a
+        href={nft.serialUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="relative block h-10 w-10 shrink-0 overflow-hidden rounded bg-secondary"
+        title={`${nft.nftName} — View on HashScan`}
+      >
+        {nft.image ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={nft.image}
+            alt={nft.nftName}
+            className="h-full w-full object-cover"
+            onError={(e) => {
+              (e.target as HTMLImageElement).style.display = 'none';
+            }}
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-sm text-muted">
+            ?
+          </div>
+        )}
+      </a>
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <a
+          href={nft.serialUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="truncate text-xs font-semibold text-foreground hover:text-brand"
+          title={nft.nftName}
+        >
+          {nft.nftName}
+        </a>
+        <span className="flex items-center gap-1">
+          <a
+            href={nft.tokenUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="truncate text-[10px] text-muted hover:text-foreground"
+            title={nft.showNiceName ? `${nft.niceName} (${nft.hederaId})` : nft.hederaId}
+          >
+            {displayCollection}
+          </a>
+          <span
+            className={`inline-flex items-center gap-0.5 rounded border px-1 py-[1px] text-[9px] font-semibold ${badge.className}`}
+            title={badge.tooltip}
+          >
+            <span>{badge.icon}</span>
+          </span>
+        </span>
+      </div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -532,20 +644,40 @@ export default function AuditPage() {
                           {entry.totalWins} win{entry.totalWins > 1 ? 's' : ''}!
                         </p>
                         {entry.poolResults && entry.poolResults.length > 0 && (
-                          <div className="mt-1 space-y-0.5">
-                            {entry.poolResults.map((pr, i) => (
-                              <p key={i} className="text-xs text-success/80">
-                                {pr.poolName}: {pr.wins} win{pr.wins > 1 ? 's' : ''}
-                                {pr.prizeDetails.length > 0 && (
-                                  <span className="ml-1 text-muted">
-                                    ({pr.prizeDetails.map((d: any) =>
-                                      (d as any).nftCount ? `${(d as any).nftCount} NFT` :
-                                      (d as any).fungibleAmount ? `${(d as any).fungibleAmount} ${(d as any).fungibleToken ?? ''}` : ''
-                                    ).filter(Boolean).join(', ')})
-                                  </span>
-                                )}
-                              </p>
-                            ))}
+                          <div className="mt-1 space-y-2">
+                            {entry.poolResults.map((pr, i) => {
+                              // Fungible prize summary — inline text
+                              const fungibleParts = (pr.prizeDetails as Array<Record<string, unknown>>)
+                                .map((d) =>
+                                  d.fungibleAmount
+                                    ? `${d.fungibleAmount} ${d.fungibleToken ?? ''}`
+                                    : '',
+                                )
+                                .filter(Boolean);
+                              return (
+                                <div key={i}>
+                                  <p className="text-xs text-success/80">
+                                    {pr.poolName}: {pr.wins} win{pr.wins > 1 ? 's' : ''}
+                                    {fungibleParts.length > 0 && (
+                                      <span className="ml-1 text-muted">
+                                        ({fungibleParts.join(', ')})
+                                      </span>
+                                    )}
+                                  </p>
+                                  {/* Enriched NFT cards */}
+                                  {pr.enrichedNfts && pr.enrichedNfts.length > 0 && (
+                                    <div className="mt-1 flex flex-wrap gap-2">
+                                      {pr.enrichedNfts.map((nft) => (
+                                        <PrizeNftBadge
+                                          key={`${nft.hederaId}-${nft.serial}`}
+                                          nft={nft}
+                                        />
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
                           </div>
                         )}
                       </div>

@@ -9,6 +9,9 @@ import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
 import { checkDeposits } from '../../_lib/deposits';
+import { enrichPrizes, type EnrichedPrizeNft } from '~/enrichment/prizes';
+import type { PlaySessionResult } from '~/custodial/types';
+import type { PrizeNft } from '~/agent/ReportGenerator';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -53,8 +56,47 @@ export async function GET(request: Request) {
     const sessions = store.getPlaySessionsForUser(user.userId);
     const recent = sessions.slice(-20).reverse();
 
+    // Enrich NFT prizes across all sessions in a single batch pass
+    const allNftRefs: PrizeNft[] = [];
+    for (const session of recent) {
+      for (const pr of session.poolResults) {
+        for (const pd of pr.prizeDetails) {
+          if (pd.nfts) allNftRefs.push(...pd.nfts);
+        }
+      }
+    }
+
+    // Deduplicate by hederaId!serial — enrichPrizes does this internally too
+    // but we want to index the results for re-attachment
+    const enrichedByKey = new Map<string, EnrichedPrizeNft>();
+    if (allNftRefs.length > 0) {
+      try {
+        const enriched = await enrichPrizes(allNftRefs);
+        for (const e of enriched) {
+          enrichedByKey.set(`${e.hederaId}!${e.serial}`, e);
+        }
+      } catch (err) {
+        // Enrichment failure should not break history — degrade to raw capture
+        console.warn('[history] prize enrichment failed:', err);
+      }
+    }
+
+    // Re-attach enriched data to each session's prizeDetails
+    const enrichedSessions = recent.map((session: PlaySessionResult) => ({
+      ...session,
+      poolResults: session.poolResults.map((pr) => ({
+        ...pr,
+        prizeDetails: pr.prizeDetails.map((pd) => ({
+          ...pd,
+          enrichedNfts: pd.nfts
+            ?.map((n) => enrichedByKey.get(`${n.hederaId}!${n.serial}`))
+            .filter((e): e is EnrichedPrizeNft => Boolean(e)),
+        })),
+      })),
+    }));
+
     return NextResponse.json(
-      { userId: user.userId, sessions: recent },
+      { userId: user.userId, sessions: enrichedSessions },
       { headers: CORS_HEADERS },
     );
   } catch (err) {

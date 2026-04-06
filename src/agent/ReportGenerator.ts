@@ -1,7 +1,23 @@
+/**
+ * A specific NFT won as part of a prize (token + serial pair).
+ * hederaId + serial uniquely identifies the NFT on-chain.
+ */
+export interface PrizeNft {
+  /** On-chain symbol (e.g. "HSuite", "LSH Comic #1"). */
+  token: string;
+  /** Hedera token ID ("0.0.X") — canonical lookup key. */
+  hederaId: string;
+  /** Serial number. */
+  serial: number;
+}
+
 export interface PrizeDetail {
   fungibleAmount?: number;
   fungibleToken?: string;
+  /** Total NFT count in this prize (includes all serials across collections). */
   nftCount?: number;
+  /** Specific NFTs won — enriched from the dApp MCP's pendingPrizes.nfts. */
+  nfts?: PrizeNft[];
 }
 
 export interface PoolResult {

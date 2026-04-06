@@ -331,14 +331,46 @@ describe('mapUserState', () => {
     assert.deepEqual(result.pendingPrizes, []);
   });
 
-  it('preserves explicit pending prizes data', () => {
-    const prizes = [{ prizeId: 1, value: 100 }];
+  it('normalizes pending prizes to the PendingPrize shape', () => {
+    // Raw dApp MCP response shape
+    const result = mapUserState({
+      pendingPrizesCount: 2,
+      pendingPrizes: [
+        {
+          poolId: 0,
+          asNFT: false,
+          fungiblePrize: { token: 'HBAR', amount: 50 },
+          nfts: [{ token: 'WF', hederaId: '0.0.8221452', serials: [15] }],
+        },
+        {
+          poolId: 1,
+          asNFT: false,
+          fungiblePrize: { token: 'LAZY', amount: 100 },
+          nfts: [],
+        },
+      ],
+    });
+    assert.equal(result.pendingPrizesCount, 2);
+    assert.equal(result.pendingPrizes.length, 2);
+    assert.equal(result.pendingPrizes[0]!.poolId, 0);
+    assert.equal(result.pendingPrizes[0]!.fungiblePrize.amount, 50);
+    assert.equal(result.pendingPrizes[0]!.nfts.length, 1);
+    assert.equal(result.pendingPrizes[0]!.nfts[0]!.token, 'WF');
+    assert.equal(result.pendingPrizes[0]!.nfts[0]!.hederaId, '0.0.8221452');
+    assert.deepEqual(result.pendingPrizes[0]!.nfts[0]!.serials, [15]);
+    assert.equal(result.pendingPrizes[1]!.nfts.length, 0);
+  });
+
+  it('tolerates missing fields on raw pending prizes', () => {
     const result = mapUserState({
       pendingPrizesCount: 1,
-      pendingPrizes: prizes,
+      pendingPrizes: [{ poolId: 2 }], // missing fungiblePrize, nfts
     });
-    assert.equal(result.pendingPrizesCount, 1);
-    assert.deepEqual(result.pendingPrizes, prizes);
+    assert.equal(result.pendingPrizes.length, 1);
+    assert.equal(result.pendingPrizes[0]!.poolId, 2);
+    assert.equal(result.pendingPrizes[0]!.fungiblePrize.token, 'HBAR');
+    assert.equal(result.pendingPrizes[0]!.fungiblePrize.amount, 0);
+    assert.deepEqual(result.pendingPrizes[0]!.nfts, []);
   });
 
   it('defaults boost to 0', () => {

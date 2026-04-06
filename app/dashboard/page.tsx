@@ -34,6 +34,29 @@ interface StatusResponse {
   agentWallet?: string;
 }
 
+interface EnrichedPrizeNft {
+  hederaId: string;
+  serial: number;
+  nftName: string;
+  collection: string;
+  niceName: string;
+  showNiceName: boolean;
+  verificationLevel: 'lazysuperheroes' | 'complete' | 'simple' | 'unverified';
+  image: string;
+  source: 'directus' | 'mirror' | 'fallback';
+  tokenUrl: string;
+  serialUrl: string;
+}
+
+interface PrizeDetail {
+  fungibleAmount?: number;
+  fungibleToken?: string;
+  nftCount?: number;
+  nfts?: { token: string; hederaId: string; serial: number }[];
+  /** Populated server-side after enrichment from Directus + mirror node. */
+  enrichedNfts?: EnrichedPrizeNft[];
+}
+
 interface PoolResult {
   poolId: number;
   poolName: string;
@@ -41,7 +64,7 @@ interface PoolResult {
   amountSpent: number;
   rolled: boolean;
   wins: number;
-  prizeDetails: { fungibleAmount?: number; fungibleToken?: string; nftCount?: number }[];
+  prizeDetails: PrizeDetail[];
 }
 
 interface PlaySession {
@@ -68,6 +91,106 @@ interface PlaySession {
 interface HistoryResponse {
   userId: string;
   sessions: PlaySession[];
+}
+
+// ---------------------------------------------------------------------------
+// Verification badge — mirrors lazy-dapp-v3's VerificationBadge.tsx tiers
+// ---------------------------------------------------------------------------
+
+const VERIFICATION_BADGE: Record<
+  EnrichedPrizeNft['verificationLevel'],
+  { label: string; className: string; tooltip: string; icon: string }
+> = {
+  lazysuperheroes: {
+    label: 'LSH Verified',
+    className: 'bg-brand/20 text-brand border-brand/40',
+    tooltip: 'Verified token, part of the Lazy Superheroes ecosystem',
+    icon: '🛡',
+  },
+  complete: {
+    label: 'Verified',
+    className: 'bg-success/20 text-success border-success/40',
+    tooltip: 'Known and fully verified token',
+    icon: '🛡',
+  },
+  simple: {
+    label: 'Known',
+    className: 'bg-blue-500/20 text-blue-300 border-blue-500/40',
+    tooltip: 'Known token in the Hedera ecosystem but has not been verified',
+    icon: 'ℹ',
+  },
+  unverified: {
+    label: 'Unverified',
+    className: 'bg-muted/20 text-muted border-muted/40',
+    tooltip: 'This token has not been verified',
+    icon: '?',
+  },
+};
+
+function PrizeNftCard({ nft }: { nft: EnrichedPrizeNft }) {
+  const badge = VERIFICATION_BADGE[nft.verificationLevel];
+  // Nice-name rule: only show friendly name for verified tiers, else raw hederaId
+  const displayCollection = nft.showNiceName
+    ? nft.niceName
+    : `${nft.hederaId.slice(0, 6)}…${nft.hederaId.slice(-4)}`;
+
+  return (
+    <div className="flex items-center gap-3 rounded-lg border border-secondary bg-[#111113] p-2 pr-3">
+      {/* Image (or placeholder) */}
+      <a
+        href={nft.serialUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="relative block h-14 w-14 shrink-0 overflow-hidden rounded bg-secondary"
+        title={`View #${nft.serial} on HashScan`}
+      >
+        {nft.image ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={nft.image}
+            alt={nft.nftName}
+            className="h-full w-full object-cover"
+            onError={(e) => {
+              (e.target as HTMLImageElement).style.display = 'none';
+            }}
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-lg text-muted">
+            ?
+          </div>
+        )}
+      </a>
+
+      {/* Details */}
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <a
+          href={nft.serialUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="truncate text-sm font-semibold text-foreground hover:text-brand"
+          title={nft.nftName}
+        >
+          {nft.nftName}
+        </a>
+        <a
+          href={nft.tokenUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="truncate text-[11px] text-muted hover:text-foreground"
+          title={nft.showNiceName ? `${nft.niceName} (${nft.hederaId})` : nft.hederaId}
+        >
+          {displayCollection}
+        </a>
+        <span
+          className={`mt-0.5 inline-flex w-fit items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-semibold ${badge.className}`}
+          title={badge.tooltip}
+        >
+          <span>{badge.icon}</span>
+          <span>{badge.label}</span>
+        </span>
+      </div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -681,26 +804,43 @@ export default function DashboardPage() {
                           s.poolResults.some(
                             (pr) => pr.prizeDetails.length > 0,
                           ) && (
-                            <div className="mt-2 rounded bg-brand/10 px-3 py-2 text-xs text-brand">
-                              {s.poolResults
-                                .flatMap((pr) => pr.prizeDetails)
-                                .map((prize, i) => {
-                                  const parts: string[] = [];
-                                  if (prize.fungibleAmount)
-                                    parts.push(
-                                      `${prize.fungibleAmount} ${prize.fungibleToken ?? '?'}`,
-                                    );
-                                  if (prize.nftCount)
-                                    parts.push(
-                                      `${prize.nftCount} NFT${prize.nftCount > 1 ? 's' : ''}`,
-                                    );
-                                  return parts.length > 0 ? (
-                                    <span key={i}>
-                                      {i > 0 ? ' + ' : ''}
-                                      {parts.join(' + ')}
-                                    </span>
-                                  ) : null;
-                                })}
+                            <div className="mt-2 space-y-2">
+                              {/* Fungible prizes — compact inline summary */}
+                              {(() => {
+                                const fungibleParts: string[] = [];
+                                for (const pr of s.poolResults) {
+                                  for (const prize of pr.prizeDetails) {
+                                    if (prize.fungibleAmount) {
+                                      fungibleParts.push(
+                                        `${prize.fungibleAmount} ${prize.fungibleToken ?? '?'}`,
+                                      );
+                                    }
+                                  }
+                                }
+                                return fungibleParts.length > 0 ? (
+                                  <div className="rounded bg-brand/10 px-3 py-2 text-xs text-brand">
+                                    {fungibleParts.join(' + ')}
+                                  </div>
+                                ) : null;
+                              })()}
+
+                              {/* NFT prizes — enriched cards */}
+                              {(() => {
+                                const enrichedNfts = s.poolResults
+                                  .flatMap((pr) => pr.prizeDetails)
+                                  .flatMap((pd) => pd.enrichedNfts ?? []);
+                                if (enrichedNfts.length === 0) return null;
+                                return (
+                                  <div className="flex flex-wrap gap-2">
+                                    {enrichedNfts.map((nft) => (
+                                      <PrizeNftCard
+                                        key={`${nft.hederaId}-${nft.serial}`}
+                                        nft={nft}
+                                      />
+                                    ))}
+                                  </div>
+                                );
+                              })()}
                             </div>
                           )}
                       </div>

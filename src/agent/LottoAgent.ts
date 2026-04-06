@@ -613,21 +613,36 @@ export class LottoAgent {
         result.wins = newWins;
 
         if (newWins > 0) {
-          // Capture prize details from the offset into pendingPrizes
+          // Capture prize details from the offset into pendingPrizes.
+          // Since the dApp MCP update, pendingPrizes[].nfts contains the full
+          // { token, hederaId, serials[] } — capture it for write-history.
           const newPrizes = stateAfter.pendingPrizes.slice(prizeCountBefore);
           console.log(`    Won ${newWins} prize(s)!`);
           for (const prize of newPrizes) {
-            const p = prize as Record<string, unknown>;
-            const fungible = p.fungiblePrize as { token?: string; amount?: number } | undefined;
-            const nftCount = (p.nftPrizes as number) ?? 0;
+            const fungible = prize.fungiblePrize;
+            // Flatten nfts[].serials[] into a PrizeNft[] (one entry per serial)
+            const nfts = prize.nfts.flatMap((n) =>
+              n.serials.map((serial) => ({
+                token: n.token,
+                hederaId: n.hederaId,
+                serial,
+              })),
+            );
+            const nftCount = nfts.length;
+
             const parts: string[] = [];
             if (fungible?.amount) parts.push(`${fungible.amount} ${fungible.token ?? '?'}`);
-            if (nftCount > 0) parts.push(`${nftCount} NFT(s)`);
+            if (nftCount > 0) {
+              const summary = nfts.map((n) => `${n.token} #${n.serial}`).join(', ');
+              parts.push(`${nftCount} NFT(s) [${summary}]`);
+            }
             console.log(`      -> ${parts.join(' + ') || 'prize details unavailable'}`);
+
             result.prizeDetails.push({
               fungibleAmount: fungible?.amount,
               fungibleToken: fungible?.token,
               nftCount: nftCount > 0 ? nftCount : undefined,
+              nfts: nftCount > 0 ? nfts : undefined,
             });
           }
         } else {
