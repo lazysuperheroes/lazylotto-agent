@@ -179,6 +179,31 @@ export class AccountingService {
     });
   }
 
+  /**
+   * Record an operator control event on HCS-20 — used for kill switch
+   * toggles and similar incident markers. These are not balance-moving
+   * ops, they're audit anchors so the on-chain trail shows exactly when
+   * and why the operator paused or resumed service.
+   *
+   * Uses op="control" which is outside the HCS-20 spec but preserves the
+   * tick and protocol header so downstream readers can filter by topic
+   * and skip non-balance events cleanly.
+   */
+  async recordControlEvent(
+    event: 'killswitch_enabled' | 'killswitch_disabled',
+    details: { reason?: string; by: string },
+  ): Promise<void> {
+    await this.submitMessage({
+      p: 'hcs-20',
+      op: 'control',
+      tick: this.tick,
+      event,
+      reason: details.reason ?? null,
+      by: details.by,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   // ── Batched Operations ───────────────────────────────────
 
   /**

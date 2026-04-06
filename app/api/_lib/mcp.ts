@@ -27,11 +27,15 @@ import type { IStore } from '~/custodial/IStore';
 import type { Client } from '@hashgraph/sdk';
 
 // ── Cached singletons ───────────────────────────────────────────
+//
+// We cache the `Promise<AgentContext>`, not the resolved fields. Two
+// concurrent cold-start requests both hit `getAgentContext()` before
+// init finishes; sharing the in-flight promise makes them wait on one
+// init instead of racing and doing two parallel Hedera-client creations
+// and two DepositWatcher wire-ups. If init rejects, we clear the cache
+// so the next request retries cleanly rather than sticking the error.
 
-let agent: LottoAgent | null = null;
-let multiUser: MultiUserAgent | null = null;
-let cachedStore: IStore | null = null;
-let cachedClient: Client | null = null;
+let contextPromise: Promise<AgentContext> | null = null;
 
 const AGENT_VERSION = '0.1.13';
 
@@ -102,29 +106,41 @@ export interface AgentContext {
 
 /**
  * Get or initialize the cached agent context.
- * Heavy objects are created once per warm Lambda instance.
+ *
+ * We cache the in-flight Promise so concurrent cold-start callers all
+ * await the same init and don't race. On error, we clear the cache so
+ * the NEXT request gets a fresh attempt (otherwise one transient
+ * failure poisons the Lambda for its whole warm lifetime).
  */
 export async function getAgentContext(): Promise<AgentContext> {
-  if (agent && multiUser && cachedStore && cachedClient) {
-    return { agent, multiUser, store: cachedStore, client: cachedClient };
-  }
+  if (contextPromise) return contextPromise;
 
-  cachedStore = await getStore();
-  cachedClient = getClient();
+  contextPromise = (async (): Promise<AgentContext> => {
+    const store = await getStore();
+    const client = getClient();
 
-  const config = loadCustodialConfig();
-  multiUser = new MultiUserAgent(config);
-  // Inject the shared store and client — avoids double-instantiation
-  // where MultiUserAgent.initialize() would create a separate store instance.
-  await multiUser.initialize({ store: cachedStore, client: cachedClient });
-  // Note: do NOT call multiUser.start() — no background deposit watcher in serverless.
-  // Deposits are detected on-demand via multiUser.pollDepositsOnce().
+    const config = loadCustodialConfig();
+    const multiUser = new MultiUserAgent(config);
+    // Inject the shared store and client — avoids double-instantiation
+    // where MultiUserAgent.initialize() would create a separate store instance.
+    await multiUser.initialize({ store, client });
+    // Note: do NOT call multiUser.start() — no background deposit watcher in serverless.
+    // Deposits are detected on-demand via multiUser.pollDepositsOnce().
 
-  const strategyName = process.env.STRATEGY ?? 'balanced';
-  const strategy = loadStrategy(strategyName);
-  agent = new LottoAgent(strategy);
+    const strategyName = process.env.STRATEGY ?? 'balanced';
+    const strategy = loadStrategy(strategyName);
+    const agent = new LottoAgent(strategy);
 
-  return { agent, multiUser, store: cachedStore, client: cachedClient };
+    return { agent, multiUser, store, client };
+  })();
+
+  // If init fails, clear the cache so the next call retries cleanly.
+  // We still rethrow so this call's caller sees the error.
+  contextPromise.catch(() => {
+    contextPromise = null;
+  });
+
+  return contextPromise;
 }
 
 /**
@@ -132,7 +148,10 @@ export async function getAgentContext(): Promise<AgentContext> {
  * Called per request — McpServer is lightweight, the heavy stuff is cached.
  */
 export async function createMcpServer(): Promise<McpServer> {
-  const { agent: a, multiUser: mu, store, client } = await getAgentContext();
+  // `agent` is currently unused in the context's tool registration, but
+  // keep it in the destructure so any future single-user tool register
+  // sees a ready LottoAgent without a second init call.
+  const { multiUser: mu, store, client } = await getAgentContext();
 
   const server = new McpServer({
     name: 'lazylotto-agent',

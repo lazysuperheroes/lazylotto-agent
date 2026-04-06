@@ -127,6 +127,18 @@ export class MultiUserAgent {
   }
 
   /**
+   * Record an operator control event (e.g. kill switch toggle) on the
+   * HCS-20 audit trail. Delegates to AccountingService so the admin
+   * route doesn't need to reach into private fields.
+   */
+  async recordControlEvent(
+    event: 'killswitch_enabled' | 'killswitch_disabled',
+    details: { reason?: string; by: string },
+  ): Promise<void> {
+    await this.accounting.recordControlEvent(event, details);
+  }
+
+  /**
    * Start the agent: begin watching for deposits.
    */
   start(): void {
@@ -812,11 +824,11 @@ export class MultiUserAgent {
    * Per-token 24h rolling withdrawal volume cap.
    * Returns remaining allowance (positive) or the deficit (negative).
    *
-   * The key is namespaced under `KEY_PREFIX.rateLimit + 'withdrawal-vol:'`
-   * plus the token identifier so different tokens have independent budgets.
-   * The per-user lock held by processWithdrawal() serializes the
-   * get-then-set within a single process; multi-Lambda concurrency is
-   * bounded by the distributed user lock acquired at the route layer.
+   * The key is namespaced under `KEY_PREFIX.velocity + {tokenKey}:{userId}`
+   * so different tokens have independent budgets. The per-user lock held
+   * by processWithdrawal() serializes the get-then-set within a single
+   * process; multi-Lambda concurrency is bounded by the distributed user
+   * lock acquired at the route layer.
    */
   private async checkWithdrawalVelocity(
     userId: string,
@@ -827,7 +839,7 @@ export class MultiUserAgent {
     try {
       const { getRedis, KEY_PREFIX } = await import('../auth/redis.js');
       const redis = await getRedis();
-      const key = `${KEY_PREFIX.rateLimit}withdrawal-vol:${tokenKey}:${userId}`;
+      const key = `${KEY_PREFIX.velocity}${tokenKey}:${userId}`;
 
       // Read current cumulative volume in the rolling window
       const currentRaw = await redis.get<string>(key);
@@ -872,7 +884,7 @@ export class MultiUserAgent {
     try {
       const { getRedis, KEY_PREFIX } = await import('../auth/redis.js');
       const redis = await getRedis();
-      const key = `${KEY_PREFIX.rateLimit}withdrawal-vol:${normalized}:${userId}`;
+      const key = `${KEY_PREFIX.velocity}${normalized}:${userId}`;
       const currentRaw = await redis.get<string>(key);
       const usedToday = currentRaw ? Number(currentRaw) || 0 : 0;
       return { cap, usedToday, remaining: Math.max(0, cap - usedToday) };

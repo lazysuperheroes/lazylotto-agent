@@ -616,10 +616,11 @@ export function AuthFlow() {
             <button
               type="button"
               onClick={rerollCharacter}
+              aria-label="Change mascot"
               className="absolute -right-2 -top-2 flex h-6 w-6 items-center justify-center rounded-full bg-secondary text-xs transition-colors hover:bg-brand/20"
               title="Change mascot"
             >
-              🎲
+              <span aria-hidden="true">🎲</span>
             </button>
           </div>
           {line && (

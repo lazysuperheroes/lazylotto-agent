@@ -26,7 +26,7 @@ import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 import { logger } from '../lib/logger.js';
 import { acquireUserLock, releaseUserLock } from '../lib/locks.js';
 
-const REFUND_KEY_PREFIX = KEY_PREFIX.session.replace('session:', 'refunded:');
+const REFUND_KEY_PREFIX = KEY_PREFIX.refunded;
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -238,18 +238,25 @@ export async function processRefund(
         // Per-user distributed lock around the ledger adjustment —
         // prevents two concurrent refunds for the same user (different
         // txIds, both legitimate) from racing on entry.available and
-        // losing one of the deductions. Best-effort: if the lock is
-        // already held by another operation (play/withdraw/refund),
-        // we skip the adjustment with a warning rather than block. The
-        // on-chain refund has already succeeded at this point.
-        const lockToken = await acquireUserLock(user.userId, 30);
-        if (!lockToken) {
-          logger.warn('refund ledger adjustment skipped — user lock held', {
-            component: 'Refund',
-            userId: user.userId,
-            originalTx: transactionId,
-          });
-        } else {
+        // losing one of the deductions.
+        //
+        // If the user is mid-play/mid-withdraw and holds the lock, we
+        // retry with backoff for up to ~10 seconds. If we still can't
+        // acquire, the on-chain refund has already settled so we CANNOT
+        // silently drop the ledger debit (that creates phantom funds —
+        // the user would spend the refunded amount twice). Instead we
+        // persist a pending ledger adjustment that a drain sweep
+        // (called at the top of each reconcile, and on-demand by admin)
+        // will apply once the user lock is free.
+        let lockToken: string | null = null;
+        const backoffMs = [50, 100, 200, 500, 1000, 2000, 3000];
+        for (const delay of backoffMs) {
+          lockToken = await acquireUserLock(user.userId, 30);
+          if (lockToken) break;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+
+        if (lockToken) {
           try {
             options.store.updateBalance(user.userId, (b) => {
               const entry = b.tokens[tokenKey];
@@ -270,6 +277,48 @@ export async function processRefund(
             });
           } finally {
             await releaseUserLock(user.userId, lockToken);
+          }
+        } else {
+          // Lock contention never cleared — queue a pending adjustment
+          // so a later drain sweep applies it. This closes the phantom
+          // funds gap: refund amount cannot be silently dropped.
+          try {
+            const { queuePendingLedgerAdjustment } = await import(
+              '../custodial/pendingLedger.js'
+            );
+            await queuePendingLedgerAdjustment({
+              userId: user.userId,
+              tokenKey,
+              amount: humanRefundAmount,
+              reason: 'refund',
+              sourceTx: transactionId,
+              createdAt: new Date().toISOString(),
+            });
+            logger.warn(
+              'refund ledger adjustment queued — user lock contention did not clear, will apply on next drain',
+              {
+                component: 'Refund',
+                userId: user.userId,
+                originalTx: transactionId,
+                amount: humanRefundAmount,
+                token: tokenKey,
+              },
+            );
+            ledgerAdjusted = user.userId; // recorded in the pending queue
+          } catch (queueErr) {
+            // If even the pending queue is unreachable we're in real
+            // trouble — surface loudly so the operator can manually fix.
+            logger.error(
+              'CRITICAL: refund ledger adjustment could not be queued — PHANTOM FUNDS POSSIBLE',
+              {
+                component: 'Refund',
+                userId: user.userId,
+                originalTx: transactionId,
+                amount: humanRefundAmount,
+                token: tokenKey,
+                error: queueErr,
+              },
+            );
           }
         }
       }

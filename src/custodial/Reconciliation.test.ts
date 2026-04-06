@@ -122,6 +122,17 @@ function computeReconciliation(input: ReconInput): ReconciliationResult {
     }
   }
 
+  // Mirror the PR6 fields (schema divergence + pending ledger queue).
+  // The pure test helper doesn't actually drain a queue — it just shapes
+  // the result so the type matches. Tests that care about these fields
+  // assert on them explicitly; other tests ignore them.
+  const schemaUserCounts: Record<number, number> = {};
+  for (const user of users) {
+    const v = user.schemaVersion ?? 0;
+    schemaUserCounts[v] = (schemaUserCounts[v] ?? 0) + 1;
+  }
+  const schemaOperator = operator.schemaVersion ?? 0;
+
   return {
     timestamp: new Date().toISOString(),
     onChain,
@@ -133,6 +144,14 @@ function computeReconciliation(input: ReconInput): ReconciliationResult {
     adjustedDelta,
     solvent,
     warnings,
+    schema: {
+      current: 1,
+      users: schemaUserCounts,
+      operator: schemaOperator,
+      allAtCurrent: false, // test helper doesn't evaluate this
+    },
+    pendingLedgerDrained: { attempted: 0, applied: 0, deferred: 0, failed: 0 },
+    pendingLedgerRemaining: 0,
   };
 }
 

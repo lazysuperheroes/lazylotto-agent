@@ -26,7 +26,7 @@
 import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 import { logger } from './logger.js';
 
-const KILL_KEY = KEY_PREFIX.session.replace('session:', 'killswitch');
+const KILL_KEY = KEY_PREFIX.killswitch;
 
 export interface KillSwitchState {
   enabled: boolean;

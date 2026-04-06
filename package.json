@@ -1,6 +1,6 @@
 {
   "name": "@lazysuperheroes/lazylotto-agent",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "description": "Autonomous AI agent that plays the LazyLotto lottery on Hedera",
   "type": "module",
   "main": "dist/index.js",

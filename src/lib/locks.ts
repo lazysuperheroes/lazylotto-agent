@@ -30,10 +30,8 @@
 import { randomUUID } from 'node:crypto';
 import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 
-// Derive the lock key prefix from the shared session prefix so it stays
-// network-scoped (lla:testnet:lock:user:... vs lla:mainnet:lock:user:...).
-const USER_LOCK_PREFIX = KEY_PREFIX.session.replace('session:', 'lock:user:');
-const OPERATOR_LOCK_PREFIX = KEY_PREFIX.session.replace('session:', 'lock:operator:');
+const USER_LOCK_PREFIX = KEY_PREFIX.lockUser;
+const OPERATOR_LOCK_PREFIX = KEY_PREFIX.lockOperator;
 
 /** Lua: delete the key only if its value matches the expected token. */
 const RELEASE_SCRIPT = `

@@ -216,6 +216,10 @@ export default function DashboardPage() {
 
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [storedAccountId, setStoredAccountId] = useState<string | null>(null);
+  // First-run orientation strip dismissal — persisted in localStorage so
+  // the user doesn't see it again after closing it once. Hydrated in the
+  // mount useEffect (avoid SSR hydration mismatch).
+  const [onboardingDismissed, setOnboardingDismissed] = useState(true);
   // Per-section loading states so balance/deposit and history render independently
   const [statusLoading, setStatusLoading] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -342,24 +346,16 @@ export default function DashboardPage() {
     document.title = 'Dashboard | LazyLotto Agent';
   }, []);
 
-  // Check for auth token on mount, then fetch data independently
-  useEffect(() => {
-    const token = localStorage.getItem('lazylotto:sessionToken');
-    setSessionToken(token);
-    setStoredAccountId(localStorage.getItem('lazylotto:accountId'));
-
-    if (!token) {
-      setStatusLoading(false);
-      setHistoryLoading(false);
-      return;
-    }
-
-    const headers = { Authorization: `Bearer ${token}` };
-
-    // Fire status + history in parallel but treat them as independent.
-    // Each section renders as soon as its own fetch resolves — history
-    // no longer waits for status (and vice versa).
-    void (async () => {
+  // ── Status fetch (mount + retry) ─────────────────────────────
+  // Extracted from the mount useEffect so the user can retry a failed
+  // /api/user/status load from an inline balance-card error state
+  // without reloading the whole page. A status failure no longer
+  // wipes the dashboard — history, deposits, and the trust panel
+  // keep rendering independently.
+  const loadStatus = useCallback(
+    async (headers: { Authorization: string }) => {
+      setStatusLoading(true);
+      setError(null);
       try {
         const res = await fetch('/api/user/status', { headers });
         if (res.status === 401) {
@@ -372,7 +368,7 @@ export default function DashboardPage() {
         if (res.status === 404) {
           // User authenticated but not registered as a player
           setNotRegistered(true);
-          setHistoryLoading(false); // nothing to load
+          setHistoryLoading(false);
           return;
         }
         if (!res.ok) {
@@ -389,6 +385,41 @@ export default function DashboardPage() {
       } finally {
         setStatusLoading(false);
       }
+    },
+    [router],
+  );
+
+  const retryStatus = useCallback(() => {
+    const token = localStorage.getItem('lazylotto:sessionToken');
+    if (!token) {
+      router.replace('/auth');
+      return;
+    }
+    void loadStatus({ Authorization: `Bearer ${token}` });
+  }, [loadStatus, router]);
+
+  // Check for auth token on mount, then fetch data independently
+  useEffect(() => {
+    const token = localStorage.getItem('lazylotto:sessionToken');
+    setSessionToken(token);
+    setStoredAccountId(localStorage.getItem('lazylotto:accountId'));
+    setOnboardingDismissed(
+      localStorage.getItem('lazylotto:hideOnboarding') === '1',
+    );
+
+    if (!token) {
+      setStatusLoading(false);
+      setHistoryLoading(false);
+      return;
+    }
+
+    const headers = { Authorization: `Bearer ${token}` };
+
+    // Fire status + history in parallel but treat them as independent.
+    // Each section renders as soon as its own fetch resolves — history
+    // no longer waits for status (and vice versa).
+    void (async () => {
+      await loadStatus(headers);
     })();
 
     void (async () => {
@@ -812,26 +843,11 @@ export default function DashboardPage() {
     );
   }
 
-  // --- Error state ---
-  if (error && !status) {
-    return (
-      <div className="flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-md rounded-xl border border-destructive/30 p-8 text-center shadow-lg">
-          <h1 className="mb-3 font-heading text-xl text-foreground">
-            Something went wrong
-          </h1>
-          <p className="mb-6 text-sm text-destructive">{error}</p>
-          <button
-            type="button"
-            onClick={() => window.location.reload()}
-            className="inline-block rounded-lg bg-primary px-6 py-3 font-semibold text-white transition-colors hover:bg-primary/90"
-          >
-            Retry
-          </button>
-        </div>
-      </div>
-    );
-  }
+  // NOTE: We no longer return a full-page error when /api/user/status
+  // fails. The balance + deposit cards render an inline error state with
+  // Retry below, and the rest of the dashboard (history, trust panel,
+  // dead letters) continues to render independently. This means a
+  // single transient Redis blip on status doesn't wipe the whole page.
 
   // Build balance rows
   const balanceEntries = status
@@ -884,13 +900,78 @@ export default function DashboardPage() {
           )}
         </header>
 
+        {/* ---- First-run orientation strip ----
+            Shown to a freshly-registered user with zero balance and zero
+            sessions. Dismissible; dismissal persists in localStorage so
+            returning users never see it again. The three-step framing
+            makes the flow obvious without a full tutorial. */}
+        {status &&
+          !onboardingDismissed &&
+          sessions.length === 0 &&
+          balanceEntries.every(([, e]) => e.available <= 0) && (
+            <div className="mb-6 rounded-xl border border-brand/40 bg-brand/5 p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="font-heading text-sm text-foreground">
+                    Welcome! Here&apos;s how it works.
+                  </p>
+                  <ol className="mt-3 grid gap-3 text-xs text-muted sm:grid-cols-3">
+                    <li className="flex items-start gap-2">
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-brand/20 font-semibold text-brand">
+                        1
+                      </span>
+                      <span>
+                        <span className="font-semibold text-foreground">Fund</span> your
+                        account — send HBAR or LAZY to the deposit card below.
+                      </span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-brand/20 font-semibold text-brand">
+                        2
+                      </span>
+                      <span>
+                        <span className="font-semibold text-foreground">Play</span> — hit
+                        Play Now and the agent runs a session for you.
+                      </span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-brand/20 font-semibold text-brand">
+                        3
+                      </span>
+                      <span>
+                        <span className="font-semibold text-foreground">Withdraw</span>{' '}
+                        anytime — your funds are always yours.
+                      </span>
+                    </li>
+                  </ol>
+                </div>
+                <button
+                  type="button"
+                  aria-label="Dismiss onboarding"
+                  onClick={() => {
+                    localStorage.setItem('lazylotto:hideOnboarding', '1');
+                    setOnboardingDismissed(true);
+                  }}
+                  className="shrink-0 rounded-md border border-secondary px-2 py-1 text-[11px] text-muted transition-colors hover:text-foreground"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
         {/* ---- Agent operational status ----
             Surfaces the operator's kill switch to users under friendlier
             "open for business" framing. When closed, users still see their
             balance and can withdraw — only new plays/registrations are
             blocked. The banner explains exactly that. */}
         {publicStats && publicStats.acceptingOperations === false && (
-          <div className="mb-6 rounded-xl border border-destructive/40 bg-destructive/10 p-4">
+          <div
+            id="agent-status-banner"
+            role="status"
+            aria-live="polite"
+            className="mb-6 rounded-xl border border-destructive/40 bg-destructive/10 p-4"
+          >
             <div className="flex items-start gap-3">
               <span className="mt-1 inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-destructive" />
               <div className="min-w-0 flex-1">
@@ -1023,6 +1104,9 @@ export default function DashboardPage() {
                     <span className="text-muted">Rake Rate</span>
                     <span className="text-foreground">{status.rakePercent}%</span>
                   </div>
+                  <p className="mt-2 text-[11px] italic text-muted">
+                    We take a rake to cover all gas and infrastructure costs.
+                  </p>
                 </div>
 
                 {/* Action buttons — Play and Withdraw */}
@@ -1033,8 +1117,21 @@ export default function DashboardPage() {
                       onClick={handlePlay}
                       disabled={
                         playLoading ||
-                        (publicStats && publicStats.acceptingOperations === false) ||
-                        false
+                        Boolean(publicStats && publicStats.acceptingOperations === false)
+                      }
+                      // When the agent is closed, point screen readers at
+                      // the status banner so they hear WHY the button is
+                      // disabled instead of just "dimmed".
+                      aria-disabled={
+                        playLoading ||
+                        (publicStats && publicStats.acceptingOperations === false)
+                          ? 'true'
+                          : undefined
+                      }
+                      aria-describedby={
+                        publicStats && publicStats.acceptingOperations === false
+                          ? 'agent-status-banner'
+                          : undefined
                       }
                       className="rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                       title={
@@ -1062,6 +1159,26 @@ export default function DashboardPage() {
                 )}
               </div>
             )}
+            {/* Inline error state — only when status failed AND no stale
+                data is available. Other sections (history, trust panel,
+                dead letters) keep rendering normally so the whole page
+                doesn't fall over on a transient Redis blip. */}
+            {!status && !statusLoading && error && (
+              <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3">
+                <p className="mb-2 text-sm font-medium text-destructive">
+                  Balance temporarily unavailable
+                </p>
+                <p className="mb-3 text-xs text-muted">{error}</p>
+                <button
+                  type="button"
+                  onClick={retryStatus}
+                  disabled={statusLoading}
+                  className="rounded-md border border-destructive/40 px-3 py-1.5 text-xs font-semibold text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
           </div>
 
           {/* ---- Deposit Info Card ---- */}
@@ -1069,8 +1186,13 @@ export default function DashboardPage() {
             <h2 className="mb-1 font-heading text-lg text-foreground">
               Fund Your Account
             </h2>
-            <p className="mb-4 text-xs text-muted">
+            <p className="mb-2 text-xs text-muted">
               Send tokens to the agent wallet with your unique deposit memo to credit your account.
+            </p>
+            <p className="mb-4 text-[11px] text-muted">
+              Your deposit credits the next time you load this page or hit{' '}
+              <span className="font-semibold text-foreground">Play Now</span> —
+              usually within ~10 seconds of arriving on-chain.
             </p>
 
             {status && (
@@ -1421,7 +1543,8 @@ export default function DashboardPage() {
             ) : (
               <div className="rounded-lg bg-secondary/30 px-5 py-6 text-center">
                 <p className="text-sm text-muted">
-                  No sessions yet. Ask Claude to play a lottery session for you, or deposit funds to get started.
+                  No sessions yet. Hit <span className="font-semibold text-foreground">Play Now</span> above when you&apos;re ready,
+                  or deposit funds to get started.
                 </p>
               </div>
             )}
@@ -1454,6 +1577,9 @@ export default function DashboardPage() {
                 <p className="text-xs text-muted">Rake Rate</p>
                 <p className="font-semibold text-foreground">
                   {publicStats.rake.defaultPercent}%
+                </p>
+                <p className="mt-0.5 text-[10px] italic text-muted">
+                  Covers gas &amp; infra
                 </p>
               </div>
               <div>

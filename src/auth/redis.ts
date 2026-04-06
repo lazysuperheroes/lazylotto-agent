@@ -9,14 +9,32 @@
 import { createHash } from 'node:crypto';
 
 // ── Key prefixes (network-scoped to allow shared Redis) ──────
+//
+// Every cross-module Redis key lives here. When adding a new prefix:
+//   1. Add it below with a trailing colon or sub-namespace
+//   2. Import KEY_PREFIX in the consuming module
+//   3. NEVER do `KEY_PREFIX.session.replace(...)` — that's a silent
+//      namespace-collision footgun. Add a first-class entry instead.
 
 const NET = process.env.HEDERA_NETWORK ?? 'testnet';
 
 export const KEY_PREFIX = {
+  // Auth
   challenge: `lla:${NET}:challenge:`,
   session: `lla:${NET}:session:`,
   accountSessions: `lla:${NET}:account-sessions:`,
   rateLimit: `lla:${NET}:ratelimit:`,
+  // Distributed locks (src/lib/locks.ts)
+  lockUser: `lla:${NET}:lock:user:`,
+  lockOperator: `lla:${NET}:lock:operator:`,
+  // Operational flags
+  killswitch: `lla:${NET}:killswitch`,
+  // Refund replay protection (src/hedera/refund.ts)
+  refunded: `lla:${NET}:refunded:`,
+  // Pending ledger adjustments when a refund can't grab the user lock
+  pendingLedger: `lla:${NET}:pending-ledger`,
+  // Withdrawal velocity counters, keyed per token + user
+  velocity: `lla:${NET}:velocity:withdrawal:`,
 } as const;
 
 // ── Token hashing ────────────────────────────────────────────
@@ -47,6 +65,20 @@ interface RedisLike {
   sadd(key: string, ...members: string[]): Promise<number>;
   srem(key: string, ...members: string[]): Promise<number>;
   incr(key: string): Promise<number>;
+  // ── List ops (used by pending ledger queue) ────────────────
+  rpush(key: string, value: string): Promise<number>;
+  /**
+   * LRANGE key start stop. Inclusive bounds, -1 = last element.
+   * Returned rows may be strings or already-parsed objects depending
+   * on the backend. Callers must handle both.
+   */
+  lrange(key: string, start: number, stop: number): Promise<unknown[]>;
+  llen(key: string): Promise<number>;
+  /**
+   * LREM key count value — removes up to `count` occurrences of value.
+   * count=1 removes the first match (what we want for queue-drain).
+   */
+  lrem(key: string, count: number, value: string): Promise<number>;
   /**
    * Evaluate a Lua script server-side. Required for atomic
    * compare-and-delete patterns (distributed lock release).
@@ -85,6 +117,7 @@ export async function getRedis(): Promise<RedisLike> {
 function createInMemoryStore(): RedisLike {
   const store = new Map<string, { value: string; expiresAt?: number }>();
   const sets = new Map<string, Set<string>>();
+  const lists = new Map<string, string[]>();
 
   const isExpired = (entry: { expiresAt?: number }) =>
     entry.expiresAt !== undefined && Date.now() > entry.expiresAt;
@@ -155,6 +188,61 @@ function createInMemoryStore(): RedisLike {
       if (entry) entry.value = String(next);
       else store.set(key, { value: String(next) });
       return next;
+    },
+    async rpush(key: string, value: string) {
+      if (!lists.has(key)) lists.set(key, []);
+      const list = lists.get(key)!;
+      list.push(value);
+      return list.length;
+    },
+    async lrange(key: string, start: number, stop: number) {
+      const list = lists.get(key) ?? [];
+      // Mirror Redis semantics: negative indices count from the end,
+      // `stop` is inclusive.
+      const len = list.length;
+      const s = start < 0 ? Math.max(0, len + start) : Math.min(start, len);
+      const e = stop < 0 ? len + stop + 1 : Math.min(stop + 1, len);
+      return list.slice(s, e);
+    },
+    async llen(key: string) {
+      return lists.get(key)?.length ?? 0;
+    },
+    async lrem(key: string, count: number, value: string) {
+      const list = lists.get(key);
+      if (!list) return 0;
+      let removed = 0;
+      if (count > 0) {
+        // Remove first `count` matches from head
+        let i = 0;
+        while (i < list.length && removed < count) {
+          if (list[i] === value) {
+            list.splice(i, 1);
+            removed++;
+          } else {
+            i++;
+          }
+        }
+      } else if (count < 0) {
+        // Remove last `|count|` matches from tail
+        let i = list.length - 1;
+        const target = Math.abs(count);
+        while (i >= 0 && removed < target) {
+          if (list[i] === value) {
+            list.splice(i, 1);
+            removed++;
+          }
+          i--;
+        }
+      } else {
+        // count=0 → remove all matches
+        for (let i = list.length - 1; i >= 0; i--) {
+          if (list[i] === value) {
+            list.splice(i, 1);
+            removed++;
+          }
+        }
+      }
+      return removed;
     },
     async eval<T = unknown>(
       script: string,

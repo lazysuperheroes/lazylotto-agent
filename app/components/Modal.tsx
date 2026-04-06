@@ -67,6 +67,58 @@ const FOCUSABLE_SELECTOR =
   'input:not([disabled]):not([type="hidden"]), select:not([disabled]), ' +
   '[tabindex]:not([tabindex="-1"])';
 
+// ---------------------------------------------------------------------------
+// Module-level scroll-lock counter
+// ---------------------------------------------------------------------------
+//
+// A naive "snapshot body.overflow → restore it on close" is wrong when
+// any other code touches body overflow while a modal is open: the modal
+// would then restore the stale value. We use a refcount instead:
+// increment on mount, decrement on unmount, set `hidden` only when the
+// count is 1 → 0 restores the originally-saved value.
+//
+// Also protects against nested modals (we only ever show one at a time,
+// but a future stack would just work).
+
+let scrollLockCount = 0;
+let savedBodyOverflow = '';
+
+function acquireScrollLock(): void {
+  if (scrollLockCount === 0 && typeof document !== 'undefined') {
+    savedBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+  }
+  scrollLockCount++;
+}
+
+function releaseScrollLock(): void {
+  if (scrollLockCount <= 0) return;
+  scrollLockCount--;
+  if (scrollLockCount === 0 && typeof document !== 'undefined') {
+    document.body.style.overflow = savedBodyOverflow;
+    savedBodyOverflow = '';
+  }
+}
+
+/**
+ * Decide whether a snapshotted element is still a safe focus target.
+ * Returns false when the element has been unmounted, removed from the
+ * tab order, or disabled since the modal opened. The Withdraw/Play
+ * flows re-render the balance card after success, which means the
+ * opener button node that we captured on mount can be gone by the
+ * time we try to return focus to it — that would silently move focus
+ * to <body> and strand the keyboard user.
+ */
+function isSafeFocusTarget(el: HTMLElement | null): el is HTMLElement {
+  if (!el) return false;
+  if (typeof document === 'undefined') return false;
+  if (!document.contains(el)) return false;
+  if (el.hasAttribute('disabled')) return false;
+  const tabIndex = el.getAttribute('tabindex');
+  if (tabIndex && Number(tabIndex) < 0) return false;
+  return true;
+}
+
 export function Modal({
   open,
   onClose,
@@ -88,12 +140,13 @@ export function Modal({
   useEffect(() => {
     if (!open) return;
 
-    // Snapshot current focus
+    // Snapshot current focus — we'll return focus here on close unless
+    // the element has become unsafe (see isSafeFocusTarget).
     returnFocusRef.current = (document.activeElement as HTMLElement | null) ?? null;
 
-    // Lock body scroll. Preserve existing overflow value for restore.
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
+    // Lock body scroll via the counter so nested modals stack correctly
+    // and we don't clobber a concurrent overflow value.
+    acquireScrollLock();
 
     // Move focus into the dialog on the next microtask so the DOM
     // is ready. Prefer the first focusable, fall back to the dialog
@@ -108,9 +161,21 @@ export function Modal({
 
     return () => {
       cancelAnimationFrame(raf);
-      document.body.style.overflow = previousOverflow;
-      // Return focus to whatever opened the dialog
-      returnFocusRef.current?.focus?.();
+      releaseScrollLock();
+
+      // Return focus to whatever opened the dialog IF it's still a
+      // valid target. If not (opener was unmounted by a parent
+      // re-render after a successful mutation), fall back to the
+      // dialog element — which may also be gone by this point, in
+      // which case do nothing and let the browser pick up focus on
+      // the next Tab press.
+      const target = returnFocusRef.current;
+      if (isSafeFocusTarget(target)) {
+        target.focus();
+      } else if (dialogRef.current && document.contains(dialogRef.current)) {
+        dialogRef.current.focus();
+      }
+      returnFocusRef.current = null;
     };
   }, [open]);
 

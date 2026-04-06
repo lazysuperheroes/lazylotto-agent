@@ -224,8 +224,6 @@ export default function AdminPage() {
   const [withdrawFeesToken, setWithdrawFeesToken] = useState<'HBAR' | 'LAZY'>('HBAR');
   const [withdrawFeesLoading, setWithdrawFeesLoading] = useState(false);
 
-  const [refundMessages, setRefundMessages] = useState<Record<string, string>>({});
-
   // Kill switch state
   interface KillSwitchState {
     enabled: boolean;
@@ -456,6 +454,9 @@ export default function AdminPage() {
   }, [authFetch]);
 
   // --- Refund dead letter ---
+  // Feedback flows through toast() (success/error variants) for parity
+  // with the Play/Withdraw UX. Also removes the dead-letter row from
+  // the in-memory list on success so the table updates immediately.
   const handleRefund = useCallback(
     async (transactionId: string) => {
       try {
@@ -464,31 +465,25 @@ export default function AdminPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ transactionId }),
         });
-        const body = await res.json();
+        const body = await res.json().catch(() => ({}));
 
-        if (res.status === 501) {
-          setRefundMessages((prev) => ({
-            ...prev,
-            [transactionId]: (body as { message?: string; error?: string }).message ?? (body as { error?: string }).error ?? 'Not implemented',
-          }));
-        } else if (!res.ok) {
-          setRefundMessages((prev) => ({
-            ...prev,
-            [transactionId]: (body as { error?: string }).error ?? `Refund failed (${res.status})`,
-          }));
-        } else {
-          setRefundMessages((prev) => ({
-            ...prev,
-            [transactionId]: 'Refund processed successfully.',
-          }));
-          toast('Refund processed');
+        if (!res.ok) {
+          const message =
+            (body as { error?: string }).error ??
+            `Refund failed (${res.status})`;
+          toast(`Refund failed: ${message}`, { variant: 'error' });
+          return;
         }
+
+        toast(`Refund processed for ${transactionId}`);
+        setDeadLetters((prev) =>
+          prev.filter((dl) => dl.transactionId !== transactionId),
+        );
       } catch (err) {
         if (err instanceof Error && err.message === 'forbidden') return;
-        setRefundMessages((prev) => ({
-          ...prev,
-          [transactionId]: err instanceof Error ? err.message : 'Refund request failed',
-        }));
+        const message =
+          err instanceof Error ? err.message : 'Refund request failed';
+        toast(`Refund failed: ${message}`, { variant: 'error' });
       }
     },
     [authFetch, toast],
@@ -937,11 +932,6 @@ export default function AdminPage() {
                           >
                             Refund
                           </button>
-                          {refundMessages[dl.transactionId] && (
-                            <div className="mt-2 rounded bg-secondary px-2 py-1 text-xs text-muted">
-                              {refundMessages[dl.transactionId]}
-                            </div>
-                          )}
                         </td>
                       </tr>
                     ))}

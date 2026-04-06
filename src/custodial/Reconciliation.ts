@@ -16,6 +16,23 @@ import type { IStore } from './IStore.js';
 import { hbarToNumber } from '../utils/format.js';
 import { roundToDecimals } from '../utils/math.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
+import { CURRENT_SCHEMA_VERSION } from './types.js';
+import {
+  drainPendingLedgerAdjustments,
+  getPendingLedgerCount,
+  type DrainResult,
+} from './pendingLedger.js';
+
+export interface SchemaVersionReport {
+  /** Version constant the current code stamps at write time. */
+  current: number;
+  /** Count of user records by stamped version. `0` key = legacy/unstamped. */
+  users: Record<number, number>;
+  /** Operator record's stamped version (0 if legacy). */
+  operator: number;
+  /** True when every record matches the current version. */
+  allAtCurrent: boolean;
+}
 
 export interface ReconciliationResult {
   timestamp: string;
@@ -28,6 +45,12 @@ export interface ReconciliationResult {
   adjustedDelta: Record<string, number>;
   solvent: boolean;
   warnings: string[];
+  /** Schema version divergence report — PR6 addition. */
+  schema: SchemaVersionReport;
+  /** Pending ledger adjustments drained at the start of this run. */
+  pendingLedgerDrained: DrainResult;
+  /** How many pending adjustments are still queued after the drain. */
+  pendingLedgerRemaining: number;
 }
 
 /**
@@ -47,6 +70,23 @@ export async function reconcile(
   fromTimestamp?: string,
 ): Promise<ReconciliationResult> {
   const warnings: string[] = [];
+
+  // 0. Drain pending ledger adjustments before snapshotting balances.
+  //    The queue exists because refunds can't always grab the per-user
+  //    lock at settle time — draining here ensures the ledger is caught
+  //    up before we measure drift, so we don't false-flag drift that's
+  //    just a queue waiting to be applied.
+  const pendingLedgerDrained = await drainPendingLedgerAdjustments(store);
+  if (pendingLedgerDrained.applied > 0) {
+    warnings.push(
+      `Applied ${pendingLedgerDrained.applied} pending ledger adjustment(s) before reconciling.`,
+    );
+  }
+  if (pendingLedgerDrained.deferred > 0) {
+    warnings.push(
+      `${pendingLedgerDrained.deferred} pending ledger adjustment(s) still deferred (user locks held).`,
+    );
+  }
 
   // 1. Fetch on-chain balances
   const info = await getWalletInfo(client);
@@ -118,6 +158,36 @@ export async function reconcile(
     }
   }
 
+  // 6. Schema version divergence report. We walk the user records and
+  //    operator state once, counting how many records carry each
+  //    stamped version. `0` means no schemaVersion field (legacy /
+  //    pre-PR4 write). When the operator plans a migration they can
+  //    see exactly how many records are behind the current version.
+  const schemaUserCounts: Record<number, number> = {};
+  for (const user of users) {
+    const v = user.schemaVersion ?? 0;
+    schemaUserCounts[v] = (schemaUserCounts[v] ?? 0) + 1;
+  }
+  const schemaOperator = op.schemaVersion ?? 0;
+  const allAtCurrent =
+    schemaOperator === CURRENT_SCHEMA_VERSION &&
+    Object.keys(schemaUserCounts).every(
+      (k) => Number(k) === CURRENT_SCHEMA_VERSION,
+    );
+  if (!allAtCurrent) {
+    warnings.push(
+      `Schema drift: some records are behind v${CURRENT_SCHEMA_VERSION}. ` +
+        `Users: ${JSON.stringify(schemaUserCounts)}, operator: v${schemaOperator}.`,
+    );
+  }
+
+  const pendingLedgerRemaining = await getPendingLedgerCount();
+  if (pendingLedgerRemaining > 0) {
+    warnings.push(
+      `${pendingLedgerRemaining} pending ledger adjustment(s) still queued.`,
+    );
+  }
+
   return {
     timestamp: new Date().toISOString(),
     onChain,
@@ -129,5 +199,13 @@ export async function reconcile(
     adjustedDelta,
     solvent,
     warnings,
+    schema: {
+      current: CURRENT_SCHEMA_VERSION,
+      users: schemaUserCounts,
+      operator: schemaOperator,
+      allAtCurrent,
+    },
+    pendingLedgerDrained,
+    pendingLedgerRemaining,
   };
 }

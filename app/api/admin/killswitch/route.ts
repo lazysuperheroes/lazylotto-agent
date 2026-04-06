@@ -18,6 +18,7 @@ import {
   enableKillSwitch,
   disableKillSwitch,
 } from '~/lib/killswitch';
+import { getAgentContext } from '../../_lib/mcp';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -54,6 +55,20 @@ export async function POST(request: Request) {
     }
 
     await enableKillSwitch(reason, auth.accountId);
+
+    // Emit an on-chain audit anchor so the HCS-20 trail shows the
+    // incident. Best-effort — if the accounting service is down we
+    // still flip the flag (users safety > audit completeness).
+    try {
+      const { multiUser } = await getAgentContext();
+      await multiUser.recordControlEvent('killswitch_enabled', {
+        reason,
+        by: auth.accountId,
+      });
+    } catch (auditErr) {
+      console.warn('[killswitch] HCS-20 audit write failed:', auditErr);
+    }
+
     const state = await getKillSwitchState();
     return NextResponse.json(state, { headers: CORS_HEADERS });
   } catch (err) {
@@ -70,6 +85,18 @@ export async function DELETE(request: Request) {
     if (isErrorResponse(auth)) return auth;
 
     await disableKillSwitch(auth.accountId);
+
+    // Mirror the enable event on HCS-20 so the audit trail shows
+    // when the incident was resolved.
+    try {
+      const { multiUser } = await getAgentContext();
+      await multiUser.recordControlEvent('killswitch_disabled', {
+        by: auth.accountId,
+      });
+    } catch (auditErr) {
+      console.warn('[killswitch] HCS-20 audit write failed:', auditErr);
+    }
+
     return NextResponse.json({ enabled: false }, { headers: CORS_HEADERS });
   } catch (err) {
     return NextResponse.json(
