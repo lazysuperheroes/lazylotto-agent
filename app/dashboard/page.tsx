@@ -1056,9 +1056,9 @@ export default function DashboardPage() {
           role="status"
           aria-live="polite"
         >
-          <GoldConfetti count={42} />
+          <GoldConfetti count={36} />
           <div className="burst-stamp">
-            <ActionBurst size={280} tone="brand">
+            <ActionBurst size={240} tone="brand">
               {winCelebration}
             </ActionBurst>
           </div>
@@ -1078,10 +1078,46 @@ export default function DashboardPage() {
             <p className="label-caps-lg mb-2">Your agent</p>
             <h1 className="display-lg text-foreground">Dashboard</h1>
           </div>
-          {status?.userId && (
-            <p className="hidden font-pixel text-[9px] uppercase tracking-wider text-muted sm:block">
-              User · {status.userId.slice(0, 8)}
-            </p>
+          {/* Account chip — shows the user's Hedera account ID and
+              acts as the disconnect button. Standard dApp convention:
+              your address is in the corner, click to sign out. */}
+          {status?.hederaAccountId && (
+            <button
+              type="button"
+              onClick={() => {
+                if (
+                  typeof window !== 'undefined' &&
+                  window.confirm('Disconnect from this dashboard? You can sign back in anytime.')
+                ) {
+                  localStorage.removeItem('lazylotto:sessionToken');
+                  localStorage.removeItem('lazylotto:accountId');
+                  localStorage.removeItem('lazylotto:tier');
+                  localStorage.removeItem('lazylotto:expiresAt');
+                  localStorage.removeItem('lazylotto:locked');
+                  // Full reload to clear React state across the app
+                  window.location.href = '/auth';
+                }
+              }}
+              title="Click to disconnect"
+              className="group hidden items-center gap-2 border border-secondary bg-[var(--color-panel)] px-3 py-2 transition-colors hover:border-destructive sm:inline-flex"
+            >
+              <span
+                className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-success transition-colors group-hover:bg-destructive"
+                aria-hidden="true"
+              />
+              <code className="font-mono text-xs text-foreground">
+                {status.hederaAccountId.length > 14
+                  ? `${status.hederaAccountId.slice(0, 7)}…${status.hederaAccountId.slice(-4)}`
+                  : status.hederaAccountId}
+              </code>
+              <span
+                className="text-xs text-muted transition-colors group-hover:text-destructive"
+                aria-hidden="true"
+              >
+                ↗
+              </span>
+              <span className="sr-only">Disconnect from this dashboard</span>
+            </button>
           )}
         </header>
 
@@ -1180,10 +1216,13 @@ export default function DashboardPage() {
                     draggable={false}
                   />
                   {/* Sleep "Zzz" indicator overlay — only shown when
-                      the operator has paused the agent. */}
+                      the operator has paused the agent. Muted brand
+                      tone rather than destructive red so it reads as
+                      "napping" not "alarm". The destructive border on
+                      the frame already carries the alarm signal. */}
                   {agentClosed && (
                     <span
-                      className="absolute -right-2 -top-3 font-heading text-xl font-extrabold text-destructive sleep-z"
+                      className="absolute -right-2 -top-3 font-heading text-xl font-extrabold text-brand/70 sleep-z"
                       aria-hidden="true"
                     >
                       Z
@@ -1276,13 +1315,14 @@ export default function DashboardPage() {
                 )}
 
                 {/* Character quip — comic-book speech bubble with a
-                    left-pointing tail directed at the mascot. The
-                    bubble has a brand-gold border, panel-toned
-                    interior, and a hard offset shadow matching the
-                    rest of the comic vocabulary. */}
+                    left-pointing tail directed at the mascot. Speech
+                    text is muted (overheard / quoted feel) so it sits
+                    quietly under the display number rather than
+                    competing with it for attention. The cite line
+                    keeps the brand gold to mark the speaker. */}
                 {characterLine && (
                   <SpeechBubble tailPosition="left" className="prose-width mt-6 ml-2">
-                    <p className="type-body-lg italic text-foreground">
+                    <p className="type-body italic text-muted">
                       {characterLine}
                     </p>
                     <p className="label-caps-brand mt-3">
@@ -1422,7 +1462,7 @@ export default function DashboardPage() {
                 type="button"
                 onClick={retryStatus}
                 disabled={statusLoading}
-                className="border-2 border-destructive px-4 py-2 font-pixel text-[10px] uppercase tracking-wider text-destructive transition-colors hover:bg-destructive hover:text-white disabled:opacity-50"
+                className="border-2 border-destructive px-4 py-2 label-caps-destructive transition-colors hover:bg-destructive/20 disabled:opacity-50"
               >
                 Retry
               </button>
@@ -1526,7 +1566,7 @@ export default function DashboardPage() {
                           <button
                             type="button"
                             onClick={() => handleCopy(agentWallet, 'Agent wallet')}
-                            className="shrink-0 border border-secondary px-3 py-1.5 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
+                            className="shrink-0 border border-secondary px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted transition-colors hover:border-brand hover:text-brand"
                           >
                             Copy
                           </button>
@@ -1543,7 +1583,7 @@ export default function DashboardPage() {
                         <button
                           type="button"
                           onClick={() => handleCopy(status.depositMemo, 'Deposit memo')}
-                          className="shrink-0 border border-secondary px-3 py-1.5 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
+                          className="shrink-0 border border-secondary px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted transition-colors hover:border-brand hover:text-brand"
                         >
                           Copy
                         </button>
@@ -1645,7 +1685,7 @@ export default function DashboardPage() {
                               rel={
                                 supportIsMailto ? undefined : 'noopener noreferrer'
                               }
-                              className="border-2 border-destructive bg-destructive/20 px-3 py-1.5 font-pixel text-[9px] uppercase tracking-wider text-destructive transition-colors hover:bg-destructive hover:text-white"
+                              className="border-2 border-destructive bg-destructive/20 px-3 py-1.5 label-caps-destructive transition-colors hover:bg-destructive/40"
                             >
                               Contact Support
                             </a>
@@ -1654,7 +1694,7 @@ export default function DashboardPage() {
                             href={hashscanUrl}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="border border-destructive/40 px-3 py-1.5 font-pixel text-[9px] uppercase tracking-wider text-destructive transition-colors hover:bg-destructive/10"
+                            className="border border-destructive/40 px-3 py-1.5 label-caps-destructive transition-colors hover:bg-destructive/10"
                           >
                             HashScan ↗
                           </a>
@@ -1692,7 +1732,7 @@ export default function DashboardPage() {
                 <button
                   type="button"
                   onClick={retryEnrichment}
-                  className="shrink-0 border border-destructive/40 px-3 py-1 font-pixel text-[9px] uppercase tracking-wider text-destructive transition-colors hover:bg-destructive/20"
+                  className="shrink-0 border border-destructive/40 px-3 py-1 label-caps-destructive transition-colors hover:bg-destructive/20"
                 >
                   Retry
                 </button>
@@ -1884,7 +1924,7 @@ export default function DashboardPage() {
                       <button
                         type="button"
                         onClick={() => setShowAll(true)}
-                        className="font-pixel text-[9px] uppercase tracking-wider text-brand transition-colors hover:text-foreground"
+                        className="text-[10px] font-semibold uppercase tracking-[0.18em] text-brand transition-colors hover:text-foreground"
                       >
                         Show older sessions ({sessions.length - 10} more) →
                       </button>
@@ -1895,7 +1935,7 @@ export default function DashboardPage() {
                       <button
                         type="button"
                         onClick={() => setShowAll(false)}
-                        className="font-pixel text-[9px] uppercase tracking-wider text-brand transition-colors hover:text-foreground"
+                        className="text-[10px] font-semibold uppercase tracking-[0.18em] text-brand transition-colors hover:text-foreground"
                       >
                         ← Show less
                       </button>

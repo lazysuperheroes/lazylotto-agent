@@ -659,7 +659,7 @@ export default function AdminPage() {
             chapter title. */}
         <header className="mb-10">
           <p className="label-caps-lg mb-2">Operator view</p>
-          <h1 className="display-lg text-foreground">Agent Administration</h1>
+          <h1 className="display-md text-foreground">Agent Administration</h1>
         </header>
 
         {/* ---- Kill Switch ──────────────────────────────────
@@ -746,11 +746,11 @@ export default function AdminPage() {
             small-caps labels. */}
         {overview && (
           <div className="mb-8">
-            <ComicPanel label="OVERVIEW" halftone="light">
-              <div className="grid grid-cols-2 gap-0 divide-x divide-y divide-brand/15 md:grid-cols-4 md:divide-y-0">
+            <ComicPanel label="OVERVIEW" tone="muted" halftone="none">
+              <div className="grid grid-cols-2 gap-0 divide-x divide-y divide-secondary md:grid-cols-4 md:divide-y-0">
                 <div className="p-6">
                   <p className="label-caps mb-2">Active users</p>
-                  <p className="num-tabular display-md text-brand">
+                  <p className="num-tabular heading-1 text-foreground">
                     {overview.users.active}
                   </p>
                   <p className="type-caption mt-1">
@@ -759,19 +759,19 @@ export default function AdminPage() {
                 </div>
                 <div className="p-6">
                   <p className="label-caps mb-2">Deposited</p>
-                  <p className="num-tabular display-md text-brand">
+                  <p className="num-tabular heading-1 text-foreground">
                     {summariseTokenMap(overview.balances.totalDeposited)}
                   </p>
                 </div>
                 <div className="p-6">
                   <p className="label-caps mb-2">Operator rake</p>
-                  <p className="num-tabular display-md text-brand">
+                  <p className="num-tabular heading-1 text-foreground">
                     {summariseTokenMap(overview.operator.totalRakeCollected)}
                   </p>
                 </div>
                 <div className="p-6">
                   <p className="label-caps mb-2">Gas spent</p>
-                  <p className="num-tabular display-md text-brand">
+                  <p className="num-tabular heading-1 text-foreground">
                     {fmt(overview.operator.totalGasSpent, 2)}{' '}
                     <span className="type-caption text-muted">HBAR</span>
                   </p>
@@ -921,9 +921,9 @@ export default function AdminPage() {
                 <table className="w-full min-w-[720px] text-sm">
                   <thead>
                     <tr className="border-b border-secondary text-left">
-                      <th className="px-5 py-3 font-pixel text-[9px] uppercase tracking-wider text-muted">Transaction ID</th>
-                      <th className="px-5 py-3 font-pixel text-[9px] uppercase tracking-wider text-muted">Timestamp</th>
-                      <th className="px-5 py-3 font-pixel text-[9px] uppercase tracking-wider text-muted">Error</th>
+                      <th className="px-5 py-3 label-caps">Transaction ID</th>
+                      <th className="px-5 py-3 label-caps">Timestamp</th>
+                      <th className="px-5 py-3 label-caps">Error</th>
                       <th className="px-5 py-3" />
                     </tr>
                   </thead>
@@ -943,7 +943,7 @@ export default function AdminPage() {
                           <button
                             type="button"
                             onClick={() => void handleRefund(dl.transactionId)}
-                            className="border border-secondary px-3 py-1.5 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
+                            className="border border-secondary px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted transition-colors hover:border-brand hover:text-brand"
                           >
                             Refund
                           </button>
@@ -1113,7 +1113,7 @@ export default function AdminPage() {
         </div>
 
         {/* ---- Operator Balance Card (collapsible) ─────── */}
-        <ComicPanel label="OPERATOR" halftone="light">
+        <ComicPanel label="OPERATOR" tone="muted" halftone="none">
           <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
             <button
               type="button"
@@ -1160,10 +1160,10 @@ export default function AdminPage() {
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-secondary text-left">
-                        <th className="px-5 py-3 font-pixel text-[9px] uppercase tracking-wider text-muted">Token</th>
-                        <th className="px-5 py-3 text-right font-pixel text-[9px] uppercase tracking-wider text-muted">Rake Collected</th>
-                        <th className="px-5 py-3 text-right font-pixel text-[9px] uppercase tracking-wider text-muted">Gas Spent</th>
-                        <th className="px-5 py-3 text-right font-pixel text-[9px] uppercase tracking-wider text-muted">Net Profit</th>
+                        <th className="px-5 py-3 label-caps">Token</th>
+                        <th className="px-5 py-3 text-right label-caps">Rake Collected</th>
+                        <th className="px-5 py-3 text-right label-caps">Gas Spent</th>
+                        <th className="px-5 py-3 text-right label-caps">Net Profit</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-secondary">

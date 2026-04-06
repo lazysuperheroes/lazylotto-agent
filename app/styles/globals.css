@@ -213,6 +213,14 @@ body {
    so they sit as architectural markers rather than body text.
    ───────────────────────────────────────────────────────────── */
 
+/* Label caps system — small-caps utility with explicit colour
+   variants. Combining `.label-caps` with Tailwind `text-*` doesn't
+   work cleanly because my custom class is unlayered and beats the
+   layered Tailwind utilities regardless of source order. So instead
+   the colour is baked in: pick a variant for the colour you want.
+   Sizes (xs/default/lg) and colours (default-muted/brand/destructive)
+   compose by adding the size suffix to the colour root. */
+
 .label-caps-xs {
   font-size: 9px;
   line-height: 1;
@@ -237,6 +245,8 @@ body {
   text-transform: uppercase;
   color: var(--color-muted);
 }
+
+/* Brand (gold) variants */
 .label-caps-brand {
   font-size: 10px;
   line-height: 1;
@@ -252,6 +262,16 @@ body {
   letter-spacing: 0.15em;
   text-transform: uppercase;
   color: var(--color-brand);
+}
+
+/* Destructive (red) variant — for warning labels and alert chips */
+.label-caps-destructive {
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-destructive);
 }
 
 /* ─────────────────────────────────────────────────────────────

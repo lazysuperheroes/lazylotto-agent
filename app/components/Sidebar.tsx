@@ -159,7 +159,7 @@ function UserContext() {
           .mascot-wake utilities in globals.css. */}
       {hasSession && (
         <div className="flex flex-col items-center gap-1 px-3 pt-4 pb-3">
-          <div className="relative border-2 border-brand bg-[var(--color-panel)] p-1 panel-shadow-sm mascot-wake">
+          <div className="relative border-2 border-brand bg-[var(--color-panel)] p-1 mascot-wake">
             <img
               src={character.img}
               alt={character.name}
@@ -370,14 +370,6 @@ export function Sidebar() {
                 <span className="flex-1">
                   {isAuthenticated && item.labelAuth ? item.labelAuth : item.label}
                 </span>
-                {isActive && (
-                  <span
-                    className="font-pixel text-[8px] text-brand"
-                    aria-hidden="true"
-                  >
-                    ●
-                  </span>
-                )}
               </Link>
             );
           })}
