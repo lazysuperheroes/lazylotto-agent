@@ -999,82 +999,41 @@ export default function DashboardPage() {
 
   // --- Dashboard ---
   return (
-    <div className="w-full px-4 py-8 sm:px-6 lg:px-8">
+    <div className="w-full px-4 py-10 sm:px-6 lg:px-10">
       <div className="mx-auto max-w-6xl">
-        {/* ---- Top Bar ---- */}
-        <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-3">
-            <h1 className="font-heading text-2xl text-foreground">
+        {/* ---- Top Bar ──────────────────────────────────────
+            Thin pixel-font header. Dropped the redundant network
+            badge (the sidebar has a much bigger one now) and the
+            strategy badge (it moved into the hero metadata row).
+            The page title functions more like a chapter header on
+            a comic book page than a dashboard nameplate. */}
+        <header className="mb-10 flex items-baseline justify-between gap-4">
+          <div>
+            <p className="label-caps mb-1">Your agent</p>
+            <h1 className="font-heading text-3xl font-extrabold uppercase tracking-tight text-foreground">
               Dashboard
             </h1>
-            {/* Persistent network badge so users never lose context about
-                which network they're on, even after navigating away from /auth. */}
-            {publicStats?.network && (
-              <span
-                className={`rounded px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${
-                  publicStats.network === 'mainnet'
-                    ? 'bg-brand/15 text-brand'
-                    : 'bg-secondary text-muted'
-                }`}
-                title={`Hedera ${publicStats.network}`}
-              >
-                {publicStats.network}
-              </span>
-            )}
           </div>
-
-          {status && (
-            <span className="rounded bg-brand px-2 py-0.5 text-xs font-semibold text-background">
-              {status.strategyName}
-            </span>
+          {status?.userId && (
+            <p className="hidden font-pixel text-[9px] uppercase tracking-wider text-muted sm:block">
+              User · {status.userId.slice(0, 8)}
+            </p>
           )}
         </header>
 
-        {/* ---- First-run orientation strip ----
-            Shown to a freshly-registered user with zero balance and zero
-            sessions. Dismissible; dismissal persists in localStorage so
-            returning users never see it again. The three-step framing
-            makes the flow obvious without a full tutorial. */}
+        {/* ---- First-run progress strip ────────────────────
+            A compact 3-panel step row for freshly-registered users.
+            Each step is a mini comic panel showing a number, label,
+            and state indicator. The user's current step is gold;
+            future steps are muted. Dismissible — persists in
+            localStorage so returning users never see it again. */}
         {status &&
           !onboardingDismissed &&
           sessions.length === 0 &&
           balanceEntries.every(([, e]) => e.available <= 0) && (
-            <div className="mb-6 rounded-xl border border-brand/40 bg-brand/5 p-5">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <p className="font-heading text-sm text-foreground">
-                    Welcome! Here&apos;s how it works.
-                  </p>
-                  <ol className="mt-3 grid gap-3 text-xs text-muted sm:grid-cols-3">
-                    <li className="flex items-start gap-2">
-                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-brand/20 font-semibold text-brand">
-                        1
-                      </span>
-                      <span>
-                        <span className="font-semibold text-foreground">Fund</span> your
-                        account — send HBAR or LAZY to the deposit card below.
-                      </span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-brand/20 font-semibold text-brand">
-                        2
-                      </span>
-                      <span>
-                        <span className="font-semibold text-foreground">Play</span> — hit
-                        Play Now and the agent runs a session for you.
-                      </span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-brand/20 font-semibold text-brand">
-                        3
-                      </span>
-                      <span>
-                        <span className="font-semibold text-foreground">Withdraw</span>{' '}
-                        anytime — your funds are always yours.
-                      </span>
-                    </li>
-                  </ol>
-                </div>
+            <div className="mb-8">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <p className="label-caps-brand">Getting started</p>
                 <button
                   type="button"
                   aria-label="Dismiss onboarding"
@@ -1082,44 +1041,99 @@ export default function DashboardPage() {
                     localStorage.setItem('lazylotto:hideOnboarding', '1');
                     setOnboardingDismissed(true);
                   }}
-                  className="shrink-0 rounded-md border border-secondary px-2 py-1 text-[11px] text-muted transition-colors hover:text-foreground"
+                  className="label-caps transition-colors hover:text-foreground"
                 >
-                  Dismiss
+                  Dismiss ✕
                 </button>
               </div>
+              <ol className="grid gap-3 sm:grid-cols-3">
+                {[
+                  {
+                    n: '01',
+                    label: 'Fund',
+                    desc: 'Send HBAR or LAZY with your deposit memo',
+                    active: true,
+                  },
+                  {
+                    n: '02',
+                    label: 'Play',
+                    desc: 'The agent plays lottery pools for you',
+                    active: false,
+                  },
+                  {
+                    n: '03',
+                    label: 'Withdraw',
+                    desc: 'Pull funds back to your wallet anytime',
+                    active: false,
+                  },
+                ].map((step) => (
+                  <li
+                    key={step.n}
+                    className={`relative border-2 px-4 py-3 ${
+                      step.active
+                        ? 'border-brand bg-brand/10 panel-shadow-sm'
+                        : 'border-secondary bg-[var(--color-panel)]'
+                    }`}
+                  >
+                    <div className="flex items-baseline gap-3">
+                      <span
+                        className={`font-pixel text-[11px] ${
+                          step.active ? 'text-brand' : 'text-muted/60'
+                        }`}
+                      >
+                        {step.n}
+                      </span>
+                      <span
+                        className={`font-heading text-base font-semibold uppercase tracking-wider ${
+                          step.active ? 'text-foreground' : 'text-muted'
+                        }`}
+                      >
+                        {step.label}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-muted">{step.desc}</p>
+                  </li>
+                ))}
+              </ol>
             </div>
           )}
 
-        {/* ---- Agent operational status ----
-            Surfaces the operator's kill switch to users under friendlier
-            "open for business" framing. When closed, users still see their
-            balance and can withdraw — only new plays/registrations are
-            blocked. The banner explains exactly that. */}
+        {/* ---- Agent operational status ────────────────────
+            Kill switch banner rendered as a destructive ComicPanel
+            when the operator has paused operations. Same vocabulary
+            as the rest of the page so it doesn't feel like an
+            afterthought. */}
         {publicStats && publicStats.acceptingOperations === false && (
-          <div
-            id="agent-status-banner"
-            role="status"
-            aria-live="polite"
-            className="mb-6 rounded-xl border border-destructive/40 bg-destructive/10 p-4"
-          >
-            <div className="flex items-start gap-3">
-              <span className="mt-1 inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-destructive" />
-              <div className="min-w-0 flex-1">
-                <p className="font-heading text-sm text-foreground">
-                  {publicStats.statusMessage ?? 'Agent temporarily closed'}
-                </p>
-                <p className="mt-1 text-xs text-muted">
-                  New plays and registrations are paused.
-                  Your balance is safe and withdrawals remain available.
-                </p>
-                {publicStats.statusReason && (
-                  <p className="mt-2 rounded bg-background/40 px-2 py-1 text-xs text-foreground">
-                    <span className="text-muted">Reason:</span>{' '}
-                    <span className="font-mono">{publicStats.statusReason}</span>
+          <div className="mb-8">
+            <ComicPanel
+              label="AGENT CLOSED"
+              tone="destructive"
+              halftone="none"
+            >
+              <div
+                id="agent-status-banner"
+                role="status"
+                aria-live="polite"
+                className="flex items-start gap-3 p-5"
+              >
+                <span className="mt-1 inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-destructive" />
+                <div className="min-w-0 flex-1">
+                  <p className="font-heading text-sm font-semibold text-foreground">
+                    {publicStats.statusMessage ?? 'Agent temporarily closed'}
                   </p>
-                )}
+                  <p className="mt-1 text-xs text-muted">
+                    New plays and registrations are paused.
+                    Your balance is safe and withdrawals remain available.
+                  </p>
+                  {publicStats.statusReason && (
+                    <p className="mt-2 border-l-2 border-destructive bg-background/40 px-3 py-2 text-xs text-foreground">
+                      <span className="label-caps mr-2">Reason</span>
+                      <span className="font-mono">{publicStats.statusReason}</span>
+                    </p>
+                  )}
+                </div>
               </div>
-            </div>
+            </ComicPanel>
           </div>
         )}
 
@@ -1155,7 +1169,7 @@ export default function DashboardPage() {
             stuck deposits, history, trust panel) demotes beneath it.
             ══════════════════════════════════════════════════════════ */}
         {status && (
-          <ComicPanel label="ISSUE #001" halftone="dense" className="mb-8">
+          <ComicPanel label="ISSUE #001" halftone="dense" className="mb-12">
             <div className="grid gap-6 p-6 sm:p-8 md:grid-cols-[auto_1fr] md:items-center md:gap-10">
               {/* Mascot slot */}
               <div className="mx-auto w-32 shrink-0 sm:w-40 md:mx-0 md:w-44">
@@ -1335,7 +1349,7 @@ export default function DashboardPage() {
             AND we have no stale hero data to render. History/trust/etc
             below continue to render independently. */}
         {!status && !statusLoading && error && (
-          <ComicPanel label="ERROR" tone="destructive" halftone="none" className="mb-8">
+          <ComicPanel label="ERROR" tone="destructive" halftone="none" className="mb-12">
             <div className="p-6">
               <p className="mb-2 font-heading text-base text-destructive">
                 Balance temporarily unavailable
@@ -1353,8 +1367,13 @@ export default function DashboardPage() {
           </ComicPanel>
         )}
 
-        {/* ---- Secondary Cards Grid ---- */}
-        <div className="grid gap-6 lg:grid-cols-2">
+        {/* ---- Sections below the hero ────────────────────
+            Flattened from a 2-col grid into a vertical stack since
+            every child already spanned both columns. Generous gaps
+            between distinct sections (space-y-10) give the page
+            rhythm — hero breathes, fund card breathes, stuck
+            deposits / history each land as their own beat. --- */}
+        <div className="space-y-10">
 
           {/* ---- Fund Your Account — collapsible ──────────────
               Spans full width. Defaults open when the user has no
@@ -1362,7 +1381,7 @@ export default function DashboardPage() {
               collapses once they have funds (they're past this step).
               Header row has title + chevron toggle + persistent
               "Check for deposits" button that works in either state. */}
-          <section className="border-2 border-secondary lg:col-span-2">
+          <section className="border-2 border-secondary">
             {/* Clickable header — whole row toggles collapse except the
                 refresh button which has its own click target. */}
             <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4">
@@ -1512,31 +1531,46 @@ export default function DashboardPage() {
             </div>
           </section>
 
-          {/* ---- Stuck deposits (dead letters) ---- */}
+          {/* ---- Stuck deposits (dead letters) ──────────────
+              Only rendered when the user has actual stuck deposits.
+              ComicPanel with destructive tone + halftone none (data-
+              dense, not a hero moment). "STUCK" corner sticker so
+              users can't miss it. */}
           {deadLetters.length > 0 && (
-            <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 shadow lg:col-span-2">
-              <h2 className="mb-1 font-heading text-lg text-destructive">
-                Stuck Deposits
-              </h2>
-              <p className="mb-4 text-xs text-muted">
-                {deadLetters.length === 1 ? 'A deposit' : 'These deposits'} from your wallet
-                couldn&apos;t be credited automatically. The funds are still in the agent
-                wallet. {supportUrl
-                  ? supportIsMailto
-                    ? 'Click Contact Support on a row below to email the operator — the transaction ID will be prefilled for you.'
-                    : 'Click Contact Support on a row below to reach the operator.'
-                  : 'Contact the operator with the transaction ID below to request a refund.'}
-              </p>
-              <div className="space-y-2">
+            <ComicPanel
+              label="STUCK"
+              tone="destructive"
+              halftone="none"
+            >
+              <div className="border-b border-destructive/40 px-5 py-4">
+                <p className="label-caps-brand mb-1 text-destructive">
+                  Stuck deposits
+                </p>
+                <p className="text-xs text-muted">
+                  {deadLetters.length === 1 ? 'A deposit' : 'These deposits'} from your
+                  wallet couldn&apos;t be credited automatically. The funds are still
+                  in the agent wallet.{' '}
+                  {supportUrl
+                    ? supportIsMailto
+                      ? 'Click Contact Support on a row below to email the operator — the transaction ID will be prefilled for you.'
+                      : 'Click Contact Support on a row below to reach the operator.'
+                    : 'Contact the operator with the transaction ID below to request a refund.'}
+                </p>
+              </div>
+              <ul className="divide-y divide-destructive/20">
                 {deadLetters.map((dl) => {
-                  const network = (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_HEDERA_NETWORK) || 'testnet';
-                  const hashscanUrl = network === 'mainnet'
-                    ? `https://hashscan.io/mainnet/transaction/${dl.transactionId}`
-                    : `https://hashscan.io/${network}/transaction/${dl.transactionId}`;
+                  const network =
+                    (typeof process !== 'undefined' &&
+                      process.env?.NEXT_PUBLIC_HEDERA_NETWORK) ||
+                    'testnet';
+                  const hashscanUrl =
+                    network === 'mainnet'
+                      ? `https://hashscan.io/mainnet/transaction/${dl.transactionId}`
+                      : `https://hashscan.io/${network}/transaction/${dl.transactionId}`;
                   const rowSupportUrl = buildSupportLink(dl.transactionId);
                   return (
-                    <div key={dl.transactionId} className="rounded-lg bg-secondary/30 p-3">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
+                    <li key={dl.transactionId} className="px-5 py-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
                         <code className="break-all font-mono text-xs text-destructive">
                           {dl.transactionId}
                         </code>
@@ -1544,10 +1578,11 @@ export default function DashboardPage() {
                           {rowSupportUrl && (
                             <a
                               href={rowSupportUrl}
-                              // mailto: links don't need a new tab; https ones do
                               target={supportIsMailto ? undefined : '_blank'}
-                              rel={supportIsMailto ? undefined : 'noopener noreferrer'}
-                              className="rounded bg-destructive px-2 py-1 text-[10px] font-semibold text-white transition-opacity hover:opacity-90"
+                              rel={
+                                supportIsMailto ? undefined : 'noopener noreferrer'
+                              }
+                              className="border-2 border-destructive bg-destructive/20 px-3 py-1.5 font-pixel text-[9px] uppercase tracking-wider text-destructive transition-colors hover:bg-destructive hover:text-white"
                             >
                               Contact Support
                             </a>
@@ -1556,254 +1591,282 @@ export default function DashboardPage() {
                             href={hashscanUrl}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="rounded border border-destructive/40 px-2 py-1 text-[10px] font-semibold text-destructive transition-colors hover:bg-destructive/10"
+                            className="border border-destructive/40 px-3 py-1.5 font-pixel text-[9px] uppercase tracking-wider text-destructive transition-colors hover:bg-destructive/10"
                           >
-                            HashScan
+                            HashScan ↗
                           </a>
                         </div>
                       </div>
-                      <p className="mt-1.5 text-xs text-muted">
-                        {dl.error}
-                      </p>
+                      <p className="mt-2 text-xs text-muted">{dl.error}</p>
                       {dl.memo && (
-                        <p className="mt-0.5 text-[10px] text-muted">
-                          Memo: <code className="font-mono">{dl.memo || '(none)'}</code>
+                        <p className="mt-1 text-[10px] text-muted">
+                          <span className="label-caps mr-2">Memo</span>
+                          <code className="font-mono">{dl.memo || '(none)'}</code>
                         </p>
                       )}
-                    </div>
+                    </li>
                   );
                 })}
-              </div>
-            </div>
+              </ul>
+            </ComicPanel>
           )}
 
-          {/* ---- Play History (full width) ---- */}
-          <div className="lg:col-span-2">
-            <h2 className="mb-1 font-heading text-lg text-foreground">
-              Play History
-            </h2>
-            <p className="mb-4 text-xs text-muted">
-              Your lottery play history. Each entry represents one agent play session across one or more pools.
-            </p>
-
-            {/* NFT enrichment error banner */}
+          {/* ---- Play History — wrapped as a ComicPanel so the
+               vocabulary carries from the hero to the rest of the
+               page. Halftone "none" because it's data-dense and a
+               textured background would compete with the rows. The
+               "RECENT PLAYS" corner sticker echoes the ISSUE #001
+               label on the hero so the two panels feel like a
+               continuous run. --- */}
+          <ComicPanel label="RECENT PLAYS" halftone="none">
+            {/* NFT enrichment error banner — toast-adjacent alert
+                inside the panel header area */}
             {enrichmentError && rawNftRefs.length > 0 && (
-              <div className="mb-4 flex items-center justify-between rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm">
+              <div className="flex items-center justify-between border-b border-destructive/40 bg-destructive/10 px-5 py-3 text-xs">
                 <span className="text-destructive">
                   Couldn&apos;t load NFT details. Your raw wins are shown below.
                 </span>
                 <button
                   type="button"
                   onClick={retryEnrichment}
-                  className="shrink-0 rounded border border-destructive/40 px-3 py-1 text-xs font-semibold text-destructive transition-colors hover:bg-destructive/20"
+                  className="shrink-0 border border-destructive/40 px-3 py-1 font-pixel text-[9px] uppercase tracking-wider text-destructive transition-colors hover:bg-destructive/20"
                 >
                   Retry
                 </button>
               </div>
             )}
 
-            {/* ---- Total P&L Summary ---- */}
-            {perfSummary && (
-              <div className="mb-4 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted">
-                <span>Total spent: {formatAmount(perfSummary.totalSpentAll)} {perfSummary.primaryToken}</span>
-                <span className="hidden sm:inline">|</span>
-                <span>Total won: {formatAmount(perfSummary.totalWonAll)} {perfSummary.primaryToken}</span>
-                <span className="hidden sm:inline">|</span>
-                <span>
-                  Net:{' '}
-                  <span className={perfSummary.net >= 0 ? 'text-success' : 'text-destructive'}>
-                    {perfSummary.net >= 0 ? '+' : ''}{formatAmount(perfSummary.net)} {perfSummary.primaryToken}
-                  </span>
-                </span>
+            {/* ---- Header + P&L strip ---- */}
+            <div className="flex flex-wrap items-end justify-between gap-3 px-5 pb-3 pt-5">
+              <div>
+                <p className="label-caps mb-1">Play log</p>
+                <p className="font-heading text-base text-foreground">
+                  Each row is one agent session across one or more pools
+                </p>
               </div>
-            )}
+              {perfSummary && (
+                <div className="flex flex-wrap items-center gap-4 text-xs">
+                  <div>
+                    <p className="label-caps mb-0.5">Spent</p>
+                    <p className="num-tabular text-foreground">
+                      {formatAmount(perfSummary.totalSpentAll)} {perfSummary.primaryToken}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="label-caps mb-0.5">Won</p>
+                    <p className="num-tabular text-foreground">
+                      {formatAmount(perfSummary.totalWonAll)} {perfSummary.primaryToken}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="label-caps mb-0.5">Net</p>
+                    <p
+                      className={`num-tabular font-semibold ${
+                        perfSummary.net >= 0 ? 'text-success' : 'text-destructive'
+                      }`}
+                    >
+                      {perfSummary.net >= 0 ? '+' : ''}
+                      {formatAmount(perfSummary.net)} {perfSummary.primaryToken}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
 
             {/* ---- Timeline ---- */}
-            {historyLoading ? (
-              <div className="space-y-3">
-                {[0, 1, 2].map((i) => (
-                  <div key={i} className="rounded-lg border border-secondary p-4">
-                    <div className="mb-3 flex items-center justify-between">
-                      <SkeletonBox className="h-4 w-32" />
-                      <SkeletonBox className="h-4 w-16" />
+            <div className="border-t border-brand/20">
+              {historyLoading ? (
+                <div className="divide-y divide-secondary/50">
+                  {[0, 1, 2].map((i) => (
+                    <div key={i} className="px-5 py-4">
+                      <div className="mb-3 flex items-center justify-between">
+                        <SkeletonBox className="h-4 w-32" />
+                        <SkeletonBox className="h-4 w-16" />
+                      </div>
+                      <div className="flex gap-2">
+                        <SkeletonBox className="h-6 w-20" />
+                        <SkeletonBox className="h-6 w-20" />
+                        <SkeletonBox className="h-6 w-20" />
+                      </div>
                     </div>
-                    <div className="flex gap-2">
-                      <SkeletonBox className="h-6 w-20" />
-                      <SkeletonBox className="h-6 w-20" />
-                      <SkeletonBox className="h-6 w-20" />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : sessions.length > 0 ? (
-              <>
-                <div className="space-y-4">
-                  {displayedSessions.map((s) => {
-                    const isWin = s.totalWins > 0;
-                    return (
-                      <div
-                        key={s.sessionId}
-                        className={`relative rounded-lg border ${
-                          isWin ? 'border-brand/30 bg-brand/5' : 'border-secondary'
-                        } p-4 pl-6`}
-                      >
-                        {/* Left accent bar for wins */}
-                        {isWin && (
-                          <div className="absolute left-0 top-0 bottom-0 w-1 rounded-l-lg bg-brand" />
-                        )}
-
-                        {/* Header row: date + net result */}
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-sm text-muted">
-                            {formatTimestamp(s.timestamp)}
-                          </span>
-                          <span
-                            className={`font-heading text-sm ${
-                              isWin ? 'text-brand' : 'text-muted'
-                            }`}
-                          >
-                            {isWin
-                              ? `+${formatAmount(s.totalPrizeValue)} won`
-                              : `${formatAmount(s.totalSpent)} spent`}
-                          </span>
-                        </div>
-
-                        {/* Pool badges */}
-                        <div className="flex flex-wrap gap-1.5 mb-2">
-                          {s.poolResults.map((pr) => (
+                  ))}
+                </div>
+              ) : sessions.length > 0 ? (
+                <>
+                  <ol className="divide-y divide-secondary/50">
+                    {displayedSessions.map((s) => {
+                      const isWin = s.totalWins > 0;
+                      const entryCount = s.poolResults.reduce(
+                        (sum, pr) => sum + pr.entriesBought,
+                        0,
+                      );
+                      return (
+                        <li
+                          key={s.sessionId}
+                          className={`relative border-l-[3px] px-5 py-4 transition-colors ${
+                            isWin
+                              ? 'border-brand bg-brand/5'
+                              : 'border-transparent hover:border-brand/30 hover:bg-brand/5'
+                          }`}
+                        >
+                          {/* Header row: timestamp in pixel font + win/spent readout */}
+                          <div className="mb-2 flex items-start justify-between gap-3">
+                            <span className="font-pixel text-[9px] uppercase tracking-wider text-muted">
+                              {formatTimestamp(s.timestamp)}
+                            </span>
                             <span
-                              key={pr.poolId}
-                              className="rounded bg-secondary px-2 py-0.5 text-xs text-muted"
+                              className={`num-tabular font-heading text-sm font-semibold ${
+                                isWin ? 'text-brand' : 'text-muted'
+                              }`}
                             >
-                              {pr.poolName}
+                              {isWin
+                                ? `+${formatAmount(s.totalPrizeValue)} won`
+                                : `${formatAmount(s.totalSpent)} spent`}
                             </span>
-                          ))}
-                        </div>
+                          </div>
 
-                        {/* Stats row */}
-                        <div className="flex gap-4 text-xs text-muted">
-                          <span>
-                            {s.poolResults.reduce(
-                              (sum, pr) => sum + pr.entriesBought,
-                              0,
-                            )}{' '}
-                            entries
-                          </span>
-                          <span>{formatAmount(s.totalSpent)} spent</span>
-                          {isWin && s.totalWins > 0 && (
-                            <span className="text-success">
-                              {s.totalWins} win{s.totalWins > 1 ? 's' : ''}
+                          {/* Pool badges — sharp corners, pixel-font */}
+                          <div className="mb-2 flex flex-wrap gap-1.5">
+                            {s.poolResults.map((pr) => (
+                              <span
+                                key={pr.poolId}
+                                className="border border-secondary bg-[var(--color-panel)] px-2 py-0.5 font-pixel text-[8px] uppercase tracking-wider text-muted"
+                              >
+                                {pr.poolName}
+                              </span>
+                            ))}
+                          </div>
+
+                          {/* Stats row — small-caps labels */}
+                          <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs">
+                            <span className="text-muted">
+                              <span className="label-caps mr-1.5">Entries</span>
+                              <span className="num-tabular text-foreground">{entryCount}</span>
                             </span>
-                          )}
-                        </div>
+                            <span className="text-muted">
+                              <span className="label-caps mr-1.5">Spent</span>
+                              <span className="num-tabular text-foreground">
+                                {formatAmount(s.totalSpent)}
+                              </span>
+                            </span>
+                            {isWin && s.totalWins > 0 && (
+                              <span className="text-muted">
+                                <span className="label-caps mr-1.5">Wins</span>
+                                <span className="num-tabular text-success">
+                                  {s.totalWins}
+                                </span>
+                              </span>
+                            )}
+                          </div>
 
-                        {/* Prize details for winning sessions */}
-                        {isWin &&
-                          s.poolResults.some(
-                            (pr) => pr.prizeDetails.length > 0,
-                          ) && (
-                            <div className="mt-2 space-y-2">
-                              {/* Fungible prizes — compact inline summary */}
-                              {(() => {
-                                const fungibleParts: string[] = [];
-                                for (const pr of s.poolResults) {
-                                  for (const prize of pr.prizeDetails) {
-                                    if (prize.fungibleAmount) {
-                                      fungibleParts.push(
-                                        `${prize.fungibleAmount} ${prize.fungibleToken ?? '?'}`,
-                                      );
+                          {/* Prize details for winning sessions */}
+                          {isWin &&
+                            s.poolResults.some(
+                              (pr) => pr.prizeDetails.length > 0,
+                            ) && (
+                              <div className="mt-3 space-y-2">
+                                {/* Fungible prizes — compact inline summary */}
+                                {(() => {
+                                  const fungibleParts: string[] = [];
+                                  for (const pr of s.poolResults) {
+                                    for (const prize of pr.prizeDetails) {
+                                      if (prize.fungibleAmount) {
+                                        fungibleParts.push(
+                                          `${prize.fungibleAmount} ${prize.fungibleToken ?? '?'}`,
+                                        );
+                                      }
                                     }
                                   }
-                                }
-                                return fungibleParts.length > 0 ? (
-                                  <div className="rounded bg-brand/10 px-3 py-2 text-xs text-brand">
-                                    {fungibleParts.join(' + ')}
-                                  </div>
-                                ) : null;
-                              })()}
+                                  return fungibleParts.length > 0 ? (
+                                    <div className="border-l-2 border-brand bg-brand/10 px-3 py-2 text-xs text-brand">
+                                      <span className="label-caps mr-2">Prizes</span>
+                                      <span className="num-tabular">{fungibleParts.join(' + ')}</span>
+                                    </div>
+                                  ) : null;
+                                })()}
 
-                              {/* NFT prizes — raw first, enriched in background */}
-                              {(() => {
-                                const rawNfts = s.poolResults
-                                  .flatMap((pr) => pr.prizeDetails)
-                                  .flatMap((pd) => pd.nfts ?? []);
-                                if (rawNfts.length === 0) return null;
-                                return (
-                                  <div className="flex flex-wrap gap-2">
-                                    {rawNfts.map((raw) => {
-                                      const key = `${raw.hederaId}!${raw.serial}`;
-                                      const enriched = enrichedMap.get(key);
-                                      return (
-                                        <PrizeNftCard
-                                          key={key}
-                                          raw={raw}
-                                          enriched={enriched}
-                                          loading={!enriched && enrichmentLoading}
-                                        />
-                                      );
-                                    })}
-                                  </div>
-                                );
-                              })()}
-                            </div>
-                          )}
-                      </div>
-                    );
-                  })}
-                </div>
+                                {/* NFT prizes — raw first, enriched in background */}
+                                {(() => {
+                                  const rawNfts = s.poolResults
+                                    .flatMap((pr) => pr.prizeDetails)
+                                    .flatMap((pd) => pd.nfts ?? []);
+                                  if (rawNfts.length === 0) return null;
+                                  return (
+                                    <div className="flex flex-wrap gap-2">
+                                      {rawNfts.map((raw) => {
+                                        const key = `${raw.hederaId}!${raw.serial}`;
+                                        const enriched = enrichedMap.get(key);
+                                        return (
+                                          <PrizeNftCard
+                                            key={key}
+                                            raw={raw}
+                                            enriched={enriched}
+                                            loading={!enriched && enrichmentLoading}
+                                          />
+                                        );
+                                      })}
+                                    </div>
+                                  );
+                                })()}
+                              </div>
+                            )}
+                        </li>
+                      );
+                    })}
+                  </ol>
 
-                {/* Show older sessions button */}
-                {sessions.length > 10 && !showAll && (
-                  <div className="mt-4 text-center">
-                    <button
-                      type="button"
-                      onClick={() => setShowAll(true)}
-                      className="text-sm text-primary transition-colors hover:text-primary/80"
-                    >
-                      Show older sessions ({sessions.length - 10} more)
-                    </button>
-                  </div>
-                )}
-                {showAll && sessions.length > 10 && (
-                  <div className="mt-4 text-center">
-                    <button
-                      type="button"
-                      onClick={() => setShowAll(false)}
-                      className="text-sm text-primary transition-colors hover:text-primary/80"
-                    >
-                      Show less
-                    </button>
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="border border-dashed border-secondary px-5 py-8 text-center">
-                {/* Copy adapts to the actual state — referencing Play Now
-                    when it's available, pointing at funding when it's not,
-                    acknowledging the pause when the kill switch is on. */}
-                <p className="font-pixel text-[10px] uppercase tracking-wider text-muted">
-                  No sessions yet
-                </p>
-                <p className="mt-2 text-sm text-muted">
-                  {agentClosed ? (
-                    <>
-                      The agent is <span className="text-destructive">temporarily closed</span> —
-                      check back once the operator resumes plays.
-                    </>
-                  ) : hasPlayableBalance ? (
-                    <>
-                      Hit <span className="font-semibold text-brand">Play</span> above when
-                      you&apos;re ready.
-                    </>
-                  ) : (
-                    <>
-                      Fund your agent above to start playing.
-                    </>
+                  {/* Show older sessions button */}
+                  {sessions.length > 10 && !showAll && (
+                    <div className="border-t border-secondary/50 px-5 py-3 text-center">
+                      <button
+                        type="button"
+                        onClick={() => setShowAll(true)}
+                        className="font-pixel text-[9px] uppercase tracking-wider text-brand transition-colors hover:text-foreground"
+                      >
+                        Show older sessions ({sessions.length - 10} more) →
+                      </button>
+                    </div>
                   )}
-                </p>
-              </div>
-            )}
-          </div>
+                  {showAll && sessions.length > 10 && (
+                    <div className="border-t border-secondary/50 px-5 py-3 text-center">
+                      <button
+                        type="button"
+                        onClick={() => setShowAll(false)}
+                        className="font-pixel text-[9px] uppercase tracking-wider text-brand transition-colors hover:text-foreground"
+                      >
+                        ← Show less
+                      </button>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="px-5 py-10 text-center">
+                  {/* Copy adapts to the actual state — referencing Play Now
+                      when it's available, pointing at funding when it's not,
+                      acknowledging the pause when the kill switch is on. */}
+                  <p className="font-pixel text-[10px] uppercase tracking-wider text-muted">
+                    No sessions yet
+                  </p>
+                  <p className="mt-2 text-sm text-muted">
+                    {agentClosed ? (
+                      <>
+                        The agent is{' '}
+                        <span className="text-destructive">temporarily closed</span> —
+                        check back once the operator resumes plays.
+                      </>
+                    ) : hasPlayableBalance ? (
+                      <>
+                        Hit <span className="font-semibold text-brand">Play</span> above
+                        when you&apos;re ready.
+                      </>
+                    ) : (
+                      <>Fund your agent above to start playing.</>
+                    )}
+                  </p>
+                </div>
+              )}
+            </div>
+          </ComicPanel>
         </div>
 
         {/* ── Proof of operation — compact footer bar ───────────

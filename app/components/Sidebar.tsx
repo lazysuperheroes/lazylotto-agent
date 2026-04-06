@@ -316,7 +316,7 @@ export function Sidebar() {
 
       {/* ---- Sidebar ---- */}
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-48 flex-col border-r border-[#27272a] bg-[#09090b] transition-transform duration-200 md:static md:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-52 flex-col border-r-2 border-brand/20 bg-[#09090b] transition-transform duration-200 md:static md:translate-x-0 ${
           open ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
@@ -333,22 +333,46 @@ export function Sidebar() {
           </Link>
         </div>
 
-        {/* Navigation */}
-        <nav className="flex flex-1 flex-col gap-1 px-3 py-2">
+        {/* Navigation — comic-tab treatment:
+            - Sharp corners (no rounded pill)
+            - Active item gets a 3px brand-gold left border + darker
+              panel-toned background, reading like an open tab on a
+              comic-book table of contents
+            - Inactive items have a transparent left border so the
+              layout doesn't shift when switching tabs
+            - Label is Heebo at 14px (readable) with pixel font reserved
+              for the active item marker */}
+        <nav className="flex flex-1 flex-col gap-0.5 px-0 py-3">
           {NAV_ITEMS.filter((item) => !item.adminOnly || isAdmin).map((item) => {
             const isActive = pathname === item.href;
             return (
               <Link
                 key={item.href}
                 href={item.href}
-                className={`flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
+                className={`group flex items-center gap-3 border-l-[3px] px-5 py-3 text-sm font-medium transition-colors ${
                   isActive
-                    ? 'bg-secondary text-[#fafafa]'
-                    : 'text-[#a1a1aa] hover:bg-[#27272a]/50 hover:text-[#fafafa]'
+                    ? 'border-brand bg-brand/10 text-foreground'
+                    : 'border-transparent text-muted hover:border-brand/40 hover:bg-secondary/40 hover:text-foreground'
                 }`}
               >
-                <item.Icon className={isActive ? 'text-[#fafafa]' : 'text-[#a1a1aa]'} />
-                {isAuthenticated && item.labelAuth ? item.labelAuth : item.label}
+                <item.Icon
+                  className={
+                    isActive
+                      ? 'text-brand'
+                      : 'text-muted transition-colors group-hover:text-brand'
+                  }
+                />
+                <span className="flex-1">
+                  {isAuthenticated && item.labelAuth ? item.labelAuth : item.label}
+                </span>
+                {isActive && (
+                  <span
+                    className="font-pixel text-[8px] text-brand"
+                    aria-hidden="true"
+                  >
+                    ●
+                  </span>
+                )}
               </Link>
             );
           })}

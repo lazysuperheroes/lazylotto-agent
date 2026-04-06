@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useToast } from '../components/Toast';
 import { Modal } from '../components/Modal';
+import { ComicPanel } from '../components/ComicPanel';
 
 // ---------------------------------------------------------------------------
 // Types -- shaped to match actual API responses
@@ -649,138 +650,151 @@ export default function AdminPage() {
 
   // --- Admin Dashboard ---
   return (
-    <div className="w-full px-4 py-8 sm:px-6 lg:px-8">
+    <div className="w-full px-4 py-10 sm:px-6 lg:px-10">
       <div className="mx-auto max-w-7xl">
-        {/* ---- Top Bar ---- */}
-        <header className="mb-8 flex items-center gap-3">
-          <h1 className="font-heading text-2xl text-foreground">
+        {/* ---- Top Bar ──────────────────────────────────────
+            Admin header mirrors the dashboard header but with the
+            calm, deliberate tone the brief prescribes for operator
+            surfaces — no mascot, no gold flourish, just a clear
+            chapter title. */}
+        <header className="mb-10">
+          <p className="label-caps mb-1">Operator view</p>
+          <h1 className="font-heading text-3xl font-extrabold uppercase tracking-tight text-foreground">
             Agent Administration
           </h1>
-          {/* Persistent network badge — matches dashboard framing */}
-          {(() => {
-            const network =
-              (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_HEDERA_NETWORK) ||
-              'testnet';
-            return (
-              <span
-                className={`rounded px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${
-                  network === 'mainnet'
-                    ? 'bg-brand/15 text-brand'
-                    : 'bg-secondary text-muted'
-                }`}
-                title={`Hedera ${network}`}
-              >
-                {network}
-              </span>
-            );
-          })()}
         </header>
 
-        {/* ---- Kill Switch ---- */}
+        {/* ---- Kill Switch ──────────────────────────────────
+            Always visible at the top of the admin page. Tone flips
+            from muted (normal ops) to destructive (engaged) so the
+            operator can't miss the state at a glance. */}
         {killSwitch && (
-          <div
-            className={`mb-6 rounded-xl border p-4 ${
-              killSwitch.enabled
-                ? 'border-destructive/60 bg-destructive/10'
-                : 'border-secondary bg-secondary/20'
-            }`}
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`inline-block h-2.5 w-2.5 rounded-full ${
-                      killSwitch.enabled ? 'bg-destructive' : 'bg-success'
-                    }`}
-                  />
-                  <p className="font-heading text-sm text-foreground">
-                    {killSwitch.enabled ? 'Kill switch ENGAGED' : 'Kill switch disengaged'}
+          <div className="mb-8">
+            <ComicPanel
+              label={killSwitch.enabled ? 'ENGAGED' : 'STANDBY'}
+              tone={killSwitch.enabled ? 'destructive' : 'muted'}
+              halftone="none"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-4 p-5">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`inline-block h-2.5 w-2.5 rounded-full ${
+                        killSwitch.enabled ? 'bg-destructive' : 'bg-success'
+                      }`}
+                    />
+                    <p className="label-caps">Kill switch</p>
+                    <p
+                      className={`font-heading text-sm font-semibold uppercase tracking-wider ${
+                        killSwitch.enabled ? 'text-destructive' : 'text-success'
+                      }`}
+                    >
+                      {killSwitch.enabled ? 'Engaged' : 'Standby'}
+                    </p>
+                  </div>
+                  <p className="mt-2 text-xs text-muted">
+                    {killSwitch.enabled
+                      ? 'New plays and registrations are blocked. Withdrawals and reads remain available.'
+                      : 'Operations are running normally. Engage to pause new plays and registrations during an incident.'}
+                  </p>
+                  {killSwitch.enabled && killSwitch.reason && (
+                    <p className="mt-2 border-l-2 border-destructive bg-background/40 px-3 py-2 text-xs text-foreground">
+                      <span className="label-caps mr-2">Reason</span>
+                      <span className="font-mono">{killSwitch.reason}</span>
+                      {killSwitch.enabledBy && (
+                        <>
+                          {' '}
+                          <span className="label-caps mx-1">by</span>
+                          <span className="font-mono text-muted">{killSwitch.enabledBy}</span>
+                        </>
+                      )}
+                      {killSwitch.enabledAt && (
+                        <>
+                          {' '}
+                          <span className="label-caps mx-1">at</span>
+                          <span className="font-mono text-muted">
+                            {formatTimestamp(killSwitch.enabledAt)}
+                          </span>
+                        </>
+                      )}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (killSwitch.enabled) void handleDisableKillSwitch();
+                    else void handleEnableKillSwitch();
+                  }}
+                  disabled={killSwitchLoading}
+                  className={`shrink-0 border-2 px-4 py-2 font-pixel text-[10px] uppercase tracking-wider transition-colors disabled:opacity-50 ${
+                    killSwitch.enabled
+                      ? 'border-success bg-success text-background hover:opacity-90'
+                      : 'border-destructive bg-destructive text-white hover:opacity-90'
+                  }`}
+                >
+                  {killSwitchLoading ? '...' : killSwitch.enabled ? 'Disengage' : 'Engage'}
+                </button>
+              </div>
+            </ComicPanel>
+          </div>
+        )}
+
+        {/* ---- Overview Banner ──────────────────────────────
+            Operator stats at the top — gold tone because these ARE
+            real user data (actual counts, actual amounts), per the
+            design reference "if showing real user data, a prominent
+            metric can work". Four tiles in a clean grid with
+            small-caps labels. */}
+        {overview && (
+          <div className="mb-8">
+            <ComicPanel label="OVERVIEW" halftone="light">
+              <div className="grid grid-cols-2 gap-0 divide-x divide-y divide-brand/15 md:grid-cols-4 md:divide-y-0">
+                <div className="p-5">
+                  <p className="label-caps mb-1">Active users</p>
+                  <p className="num-tabular font-heading text-3xl font-extrabold text-brand">
+                    {overview.users.active}
+                  </p>
+                  <p className="mt-1 text-[11px] text-muted">
+                    of {overview.users.total} total
                   </p>
                 </div>
-                <p className="mt-1 text-xs text-muted">
-                  {killSwitch.enabled
-                    ? 'New plays and registrations are blocked. Withdrawals and reads remain available.'
-                    : 'Operations are running normally. Engage to pause new plays and registrations during an incident.'}
-                </p>
-                {killSwitch.enabled && killSwitch.reason && (
-                  <p className="mt-2 rounded bg-background/40 px-2 py-1 text-xs text-foreground">
-                    Reason: <span className="font-mono">{killSwitch.reason}</span>
-                    {killSwitch.enabledBy && (
-                      <>
-                        {' '}— <span className="text-muted">by {killSwitch.enabledBy}</span>
-                      </>
-                    )}
-                    {killSwitch.enabledAt && (
-                      <>
-                        {' '}— <span className="text-muted">{formatTimestamp(killSwitch.enabledAt)}</span>
-                      </>
-                    )}
+                <div className="p-5">
+                  <p className="label-caps mb-1">Deposited</p>
+                  <p className="num-tabular font-heading text-2xl font-extrabold text-brand">
+                    {summariseTokenMap(overview.balances.totalDeposited)}
                   </p>
-                )}
+                </div>
+                <div className="p-5">
+                  <p className="label-caps mb-1">Operator rake</p>
+                  <p className="num-tabular font-heading text-2xl font-extrabold text-brand">
+                    {summariseTokenMap(overview.operator.totalRakeCollected)}
+                  </p>
+                </div>
+                <div className="p-5">
+                  <p className="label-caps mb-1">Gas spent</p>
+                  <p className="num-tabular font-heading text-2xl font-extrabold text-brand">
+                    {fmt(overview.operator.totalGasSpent, 2)}{' '}
+                    <span className="text-sm text-muted">HBAR</span>
+                  </p>
+                </div>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  if (killSwitch.enabled) void handleDisableKillSwitch();
-                  else void handleEnableKillSwitch();
-                }}
-                disabled={killSwitchLoading}
-                className={`rounded-md px-4 py-1.5 text-sm font-semibold transition-opacity disabled:opacity-50 ${
-                  killSwitch.enabled
-                    ? 'bg-success text-background hover:opacity-90'
-                    : 'bg-destructive text-white hover:opacity-90'
-                }`}
-              >
-                {killSwitchLoading
-                  ? '...'
-                  : killSwitch.enabled
-                  ? 'Disengage'
-                  : 'Engage'}
-              </button>
-            </div>
+            </ComicPanel>
           </div>
         )}
 
-        {/* ---- Overview Banner ---- */}
-        {overview && (
-          <div className="mb-6 rounded-xl bg-secondary/30 p-6">
-            <div className="grid grid-cols-2 gap-6 lg:grid-cols-4">
-              <div>
-                <p className="font-heading text-3xl text-brand">
-                  {overview.users.active}
-                </p>
-                <p className="mt-1 text-sm text-muted">
-                  Active Users ({overview.users.total} total)
-                </p>
-              </div>
-              <div>
-                <p className="font-heading text-3xl text-brand">
-                  {summariseTokenMap(overview.balances.totalDeposited)}
-                </p>
-                <p className="mt-1 text-sm text-muted">Total Deposited</p>
-              </div>
-              <div>
-                <p className="font-heading text-3xl text-brand">
-                  {summariseTokenMap(overview.operator.totalRakeCollected)}
-                </p>
-                <p className="mt-1 text-sm text-muted">Operator Rake</p>
-              </div>
-              <div>
-                <p className="font-heading text-3xl text-brand">
-                  {fmt(overview.operator.totalGasSpent, 2)} hbar
-                </p>
-                <p className="mt-1 text-sm text-muted">Gas Spent</p>
-              </div>
+        {/* ---- Users Table ──────────────────────────────────
+            Managed users wrapped in a calm muted-tone ComicPanel.
+            Table itself keeps the existing density — admin tables
+            need information bandwidth, not decorative spacing. */}
+        <div className="mb-8">
+          <ComicPanel label="USERS" tone="muted" halftone="none">
+            <div className="border-b border-secondary px-5 py-4">
+              <p className="label-caps mb-1">Managed users</p>
+              <p className="text-xs text-muted">
+                Click a column to sort. Columns scroll horizontally on narrow viewports.
+              </p>
             </div>
-          </div>
-        )}
-
-        {/* ---- Users Table ---- */}
-        <div className="mb-6 rounded-xl border border-secondary p-6 shadow">
-          <h2 className="mb-4 font-heading text-lg text-foreground">
-            Managed Users
-          </h2>
-
           {sortedUsers.length > 0 ? (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[960px] text-sm">
@@ -877,58 +891,61 @@ export default function AdminPage() {
               </table>
             </div>
           ) : (
-            <p className="text-sm text-muted">No users registered yet.</p>
+            <p className="px-5 py-8 text-center text-sm text-muted">
+              No users registered yet.
+            </p>
           )}
+          </ComicPanel>
         </div>
 
-        {/* ---- Bottom Row: Dead Letters + Reconciliation ---- */}
-        <div className="mb-6 grid gap-6 lg:grid-cols-2">
+        {/* ---- Bottom Row: Dead Letters + Reconciliation ──── */}
+        <div className="mb-8 grid gap-6 lg:grid-cols-2">
 
-          {/* ---- Dead Letters Card ---- */}
-          <div
-            className={`rounded-xl border p-6 shadow ${
-              hasDeadLetters
-                ? 'border-l-4 border-destructive'
-                : 'border-secondary'
-            }`}
+          {/* ---- Dead Letters Card ─────────────────────────
+              Tone flips from muted (clean state) to destructive
+              (has dead letters) so the operator sees it at a glance. */}
+          <ComicPanel
+            label={hasDeadLetters ? 'UNPROCESSED' : 'CLEAN'}
+            tone={hasDeadLetters ? 'destructive' : 'muted'}
+            halftone="none"
           >
-            <h2 className="mb-4 font-heading text-lg text-foreground">
-              Unprocessed Deposits
+            <div className="flex items-center justify-between border-b border-secondary px-5 py-4">
+              <p className="label-caps">Unprocessed deposits</p>
               {overview && overview.deadLetterCount > 0 && (
-                <span className="ml-2 rounded-full bg-destructive/20 px-2 py-0.5 text-xs text-destructive">
-                  {overview.deadLetterCount}
+                <span className="border border-destructive bg-destructive/10 px-2 py-0.5 font-pixel text-[9px] uppercase tracking-wider text-destructive">
+                  {overview.deadLetterCount} stuck
                 </span>
               )}
-            </h2>
+            </div>
 
             {deadLetters.length > 0 ? (
-              <div className="space-y-0 overflow-x-auto">
+              <div className="overflow-x-auto">
                 <table className="w-full min-w-[720px] text-sm">
                   <thead>
-                    <tr className="border-b border-secondary bg-secondary/50 text-left">
-                      <th className="px-3 py-3 font-medium text-muted">Transaction ID</th>
-                      <th className="px-3 py-3 font-medium text-muted">Timestamp</th>
-                      <th className="px-3 py-3 font-medium text-muted">Error</th>
-                      <th className="px-3 py-3 font-medium text-muted" />
+                    <tr className="border-b border-secondary text-left">
+                      <th className="px-5 py-3 font-pixel text-[9px] uppercase tracking-wider text-muted">Transaction ID</th>
+                      <th className="px-5 py-3 font-pixel text-[9px] uppercase tracking-wider text-muted">Timestamp</th>
+                      <th className="px-5 py-3 font-pixel text-[9px] uppercase tracking-wider text-muted">Error</th>
+                      <th className="px-5 py-3" />
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody className="divide-y divide-secondary">
                     {deadLetters.map((dl) => (
-                      <tr key={dl.transactionId} className="border-b border-secondary">
-                        <td className="px-3 py-3 font-mono text-xs text-foreground">
+                      <tr key={dl.transactionId} className="transition-colors hover:bg-secondary/20">
+                        <td className="px-5 py-3 font-mono text-xs text-foreground">
                           {dl.transactionId}
                         </td>
-                        <td className="whitespace-nowrap px-3 py-3 text-muted">
+                        <td className="whitespace-nowrap px-5 py-3 text-xs text-muted">
                           {formatTimestamp(dl.timestamp)}
                         </td>
-                        <td className="px-3 py-3 text-destructive">
+                        <td className="px-5 py-3 text-xs text-destructive">
                           {dl.error}
                         </td>
-                        <td className="px-3 py-3">
+                        <td className="px-5 py-3">
                           <button
                             type="button"
                             onClick={() => void handleRefund(dl.transactionId)}
-                            className="rounded-md border border-secondary px-3 py-1.5 text-xs text-muted transition-colors hover:border-brand hover:text-brand"
+                            className="border border-secondary px-3 py-1.5 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
                           >
                             Refund
                           </button>
@@ -939,39 +956,50 @@ export default function AdminPage() {
                 </table>
               </div>
             ) : (
-              <div className="rounded-lg bg-success/10 px-4 py-3">
-                <p className="text-sm text-success">
-                  No dead letters -- all deposits processed successfully.
+              <div className="px-5 py-6 text-center">
+                <p className="font-pixel text-[10px] uppercase tracking-wider text-success">
+                  ✓ All clear
+                </p>
+                <p className="mt-1 text-xs text-muted">
+                  All deposits processed successfully.
                 </p>
               </div>
             )}
-          </div>
+          </ComicPanel>
 
-          {/* ---- Reconciliation Card (collapsible) ---- */}
-          <div className="rounded-xl border border-secondary p-6 shadow">
+          {/* ---- Reconciliation Card (collapsible) ─────── */}
+          <ComicPanel label="RECONCILE" tone="muted" halftone="none">
             <button
               type="button"
               onClick={() => setReconOpen((prev) => !prev)}
-              className="mb-0 flex w-full items-center justify-between text-left"
+              className="flex w-full items-center justify-between px-5 py-4 text-left"
             >
-              <h2 className="font-heading text-lg text-foreground">
-                Balance Reconciliation
-              </h2>
-              <span className="text-sm text-muted">
-                {reconOpen ? '\u25B2' : '\u25BC'}
+              <div>
+                <p className="label-caps mb-1">Balance reconciliation</p>
+                <p className="font-heading text-base text-foreground">
+                  Compare on-chain vs ledger
+                </p>
+              </div>
+              <span
+                className={`font-pixel text-[10px] text-brand transition-transform ${
+                  reconOpen ? 'rotate-90' : ''
+                }`}
+                aria-hidden="true"
+              >
+                ▸
               </span>
             </button>
 
             {reconOpen && (
-              <div className="mt-4">
+              <div className="border-t border-secondary px-5 pb-5 pt-4">
                 <div className="mb-4 flex items-center justify-end">
                   <button
                     type="button"
                     onClick={() => void handleReconciliation()}
                     disabled={reconRunning}
-                    className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                    className="border-2 border-brand bg-brand/10 px-4 py-2 font-pixel text-[10px] uppercase tracking-wider text-brand transition-colors hover:bg-brand hover:text-background disabled:opacity-50"
                   >
-                    {reconRunning ? 'Running...' : 'Run Reconciliation'}
+                    {reconRunning ? 'Running…' : 'Run Reconciliation'}
                   </button>
                 </div>
 
@@ -1072,73 +1100,87 @@ export default function AdminPage() {
                     )}
                   </div>
                 ) : reconMessage ? (
-                  <div className="rounded-lg bg-secondary px-4 py-3">
-                    <p className="text-sm text-muted">{reconMessage}</p>
+                  <div className="border border-secondary bg-[var(--color-panel)] px-4 py-3">
+                    <p className="text-xs text-muted">{reconMessage}</p>
                   </div>
                 ) : (
-                  <p className="text-sm text-muted">
-                    Click &quot;Run Reconciliation&quot; to compare on-chain balances against
-                    the internal ledger and verify solvency.
+                  <p className="text-xs text-muted">
+                    Click <span className="font-semibold text-brand">Run Reconciliation</span> to compare
+                    on-chain balances against the internal ledger and verify solvency.
                   </p>
                 )}
               </div>
             )}
-          </div>
+          </ComicPanel>
         </div>
 
-        {/* ---- Operator Balance Card (collapsible) ---- */}
-        <div className="rounded-xl border border-secondary p-6 shadow">
-          <button
-            type="button"
-            onClick={() => setOperatorOpen((prev) => !prev)}
-            className="flex w-full items-center justify-between text-left"
-          >
-            <h2 className="font-heading text-lg text-foreground">
-              Operator Balance
-            </h2>
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void handleWithdrawFees();
-                }}
-                className="rounded-md bg-brand px-4 py-1.5 text-sm font-semibold text-background transition-opacity hover:opacity-90"
+        {/* ---- Operator Balance Card (collapsible) ─────── */}
+        <ComicPanel label="OPERATOR" halftone="light">
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <button
+              type="button"
+              onClick={() => setOperatorOpen((prev) => !prev)}
+              aria-expanded={operatorOpen}
+              aria-controls="operator-balance-body"
+              className="group flex min-w-0 flex-1 items-center gap-3 text-left"
+            >
+              <span
+                className={`font-pixel text-[10px] text-brand transition-transform ${
+                  operatorOpen ? 'rotate-90' : ''
+                }`}
+                aria-hidden="true"
               >
-                Withdraw Fees
-              </button>
-              <span className="text-sm text-muted">
-                {operatorOpen ? '\u25B2' : '\u25BC'}
+                ▸
               </span>
-            </div>
-          </button>
+              <div className="min-w-0">
+                <p className="label-caps mb-1">Operator balance</p>
+                <p className="font-heading text-base text-foreground">
+                  Accumulated rake, gas, and net profit
+                </p>
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleWithdrawFees();
+              }}
+              className="shrink-0 border-2 border-brand bg-brand px-4 py-2 font-pixel text-[10px] uppercase tracking-wider text-background transition-opacity hover:opacity-90"
+            >
+              Withdraw Fees
+            </button>
+          </div>
 
-          {operatorOpen && (
-            <div className="mt-4">
+          <div
+            id="operator-balance-body"
+            className="collapsible-grid"
+            data-open={operatorOpen ? 'true' : 'false'}
+          >
+            <div className="collapsible-inner">
               {operatorBalances.length > 0 ? (
-                <div className="overflow-x-auto">
+                <div className="overflow-x-auto border-t border-brand/20">
                   <table className="w-full text-sm">
                     <thead>
-                      <tr className="border-b border-secondary bg-secondary/50 text-left">
-                        <th className="px-4 py-3 font-medium text-muted">Token</th>
-                        <th className="px-4 py-3 text-right font-medium text-muted">Rake Collected</th>
-                        <th className="px-4 py-3 text-right font-medium text-muted">Gas Spent</th>
-                        <th className="px-4 py-3 text-right font-medium text-muted">Net Profit</th>
+                      <tr className="border-b border-secondary text-left">
+                        <th className="px-5 py-3 font-pixel text-[9px] uppercase tracking-wider text-muted">Token</th>
+                        <th className="px-5 py-3 text-right font-pixel text-[9px] uppercase tracking-wider text-muted">Rake Collected</th>
+                        <th className="px-5 py-3 text-right font-pixel text-[9px] uppercase tracking-wider text-muted">Gas Spent</th>
+                        <th className="px-5 py-3 text-right font-pixel text-[9px] uppercase tracking-wider text-muted">Net Profit</th>
                       </tr>
                     </thead>
-                    <tbody>
+                    <tbody className="divide-y divide-secondary">
                       {operatorBalances.map((ob) => (
-                        <tr key={ob.token} className="border-b border-secondary">
-                          <td className="px-4 py-3">
-                            <span className="font-medium text-foreground">{ob.token}</span>
+                        <tr key={ob.token} className="transition-colors hover:bg-secondary/20">
+                          <td className="px-5 py-3">
+                            <span className="font-mono text-xs text-foreground">{ob.token}</span>
                           </td>
-                          <td className="px-4 py-3 text-right font-medium text-brand">
+                          <td className="num-tabular px-5 py-3 text-right font-medium text-brand">
                             {fmt(ob.rakeCollected)}
                           </td>
-                          <td className="px-4 py-3 text-right text-foreground">
+                          <td className="num-tabular px-5 py-3 text-right text-foreground">
                             {fmt(ob.gasSpent, 2)}
                           </td>
-                          <td className={`px-4 py-3 text-right font-medium ${
+                          <td className={`num-tabular px-5 py-3 text-right font-medium ${
                             ob.netProfit < 0 ? 'text-destructive' : 'text-success'
                           }`}>
                             {ob.netProfit < 0 ? '' : '+'}{fmt(ob.netProfit, 2)}
@@ -1149,11 +1191,13 @@ export default function AdminPage() {
                   </table>
                 </div>
               ) : (
-                <p className="text-sm text-muted">No operator balance data available.</p>
+                <p className="border-t border-brand/20 px-5 py-6 text-center text-xs text-muted">
+                  No operator balance data available.
+                </p>
               )}
             </div>
-          )}
-        </div>
+          </div>
+        </ComicPanel>
       </div>
 
       {/* ── Withdraw Fees modal ─────────────────────────────── */}
