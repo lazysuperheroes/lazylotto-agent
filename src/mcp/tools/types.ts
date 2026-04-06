@@ -89,11 +89,16 @@ export interface ServerContext {
 
   /**
    * Distributed lock for concurrent play/withdraw prevention.
-   * In serverless: Redis SETNX. In CLI: no-op (in-memory locks suffice).
-   * Returns true if lock acquired, false if already held.
+   * In serverless: Redis SET NX EX with a fence token.
+   * In CLI: no-op (returns a dummy token) — in-memory mutex suffices.
+   * Returns a fence token string on success, or null if the lock is held.
+   * The caller MUST pass the returned token back to releaseUserLock().
    */
-  acquireUserLock: (userId: string) => Promise<boolean>;
+  acquireUserLock: (userId: string) => Promise<string | null>;
 
-  /** Release a distributed user lock. */
-  releaseUserLock: (userId: string) => Promise<void>;
+  /**
+   * Release a distributed user lock. Requires the fence token returned
+   * by acquireUserLock — releases are no-ops if the token doesn't match.
+   */
+  releaseUserLock: (userId: string, token: string) => Promise<void>;
 }

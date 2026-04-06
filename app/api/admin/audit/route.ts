@@ -13,6 +13,7 @@
 
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
+import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { HEDERA_DEFAULTS } from '~/config/defaults';
 
 // ---------------------------------------------------------------------------
@@ -208,6 +209,11 @@ export async function OPTIONS() {
 
 export async function GET(request: Request) {
   try {
+    // Mirror node topic scan — tighter limit
+    if (!(await checkRateLimit({ request, action: 'admin-audit', limit: 20, windowSec: 60 }))) {
+      return rateLimitResponse(60);
+    }
+
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
 

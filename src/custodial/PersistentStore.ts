@@ -301,6 +301,18 @@ export class PersistentStore implements IStore {
     /* no-op */
   }
 
+  async refreshDepositsForUser(_userId: string): Promise<void> {
+    /* no-op */
+  }
+
+  async refreshWithdrawalsForUser(_userId: string): Promise<void> {
+    /* no-op */
+  }
+
+  async refreshGasForUser(_userId: string): Promise<void> {
+    /* no-op */
+  }
+
   // ── Users ────────────────────────────────────────────────────
 
   getUser(userId: string): UserAccount | undefined {

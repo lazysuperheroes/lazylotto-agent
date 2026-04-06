@@ -432,6 +432,23 @@ export class MultiUserAgent {
       const user = this.store.getUser(userId);
       if (!user) throw new UserNotFoundError(userId);
 
+      // Velocity cap: limit total withdrawal volume per user per 24 hours.
+      // Bounds blast radius if a user session is compromised.
+      // Default 1000 (HBAR equivalent) — override via WITHDRAWAL_DAILY_CAP_HBAR env.
+      // We track HBAR-equivalent only (FT prizes are denominated in their own token,
+      // so the cap applies to HBAR withdrawals — extend per-token if needed).
+      const dailyCap = Number(process.env.WITHDRAWAL_DAILY_CAP_HBAR ?? '1000');
+      if (token === 'hbar' && dailyCap > 0) {
+        const remaining = await this.checkWithdrawalVelocity(userId, amount, dailyCap);
+        if (remaining < 0) {
+          throw new Error(
+            `Daily withdrawal cap exceeded for user ${userId}. ` +
+            `Cap: ${dailyCap} HBAR, would exceed by ${Math.abs(remaining)}. ` +
+            `Try a smaller amount or wait for the rolling window to reset.`,
+          );
+        }
+      }
+
       // Use the token parameter for withdrawal currency selection
       const withdrawToken = token;
       const isHbar = withdrawToken === 'hbar';
@@ -700,5 +717,46 @@ export class MultiUserAgent {
     this.userLocks.delete(userId);
     this.lockResolvers.delete(userId);
     resolver?.();
+  }
+
+  // ── Withdrawal velocity cap ────────────────────────────────────
+  //
+  // Tracks per-user 24h withdrawal volume in Redis (auth namespace).
+  // Returns the remaining capacity after this withdrawal would be
+  // applied: positive = OK, negative = over cap (caller should reject).
+  //
+  // Falls back to "always allow" if Redis isn't available — the cap
+  // is a defense-in-depth measure, not the primary auth check.
+
+  private async checkWithdrawalVelocity(
+    userId: string,
+    amount: number,
+    capHbar: number,
+  ): Promise<number> {
+    try {
+      const { getRedis, KEY_PREFIX } = await import('../auth/redis.js');
+      const redis = await getRedis();
+      const key = `${KEY_PREFIX.rateLimit}withdrawal-vol:${userId}`;
+
+      // Read current cumulative volume in the rolling window
+      const currentRaw = await redis.get<string>(key);
+      const current = currentRaw ? Number(currentRaw) || 0 : 0;
+      const proposed = current + amount;
+
+      if (proposed > capHbar) {
+        return capHbar - proposed; // negative = over cap
+      }
+
+      // Within budget — increment and (re)set TTL to 24h
+      // Use a get-then-set pattern (incrby would be cleaner but
+      // RedisLike doesn't expose it; we already hold the per-user lock
+      // so the race is bounded to multi-Lambda which is rare for
+      // withdrawals from the same user).
+      await redis.set(key, String(proposed), { ex: 24 * 60 * 60 });
+      return capHbar - proposed; // positive = remaining
+    } catch (e) {
+      console.warn('[velocity] check failed (allowing withdrawal):', e);
+      return capHbar; // fail-open — don't block legit withdrawals on Redis hiccup
+    }
   }
 }

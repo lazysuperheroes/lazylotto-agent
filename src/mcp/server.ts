@@ -172,8 +172,9 @@ export async function startMcpServer(
       return 0;
     },
     // In CLI mode, the in-memory promise-based locks in MultiUserAgent
-    // provide single-process protection. No distributed lock needed.
-    acquireUserLock: async () => true,
+    // provide single-process protection. No distributed lock needed —
+    // return a constant non-null token to signal "acquired".
+    acquireUserLock: async () => 'cli',
     releaseUserLock: async () => {},
   };
 

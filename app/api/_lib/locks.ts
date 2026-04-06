@@ -1,26 +1,43 @@
 /**
  * Redis-based distributed user locks for serverless.
  *
- * The in-memory promise-based locks in MultiUserAgent only protect
- * within a single Node.js process. In serverless (Vercel), concurrent
- * Lambda invocations are separate processes — the in-memory lock
- * provides zero cross-process protection.
+ * Uses atomic SET NX EX with a unique fence token per acquirer, and
+ * releases via a compare-and-delete Lua script so a Lambda that's
+ * past its TTL cannot accidentally release a newer owner's lock.
  *
- * This module uses Redis INCR (atomic) with TTL for distributed locking,
- * ensuring that two concurrent requests can't play or withdraw
- * for the same user simultaneously.
+ * This pattern is the standard "correct" distributed lock minus
+ * Redlock-style multi-node replication — Upstash is a single
+ * replicated cluster, so a single SET NX is sufficient for our
+ * serverless "prevent concurrent play/withdraw per user" use case.
+ *
+ * Usage:
+ *   const token = await acquireUserLock(userId);
+ *   if (!token) return 'locked by another operation';
+ *   try {
+ *     // do the thing
+ *   } finally {
+ *     await releaseUserLock(userId, token);
+ *   }
  */
 
+import { randomUUID } from 'node:crypto';
 import { getRedis, KEY_PREFIX } from '~/auth/redis';
 
 const LOCK_PREFIX = KEY_PREFIX.session.replace('session:', 'lock:user:');
 
+/** Lua: delete the key only if its value matches the expected token. */
+const RELEASE_SCRIPT = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+else
+  return 0
+end
+`;
+
 /**
  * Attempt to acquire a distributed lock for a user.
- * Returns true if the lock was acquired, false if already held.
- *
- * Uses atomic INCR: first caller gets count=1 (lock acquired),
- * concurrent callers get count>1 (lock denied).
+ * Returns a fence token string on success, or null if the lock is held.
+ * The caller MUST pass the returned token back to releaseUserLock().
  *
  * @param userId - The user ID to lock
  * @param ttlSec - Lock TTL in seconds (default 300 = 5 min)
@@ -28,27 +45,35 @@ const LOCK_PREFIX = KEY_PREFIX.session.replace('session:', 'lock:user:');
 export async function acquireUserLock(
   userId: string,
   ttlSec = 300,
-): Promise<boolean> {
+): Promise<string | null> {
   const redis = await getRedis();
   const key = `${LOCK_PREFIX}${userId}`;
+  const token = randomUUID();
 
-  // INCR is atomic — first caller gets 1, others get 2+
-  const count = await redis.incr(key);
-
-  if (count === 1) {
-    // We won the lock — set TTL so it auto-expires if we crash
-    await redis.expire(key, ttlSec);
-    return true;
-  }
-
-  // Lock already held by another invocation
-  return false;
+  // Atomic SET NX EX — returns 'OK' on success, null on conflict
+  const result = await redis.set(key, token, { ex: ttlSec, nx: true });
+  return result ? token : null;
 }
 
 /**
  * Release a distributed lock for a user.
+ * The token must match the one returned by acquireUserLock, otherwise
+ * the release is a no-op (prevents releasing someone else's lock after
+ * your own lease expired).
+ *
+ * @param userId - The user ID
+ * @param token - The fence token from acquireUserLock
  */
-export async function releaseUserLock(userId: string): Promise<void> {
+export async function releaseUserLock(
+  userId: string,
+  token: string,
+): Promise<void> {
   const redis = await getRedis();
-  await redis.del(`${LOCK_PREFIX}${userId}`);
+  const key = `${LOCK_PREFIX}${userId}`;
+  try {
+    await redis.eval(RELEASE_SCRIPT, [key], [token]);
+  } catch (err) {
+    // Lock release is best-effort — worst case it TTL-expires naturally
+    console.warn('[locks] release failed:', err);
+  }
 }

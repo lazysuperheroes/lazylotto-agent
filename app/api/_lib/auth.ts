@@ -10,12 +10,11 @@
 import { resolveAuth, satisfiesTier } from '~/auth/middleware';
 import type { AuthContext, AuthTier } from '~/auth/types';
 import { NextResponse } from 'next/server';
+import { staticCorsHeaders } from './cors';
 
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': process.env.AUTH_PAGE_ORIGIN ?? '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-};
+// Backward-compat: existing routes import { CORS_HEADERS } from auth.
+// New routes should prefer corsHeadersFor(request) for per-request matching.
+const CORS_HEADERS = staticCorsHeaders('GET, POST, DELETE, OPTIONS');
 
 /**
  * Require a minimum auth tier for an API route.

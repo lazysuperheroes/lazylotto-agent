@@ -1,11 +1,9 @@
 import { NextResponse } from 'next/server';
 import { lockSession } from '~/auth/session';
+import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
+import { staticCorsHeaders } from '../../_lib/cors';
 
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': process.env.AUTH_PAGE_ORIGIN ?? '*',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-};
+const CORS_HEADERS = staticCorsHeaders('POST, OPTIONS');
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -19,6 +17,11 @@ export async function OPTIONS() {
 
 export async function POST(request: Request) {
   try {
+    // Rate limit: 5 lock attempts per identity per minute
+    if (!(await checkRateLimit({ request, action: 'lock', limit: 5, windowSec: 60 }))) {
+      return rateLimitResponse(60);
+    }
+
     const body = await request.json();
     const { sessionToken } = body as { sessionToken?: string };
 

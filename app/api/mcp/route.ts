@@ -14,19 +14,16 @@
  */
 
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { createMcpServer, getAgentContext } from '../_lib/mcp';
+import { createMcpServer } from '../_lib/mcp';
+import { withStore } from '../_lib/withStore';
+import { staticCorsHeaders } from '../_lib/cors';
 import { getRedis, KEY_PREFIX } from '~/auth/redis';
 
 // Play sessions involve MCP client → dApp reads + Hedera SDK writes.
 // Default 10s timeout is too short. Vercel Hobby allows up to 60s.
 export const maxDuration = 60;
 
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': process.env.AUTH_PAGE_ORIGIN ?? '*',
-  'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version',
-  'Access-Control-Expose-Headers': 'Mcp-Session-Id',
-};
+const CORS_HEADERS = staticCorsHeaders('GET, POST, DELETE, OPTIONS');
 
 /** 30 requests per minute, keyed by auth token or IP. */
 const MCP_RATE_LIMIT = 30;
@@ -58,7 +55,7 @@ export async function OPTIONS() {
   });
 }
 
-export async function POST(request: Request) {
+export const POST = withStore(async (request: Request) => {
   try {
     // Rate limit before doing any heavy work
     if (!await checkMcpRateLimit(request)) {
@@ -86,10 +83,7 @@ export async function POST(request: Request) {
     const response = await transport.handleRequest(request);
     await transport.close();
 
-    // Flush any pending Redis writes before Lambda freezes
-    const { store } = await getAgentContext();
-    await store.flush();
-
+    // withStore wrapper guarantees store.flush() after this returns.
     return response;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -101,7 +95,7 @@ export async function POST(request: Request) {
       },
     );
   }
-}
+});
 
 export async function GET() {
   return new Response(

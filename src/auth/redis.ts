@@ -30,7 +30,15 @@ export function hashToken(token: string): string {
 
 interface RedisLike {
   get<T = string>(key: string): Promise<T | null>;
-  set(key: string, value: string, options?: { ex?: number }): Promise<unknown>;
+  /**
+   * Set a key with optional TTL (ex) and set-if-not-exists (nx).
+   * Returns 'OK' (or similar truthy) on success, null on NX conflict.
+   */
+  set(
+    key: string,
+    value: string,
+    options?: { ex?: number; nx?: boolean },
+  ): Promise<string | null | unknown>;
   del(...keys: string[]): Promise<number>;
   getdel<T = string>(key: string): Promise<T | null>;
   expire(key: string, seconds: number): Promise<number>;
@@ -39,6 +47,16 @@ interface RedisLike {
   sadd(key: string, ...members: string[]): Promise<number>;
   srem(key: string, ...members: string[]): Promise<number>;
   incr(key: string): Promise<number>;
+  /**
+   * Evaluate a Lua script server-side. Required for atomic
+   * compare-and-delete patterns (distributed lock release).
+   * The in-memory fallback emulates a whitelist of known scripts.
+   */
+  eval<T = unknown>(
+    script: string,
+    keys: string[],
+    args: string[],
+  ): Promise<T>;
 }
 
 let redisClient: RedisLike | null = null;
@@ -77,7 +95,13 @@ function createInMemoryStore(): RedisLike {
       if (!entry || isExpired(entry)) { store.delete(key); return null; }
       return entry.value as unknown as T;
     },
-    async set(key: string, value: string, options?: { ex?: number }) {
+    async set(key: string, value: string, options?: { ex?: number; nx?: boolean }) {
+      // Honor set-if-not-exists: return null if the key is already present
+      // and unexpired. Mirrors Redis SET NX semantics.
+      if (options?.nx) {
+        const existing = store.get(key);
+        if (existing && !isExpired(existing)) return null;
+      }
       store.set(key, {
         value,
         expiresAt: options?.ex ? Date.now() + options.ex * 1000 : undefined,
@@ -131,6 +155,31 @@ function createInMemoryStore(): RedisLike {
       if (entry) entry.value = String(next);
       else store.set(key, { value: String(next) });
       return next;
+    },
+    async eval<T = unknown>(
+      script: string,
+      keys: string[],
+      args: string[],
+    ): Promise<T> {
+      // Emulate the specific scripts used by the codebase. In-memory store
+      // is single-threaded JS, so the compare-and-delete is trivially atomic.
+      //
+      // Known script: compare-and-delete (used by locks.ts)
+      //   if redis.call("get", KEYS[1]) == ARGV[1] then
+      //     return redis.call("del", KEYS[1])
+      //   else
+      //     return 0
+      //   end
+      if (script.includes('get') && script.includes('del') && keys.length === 1 && args.length === 1) {
+        const key = keys[0]!;
+        const expected = args[0]!;
+        const entry = store.get(key);
+        if (!entry || isExpired(entry)) return 0 as unknown as T;
+        if (entry.value !== expected) return 0 as unknown as T;
+        store.delete(key);
+        return 1 as unknown as T;
+      }
+      throw new Error('In-memory eval: unsupported script pattern');
     },
   };
 }

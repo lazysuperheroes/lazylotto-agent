@@ -11,6 +11,7 @@
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
+import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { HEDERA_DEFAULTS } from '~/config/defaults';
 
 // ---------------------------------------------------------------------------
@@ -194,6 +195,11 @@ export async function OPTIONS() {
 
 export async function GET(request: Request) {
   try {
+    // Audit hits the mirror node — tighter limit
+    if (!(await checkRateLimit({ request, action: 'user-audit', limit: 20, windowSec: 60 }))) {
+      return rateLimitResponse(60);
+    }
+
     const auth = await requireTier(request, 'user');
     if (isErrorResponse(auth)) return auth;
 

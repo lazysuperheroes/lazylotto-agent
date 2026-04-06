@@ -96,4 +96,13 @@ export interface IStore {
 
   /** Reload the full user list (indexes only, not records). */
   refreshUserIndex(): Promise<void>;
+
+  /** Reload the deposit list for one user. */
+  refreshDepositsForUser(userId: string): Promise<void>;
+
+  /** Reload the withdrawal list for one user. */
+  refreshWithdrawalsForUser(userId: string): Promise<void>;
+
+  /** Reload the gas log for one user (or 'system' for untagged entries). */
+  refreshGasForUser(userId: string): Promise<void>;
 }

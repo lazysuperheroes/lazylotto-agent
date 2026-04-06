@@ -1,11 +1,9 @@
 import { NextResponse } from 'next/server';
 import { createChallenge } from '~/auth/challenge';
+import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
+import { staticCorsHeaders } from '../../_lib/cors';
 
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': process.env.AUTH_PAGE_ORIGIN ?? '*',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-};
+const CORS_HEADERS = staticCorsHeaders('POST, OPTIONS');
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -19,6 +17,11 @@ export async function OPTIONS() {
 
 export async function POST(request: Request) {
   try {
+    // Rate limit: 10 challenges per IP per 5 minutes
+    if (!(await checkRateLimit({ request, action: 'challenge', limit: 10, windowSec: 300 }))) {
+      return rateLimitResponse(300);
+    }
+
     const body = await request.json();
     const { accountId } = body as { accountId?: string };
 

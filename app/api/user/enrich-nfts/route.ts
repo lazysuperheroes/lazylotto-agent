@@ -15,6 +15,7 @@
 
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
+import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { enrichPrizes } from '~/enrichment/prizes';
 import type { PrizeNft } from '~/agent/ReportGenerator';
 
@@ -32,6 +33,11 @@ export async function OPTIONS() {
 
 export async function POST(request: Request) {
   try {
+    // Enrichment hits Directus — be polite to the third party
+    if (!(await checkRateLimit({ request, action: 'enrich-nfts', limit: 30, windowSec: 60 }))) {
+      return rateLimitResponse(60);
+    }
+
     const auth = await requireTier(request, 'user');
     if (isErrorResponse(auth)) return auth;
 

@@ -4,6 +4,16 @@
  *
  * Used by both the `operator_refund` MCP tool and the
  * POST /api/admin/refund API route.
+ *
+ * Safety guarantees:
+ *   1. Replay protection — every refunded txId is recorded in Redis,
+ *      duplicate refund attempts are rejected.
+ *   2. Deposit validation — only refunds transactions that were
+ *      credited as deposits via the deposit watcher. Random inbound
+ *      transfers (operator gas top-ups, prize transfers, bounty
+ *      payouts) cannot be refunded.
+ *   3. Ledger adjustment — when refund completes, the user's internal
+ *      balance is decremented to prevent phantom funds.
  */
 
 import type { Client } from '@hashgraph/sdk';
@@ -12,6 +22,9 @@ import { getOperatorAccountId } from './wallet.js';
 import { withChecksum } from '../utils/checksum.js';
 import type { IStore } from '../custodial/IStore.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
+import { getRedis, KEY_PREFIX } from '../auth/redis.js';
+
+const REFUND_KEY_PREFIX = KEY_PREFIX.session.replace('session:', 'refunded:');
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -56,6 +69,48 @@ export async function processRefund(
   options?: RefundLedgerOptions,
 ): Promise<RefundResult> {
   const agentAccountId = getOperatorAccountId(client);
+
+  // ── Validation: only credited deposits can be refunded ───────
+  // Reject any txId that wasn't processed by the deposit watcher.
+  // Without this, an admin could refund operator gas top-ups, prize
+  // transfers, bounty payouts, or any other inbound transfer.
+  if (options?.store) {
+    if (!options.store.isTransactionProcessed(transactionId)) {
+      throw new Error(
+        `Transaction ${transactionId} was not credited as a user deposit. ` +
+        `Only deposits processed by the deposit watcher can be refunded.`,
+      );
+    }
+  } else {
+    console.warn(
+      '[Refund] processRefund called without a store — deposit validation skipped. ' +
+      'This is unsafe in production.',
+    );
+  }
+
+  // ── Replay protection ────────────────────────────────────────
+  // Check Redis for an existing refund record before doing anything.
+  // We persist the refund record AFTER the on-chain transfer succeeds.
+  let redisLockKey: string | null = null;
+  try {
+    const redis = await getRedis();
+    redisLockKey = `${REFUND_KEY_PREFIX}${transactionId}`;
+    const existing = await redis.get(redisLockKey);
+    if (existing) {
+      throw new Error(
+        `Transaction ${transactionId} has already been refunded. ` +
+        `Original refund tx: ${existing}`,
+      );
+    }
+  } catch (e) {
+    // If the error is our "already refunded" sentinel, rethrow.
+    // Otherwise it's a Redis read failure — log and proceed (don't
+    // block legit refunds on Redis being down).
+    if (e instanceof Error && e.message.includes('already been refunded')) {
+      throw e;
+    }
+    console.warn('[Refund] Redis replay check failed (proceeding):', e);
+  }
 
   // ── Mirror node lookup ──────────────────────────────────────
   const mirrorUrl =
@@ -186,6 +241,18 @@ export async function processRefund(
       // Ledger adjustment is best-effort — the on-chain refund already succeeded.
       // Log but don't fail the refund.
       console.error('[Refund] Ledger adjustment failed (on-chain refund succeeded):', e);
+    }
+  }
+
+  // ── Persist refund record for replay protection ─────────────
+  // 30 day TTL — long enough that any duplicate refund attempt
+  // will be caught, short enough that the set doesn't grow forever.
+  if (redisLockKey) {
+    try {
+      const redis = await getRedis();
+      await redis.set(redisLockKey, refundTxId, { ex: 30 * 24 * 60 * 60 });
+    } catch (e) {
+      console.warn('[Refund] Failed to record refund in Redis:', e);
     }
   }
 

@@ -14,6 +14,7 @@
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
+import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -27,6 +28,10 @@ export async function OPTIONS() {
 
 export async function GET(request: Request) {
   try {
+    if (!(await checkRateLimit({ request, action: 'admin-overview', limit: 60, windowSec: 60 }))) {
+      return rateLimitResponse(60);
+    }
+
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
 

@@ -96,19 +96,40 @@ export async function lockSession(token: string): Promise<boolean> {
 
 /**
  * Destroy a session (revoke the token).
+ *
+ * Reads the session BEFORE deletion so we can extract the accountId
+ * and clean up the account-sessions set entry. Without this, stale
+ * hashes accumulate in the set indefinitely and revokeAllForAccount
+ * does extra work against keys that no longer exist.
  */
 export async function destroySession(token: string): Promise<boolean> {
   const redis = await getRedis();
   const hashedKey = hashToken(token);
+  const sessionKey = `${KEY_PREFIX.session}${hashedKey}`;
 
-  // Remove from session store
-  const deleted = await redis.del(`${KEY_PREFIX.session}${hashedKey}`);
+  // Read first to get accountId for set cleanup
+  let accountId: string | null = null;
+  try {
+    const raw = await redis.get<string>(sessionKey);
+    if (raw) {
+      const session: AuthSession = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      accountId = session.accountId;
+    }
+  } catch (e) {
+    console.warn('[session] destroy: failed to read session before delete:', e);
+  }
 
-  // Remove from account session set
-  const raw = await redis.get<string>(`${KEY_PREFIX.session}${hashedKey}`);
-  // Already deleted, but try to clean up the set
-  // We can't get the accountId after deletion, so we skip set cleanup here
-  // (it will be cleaned up on next revokeAll)
+  // Now delete the session entry
+  const deleted = await redis.del(sessionKey);
+
+  // Clean up the account-sessions set entry
+  if (accountId) {
+    try {
+      await redis.srem(`${KEY_PREFIX.accountSessions}${accountId}`, hashedKey);
+    } catch (e) {
+      console.warn('[session] destroy: failed to clean account-sessions set:', e);
+    }
+  }
 
   return deleted > 0;
 }

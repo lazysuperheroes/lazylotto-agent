@@ -33,7 +33,7 @@ let multiUser: MultiUserAgent | null = null;
 let cachedStore: IStore | null = null;
 let cachedClient: Client | null = null;
 
-const AGENT_VERSION = '0.1.11';
+const AGENT_VERSION = '0.1.12';
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -159,7 +159,7 @@ export async function createMcpServer(): Promise<McpServer> {
     },
     checkDeposits: () => mu.pollDepositsOnce(),
     acquireUserLock: (userId: string) => acquireUserLock(userId),
-    releaseUserLock: (userId: string) => releaseUserLock(userId),
+    releaseUserLock: (userId: string, token: string) => releaseUserLock(userId, token),
   };
 
   // Multi-user mode only — single-user tools are not registered on the hosted version

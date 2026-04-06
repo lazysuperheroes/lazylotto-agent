@@ -321,24 +321,12 @@ export class RedisStore implements IStore {
   }
 
   async refreshPlaysForUser(userId: string): Promise<void> {
-    const ids = await this.redis.lrange(k('plays', 'user', userId), 0, -1);
-    if (ids.length === 0) {
-      // Remove any cached plays for this user
-      this.plays = this.plays.filter((p) => p.userId !== userId);
-      return;
-    }
-
-    const pipeline = this.redis.pipeline();
-    for (const id of ids) pipeline.get(k('plays', id));
-    const results = await pipeline.exec<(PlaySessionResult | null)[]>();
-
-    // Replace this user's plays (drop stale, add fresh)
-    this.plays = this.plays.filter((p) => p.userId !== userId);
-    for (const r of results) {
-      if (!r) continue;
-      const rec = (typeof r === 'string' ? JSON.parse(r) : r) as PlaySessionResult;
-      this.plays.push(rec);
-    }
+    await this.refreshListForUser(
+      'plays',
+      this.plays,
+      userId,
+      (r) => r.userId,
+    );
   }
 
   async refreshOperator(): Promise<void> {
@@ -377,6 +365,67 @@ export class RedisStore implements IStore {
         this.accountIdIndex.set(account.hederaAccountId, account.userId);
       }
     }
+  }
+
+  /**
+   * Generic helper: refresh an array of records for one user.
+   * Drops stale entries for the user, re-fetches from Redis.
+   */
+  private async refreshListForUser<T>(
+    prefix: string,
+    target: T[],
+    userId: string,
+    filterUserId: (rec: T) => string,
+  ): Promise<void> {
+    const ids = await this.redis.lrange(k(prefix, 'user', userId), 0, -1);
+    if (ids.length === 0) {
+      // Drop cached records for this user
+      for (let i = target.length - 1; i >= 0; i--) {
+        if (filterUserId(target[i]!) === userId) target.splice(i, 1);
+      }
+      return;
+    }
+
+    const pipeline = this.redis.pipeline();
+    for (const id of ids) pipeline.get(k(prefix, id));
+    const results = await pipeline.exec<(T | null)[]>();
+
+    // Drop stale, then add fresh
+    for (let i = target.length - 1; i >= 0; i--) {
+      if (filterUserId(target[i]!) === userId) target.splice(i, 1);
+    }
+    for (const r of results) {
+      if (!r) continue;
+      const rec = (typeof r === 'string' ? JSON.parse(r) : r) as T;
+      target.push(rec);
+    }
+  }
+
+  async refreshDepositsForUser(userId: string): Promise<void> {
+    await this.refreshListForUser(
+      'deposits',
+      this.deposits,
+      userId,
+      (r) => r.userId,
+    );
+  }
+
+  async refreshWithdrawalsForUser(userId: string): Promise<void> {
+    await this.refreshListForUser(
+      'withdrawals',
+      this.withdrawals,
+      userId,
+      (r) => r.userId,
+    );
+  }
+
+  async refreshGasForUser(userId: string): Promise<void> {
+    await this.refreshListForUser(
+      'gas',
+      this.gasLog,
+      userId,
+      (r) => r.userId,
+    );
   }
 
   // ── Users ────────────────────────────────────────────────────

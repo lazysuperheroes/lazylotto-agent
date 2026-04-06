@@ -215,14 +215,16 @@ export function registerMultiUserTools(
         // Check for new deposits before playing
         await checkDeposits();
 
-        // Distributed lock prevents concurrent play for the same user across Lambda instances
-        const locked = await acquireUserLock(userId);
-        if (!locked) return errorResult('Operation in progress for this user. Try again shortly.');
+        // Distributed lock with fence token — release only releases if the
+        // token still matches, preventing accidental release of a newer owner
+        // after our lease would have expired.
+        const lockToken = await acquireUserLock(userId);
+        if (!lockToken) return errorResult('Operation in progress for this user. Try again shortly.');
         try {
           const result = await multiUser.playForUser(userId);
           return json({ sessions: [result] });
         } finally {
-          await releaseUserLock(userId);
+          await releaseUserLock(userId, lockToken);
         }
       } catch (e) {
         return errorResult(`Play failed: ${errorMsg(e)}`);
@@ -256,14 +258,14 @@ export function registerMultiUserTools(
       if (!userId) return errorResult('userId is required');
 
       try {
-        // Distributed lock prevents concurrent withdrawal for the same user
-        const locked = await acquireUserLock(userId);
-        if (!locked) return errorResult('Operation in progress for this user. Try again shortly.');
+        // Distributed lock with fence token
+        const lockToken = await acquireUserLock(userId);
+        if (!lockToken) return errorResult('Operation in progress for this user. Try again shortly.');
         try {
           const record = await multiUser.processWithdrawal(userId, amount, token);
           return json(record);
         } finally {
-          await releaseUserLock(userId);
+          await releaseUserLock(userId, lockToken);
         }
       } catch (e) {
         return errorResult(`Withdrawal failed: ${errorMsg(e)}`);

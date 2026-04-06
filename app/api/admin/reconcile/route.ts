@@ -11,7 +11,8 @@ import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getClient } from '../../_lib/hedera';
 import { getStore } from '../../_lib/store';
-import { checkDeposits } from '../../_lib/deposits';
+import { getAgentContext } from '../../_lib/mcp';
+import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { reconcile } from '~/custodial/Reconciliation';
 
 export async function OPTIONS() {
@@ -26,11 +27,18 @@ export async function OPTIONS() {
 
 export async function POST(request: Request) {
   try {
+    // Reconcile is expensive (mirror node + Redis pipeline) — modest limit
+    if (!(await checkRateLimit({ request, action: 'admin-reconcile', limit: 6, windowSec: 60 }))) {
+      return rateLimitResponse(60);
+    }
+
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
 
-    // Process any pending deposits before reconciling
-    await checkDeposits();
+    // Process any pending deposits through the shared singleton watcher
+    // before reconciling so the ledger reflects latest on-chain state.
+    const { multiUser } = await getAgentContext();
+    await multiUser.pollDepositsOnce();
 
     const client = getClient();
     const store = await getStore();

@@ -12,6 +12,8 @@ import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getClient } from '../../_lib/hedera';
 import { getStore } from '../../_lib/store';
+import { withStore } from '../../_lib/withStore';
+import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { processRefund } from '~/hedera/refund';
 
 export async function OPTIONS() {
@@ -24,8 +26,13 @@ export async function OPTIONS() {
   });
 }
 
-export async function POST(request: Request) {
+export const POST = withStore(async (request: Request) => {
   try {
+    // Refund moves real money — strict rate limit
+    if (!(await checkRateLimit({ request, action: 'admin-refund', limit: 10, windowSec: 60 }))) {
+      return rateLimitResponse(60);
+    }
+
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
 
@@ -51,4 +58,4 @@ export async function POST(request: Request) {
       { status: 500, headers: CORS_HEADERS },
     );
   }
-}
+});

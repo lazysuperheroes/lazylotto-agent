@@ -10,13 +10,17 @@
  * ~500-1000ms on a cold lambda (mirror node query) so we keep it off
  * the critical path.
  *
+ * Uses the singleton MultiUserAgent's DepositWatcher so we don't race
+ * with MCP-triggered polls (which share the same watermark in Redis).
+ *
  * Requires 'user' tier auth.
  */
 
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
-import { getStore } from '../../_lib/store';
-import { checkDeposits } from '../../_lib/deposits';
+import { getAgentContext } from '../../_lib/mcp';
+import { withStore } from '../../_lib/withStore';
+import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -28,16 +32,24 @@ export async function OPTIONS() {
   });
 }
 
-export async function POST(request: Request) {
+export const POST = withStore(async (request: Request) => {
   try {
+    // Check-deposits hits the mirror node — limit to a reasonable
+    // background refresh rate (don't let a misbehaving client hammer it)
+    if (!(await checkRateLimit({ request, action: 'check-deposits', limit: 12, windowSec: 60 }))) {
+      return rateLimitResponse(60);
+    }
+
     const auth = await requireTier(request, 'user');
     if (isErrorResponse(auth)) return auth;
 
-    const processed = await checkDeposits();
+    const { multiUser, store } = await getAgentContext();
 
-    // If the caller is a registered user, return their refreshed balance
-    // so the dashboard can update in place without a full reload.
-    const store = await getStore();
+    // Poll via the shared singleton watcher — prevents racing with
+    // MCP-tool-triggered polls on the same warm Lambda.
+    const processed = await multiUser.pollDepositsOnce();
+
+    // Refresh index so a freshly-registered user is resolvable
     await store.refreshUserIndex();
 
     let user = store.getUserByAccountId(auth.accountId);
@@ -53,6 +65,7 @@ export async function POST(request: Request) {
       user = store.getUser(user.userId) ?? user;
     }
 
+    // withStore guarantees flush() after this returns.
     return NextResponse.json(
       {
         processed,
@@ -68,4 +81,4 @@ export async function POST(request: Request) {
       { status: 500, headers: CORS_HEADERS },
     );
   }
-}
+});
