@@ -29,6 +29,10 @@ const config = {
       // Externalize the MCP SDK for server-side bundles. Webpack's minification
       // breaks the StreamableHTTPClientTransport ("b is not a function") because
       // it mangles class/method names the SDK relies on at runtime.
+      //
+      // Note: @lazysuperheroes/lazy-lotto was previously externalized for a
+      // similar reason (fs.readFileSync for ABI loading), fixed upstream in
+      // v1.4.1 which ships require()-based .js wrappers. No longer needed.
       config.externals = [
         ...(Array.isArray(config.externals) ? config.externals : []),
         '@modelcontextprotocol/sdk',

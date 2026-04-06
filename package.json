@@ -1,6 +1,6 @@
 {
   "name": "@lazysuperheroes/lazylotto-agent",
-  "version": "0.1.6",
+  "version": "0.1.8",
   "description": "Autonomous AI agent that plays the LazyLotto lottery on Hedera",
   "type": "module",
   "main": "dist/index.js",
@@ -56,7 +56,7 @@
     "@hashgraph/sdk": "^2.81.0",
     "@hashgraphonline/standards-sdk": "^0.1.174",
     "@hiero-did-sdk/registrar": "^0.1.8",
-    "@lazysuperheroes/lazy-lotto": "^1.4.0",
+    "@lazysuperheroes/lazy-lotto": "^1.4.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@tailwindcss/postcss": "^4.2.2",
     "@upstash/redis": "^1.37.0",
