@@ -23,6 +23,10 @@ export type DeadLetterEntry = {
   transactionId: string;
   timestamp: string;
   error: string;
+  /** Sender account ID extracted from the transaction (if known). */
+  sender?: string;
+  /** Memo from the deposit (if any). Used for refund-by-sender filtering. */
+  memo?: string;
 };
 
 export interface IStore {

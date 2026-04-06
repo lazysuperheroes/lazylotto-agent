@@ -109,11 +109,14 @@ export class DepositWatcher {
             `[DepositWatcher] FAILED to process transaction ${tx.transaction_id}:`,
             err,
           );
-          // Add to dead-letter queue for operator review
+          // Add to dead-letter queue for operator review.
+          // Capture sender + memo so users can find their stuck deposits.
           this.store.recordDeadLetter({
             transactionId: tx.transaction_id,
             timestamp: tx.consensus_timestamp,
             error: err instanceof Error ? err.message : String(err),
+            sender: this.extractSender(tx) ?? undefined,
+            memo: this.decodeMemo(tx.memo_base64),
           });
         }
         // Track the last timestamp regardless of processing outcome
@@ -176,6 +179,8 @@ export class DepositWatcher {
         transactionId: tx.transaction_id,
         timestamp: tx.consensus_timestamp,
         error: `Deposit to inactive/deregistered user ${user.userId}. Funds in agent wallet.`,
+        sender: this.extractSender(tx) ?? undefined,
+        memo,
       });
       return false;
     }
@@ -223,6 +228,39 @@ export class DepositWatcher {
     } catch {
       return '';
     }
+  }
+
+  /**
+   * Extract the sender account ID from a mirror node transaction.
+   * Looks for the account with the largest negative HBAR transfer
+   * (excluding the agent itself), or any account that sent FTs to
+   * the agent. Returns null if it can't determine a sender.
+   */
+  private extractSender(tx: MirrorTransaction): string | null {
+    // Try token transfers first — sender is the account with negative amount
+    if (tx.token_transfers?.length) {
+      for (const tt of tx.token_transfers) {
+        if (tt.amount < 0 && tt.account !== this.agentAccountId) {
+          return tt.account;
+        }
+      }
+    }
+
+    // Fallback: HBAR transfer with the largest negative amount
+    if (tx.transfers?.length) {
+      let bestSender: string | null = null;
+      let bestAmount = 0;
+      for (const t of tx.transfers) {
+        if (t.account === this.agentAccountId) continue;
+        if (t.amount < bestAmount) {
+          bestAmount = t.amount;
+          bestSender = t.account;
+        }
+      }
+      return bestSender;
+    }
+
+    return null;
   }
 
   /**

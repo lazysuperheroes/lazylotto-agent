@@ -179,11 +179,32 @@ export default function AdminPage() {
   const [deadLetters, setDeadLetters] = useState<DeadLetter[]>([]);
   const [operatorBalances, setOperatorBalances] = useState<OperatorBalanceRow[]>([]);
 
+  // Reconciliation state
+  interface ReconciliationResult {
+    timestamp: string;
+    onChain: Record<string, number>;
+    ledgerTotal: Record<string, number>;
+    actualNetworkFeesHbar: number;
+    trackedGasHbar: number;
+    untrackedFeesHbar: number;
+    delta: Record<string, number>;
+    adjustedDelta: Record<string, number>;
+    solvent: boolean;
+    warnings: string[];
+  }
   const [reconRunning, setReconRunning] = useState(false);
   const [reconMessage, setReconMessage] = useState<string | null>(null);
+  const [reconResult, setReconResult] = useState<ReconciliationResult | null>(null);
   const [reconOpen, setReconOpen] = useState(false);
 
   const [operatorOpen, setOperatorOpen] = useState(false);
+
+  // Withdraw fees modal state
+  const [withdrawFeesOpen, setWithdrawFeesOpen] = useState(false);
+  const [withdrawFeesAmount, setWithdrawFeesAmount] = useState('');
+  const [withdrawFeesTo, setWithdrawFeesTo] = useState('');
+  const [withdrawFeesToken, setWithdrawFeesToken] = useState<'HBAR' | 'LAZY'>('HBAR');
+  const [withdrawFeesLoading, setWithdrawFeesLoading] = useState(false);
 
   const [refundMessages, setRefundMessages] = useState<Record<string, string>>({});
 
@@ -364,17 +385,25 @@ export default function AdminPage() {
   const handleReconciliation = useCallback(async () => {
     setReconRunning(true);
     setReconMessage(null);
+    setReconResult(null);
 
     try {
       const res = await authFetch('/api/admin/reconcile', { method: 'POST' });
       const body = await res.json();
 
       if (res.status === 501) {
-        setReconMessage((body as { message?: string; error?: string }).message ?? (body as { error?: string }).error ?? 'Not implemented');
+        setReconMessage(
+          (body as { message?: string; error?: string }).message ??
+            (body as { error?: string }).error ??
+            'Not implemented',
+        );
       } else if (!res.ok) {
-        setReconMessage((body as { error?: string }).error ?? `Reconciliation failed (${res.status})`);
+        setReconMessage(
+          (body as { error?: string }).error ?? `Reconciliation failed (${res.status})`,
+        );
       } else {
-        setReconMessage('Reconciliation completed successfully.');
+        // Real result — display the structured data
+        setReconResult(body as ReconciliationResult);
       }
     } catch (err) {
       if (err instanceof Error && err.message === 'forbidden') return;
@@ -425,11 +454,57 @@ export default function AdminPage() {
 
   // --- Withdraw fees ---
   const handleWithdrawFees = useCallback(() => {
-    alert(
-      'Fee withdrawal requires CLI access with a live Hedera client.\n\n' +
-        'Use: npm run dev:http and call POST /api/admin/withdraw-fees on the HTTP server.',
-    );
+    setWithdrawFeesOpen(true);
   }, []);
+
+  const submitWithdrawFees = useCallback(async () => {
+    const amount = Number(withdrawFeesAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      toast('Enter a valid amount greater than 0');
+      return;
+    }
+    setWithdrawFeesLoading(true);
+    try {
+      const res = await authFetch('/api/admin/withdraw-fees', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount,
+          token: withdrawFeesToken,
+          // Only send `to` if the user typed one — env var override is the default
+          ...(withdrawFeesTo ? { to: withdrawFeesTo } : {}),
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          (body as { error?: string }).error ?? `Withdrawal failed (${res.status})`,
+        );
+      }
+      const result = body as {
+        withdrawn: number;
+        token: string;
+        to: string;
+        transactionId: string;
+      };
+      toast(`Withdrew ${result.withdrawn} ${result.token} to ${result.to}`);
+      setWithdrawFeesOpen(false);
+      setWithdrawFeesAmount('');
+      setWithdrawFeesTo('');
+      // Refresh overview to show new operator balance
+      const overviewRes = await authFetch('/api/admin/overview');
+      if (overviewRes.ok) {
+        const data: OverviewResponse = await overviewRes.json();
+        setOverview(data);
+        setOperatorBalances(deriveOperatorBalances(data.operator));
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast(`Fee withdrawal failed: ${message}`);
+    } finally {
+      setWithdrawFeesLoading(false);
+    }
+  }, [withdrawFeesAmount, withdrawFeesTo, withdrawFeesToken, authFetch, toast]);
 
   // --- Sort indicator ---
   const sortArrow = (column: string) => {
@@ -721,7 +796,103 @@ export default function AdminPage() {
                   </button>
                 </div>
 
-                {reconMessage ? (
+                {reconResult ? (
+                  <div className="space-y-4">
+                    {/* Solvency status */}
+                    <div className={`rounded-lg border px-4 py-3 ${
+                      reconResult.solvent
+                        ? 'border-success/30 bg-success/10'
+                        : 'border-destructive/30 bg-destructive/10'
+                    }`}>
+                      <p className={`text-sm font-semibold ${
+                        reconResult.solvent ? 'text-success' : 'text-destructive'
+                      }`}>
+                        {reconResult.solvent ? '✓ Solvent' : '✗ Insolvent'}
+                      </p>
+                      <p className="mt-1 text-xs text-muted">
+                        Checked at {new Date(reconResult.timestamp).toLocaleString()}
+                      </p>
+                    </div>
+
+                    {/* Per-token deltas table */}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-secondary text-left">
+                            <th className="px-3 py-2 font-medium text-muted">Token</th>
+                            <th className="px-3 py-2 text-right font-medium text-muted">On-chain</th>
+                            <th className="px-3 py-2 text-right font-medium text-muted">Ledger</th>
+                            <th className="px-3 py-2 text-right font-medium text-muted">Raw Δ</th>
+                            <th className="px-3 py-2 text-right font-medium text-muted">Adjusted Δ</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {Array.from(new Set([
+                            ...Object.keys(reconResult.onChain),
+                            ...Object.keys(reconResult.ledgerTotal),
+                          ])).map((token) => {
+                            const adjusted = reconResult.adjustedDelta[token] ?? 0;
+                            const isShortfall = adjusted < -0.01;
+                            const isSurplus = adjusted > 0.01;
+                            return (
+                              <tr key={token} className="border-b border-secondary/30">
+                                <td className="px-3 py-2 font-mono text-xs text-foreground">
+                                  {token}
+                                </td>
+                                <td className="px-3 py-2 text-right font-mono text-xs text-foreground">
+                                  {(reconResult.onChain[token] ?? 0).toFixed(4)}
+                                </td>
+                                <td className="px-3 py-2 text-right font-mono text-xs text-foreground">
+                                  {(reconResult.ledgerTotal[token] ?? 0).toFixed(4)}
+                                </td>
+                                <td className="px-3 py-2 text-right font-mono text-xs text-muted">
+                                  {(reconResult.delta[token] ?? 0).toFixed(4)}
+                                </td>
+                                <td className={`px-3 py-2 text-right font-mono text-xs font-semibold ${
+                                  isShortfall ? 'text-destructive' : isSurplus ? 'text-success' : 'text-muted'
+                                }`}>
+                                  {adjusted >= 0 ? '+' : ''}
+                                  {adjusted.toFixed(4)}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Network fees breakdown */}
+                    <div className="rounded-lg bg-secondary/30 px-4 py-3 text-xs text-muted">
+                      <p>
+                        Mirror node fees: <span className="text-foreground font-mono">
+                          {reconResult.actualNetworkFeesHbar.toFixed(4)} HBAR
+                        </span>
+                      </p>
+                      <p>
+                        Tracked gas: <span className="text-foreground font-mono">
+                          {reconResult.trackedGasHbar.toFixed(4)} HBAR
+                        </span>
+                      </p>
+                      <p>
+                        Untracked fees (HBAR delta adjustment): <span className="text-foreground font-mono">
+                          {reconResult.untrackedFeesHbar.toFixed(4)} HBAR
+                        </span>
+                      </p>
+                    </div>
+
+                    {/* Warnings */}
+                    {reconResult.warnings.length > 0 && (
+                      <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3">
+                        <p className="mb-2 text-xs font-semibold text-destructive">Warnings</p>
+                        <ul className="space-y-1 text-xs text-destructive">
+                          {reconResult.warnings.map((w, i) => (
+                            <li key={i}>• {w}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                ) : reconMessage ? (
                   <div className="rounded-lg bg-secondary px-4 py-3">
                     <p className="text-sm text-muted">{reconMessage}</p>
                   </div>
@@ -805,6 +976,95 @@ export default function AdminPage() {
           )}
         </div>
       </div>
+
+      {/* ── Withdraw Fees modal ─────────────────────────────── */}
+      {withdrawFeesOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+          onClick={() => !withdrawFeesLoading && setWithdrawFeesOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-secondary bg-background p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="mb-2 font-heading text-lg text-foreground">
+              Withdraw Operator Fees
+            </h3>
+            <p className="mb-5 text-xs text-muted">
+              Sends accumulated rake from the agent wallet to the operator
+              withdrawal address. If <code className="font-mono">OPERATOR_WITHDRAW_ADDRESS</code>{' '}
+              is set in the environment, it overrides the recipient field below.
+            </p>
+
+            <div className="mb-4">
+              <label htmlFor="wf-token" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+                Token
+              </label>
+              <select
+                id="wf-token"
+                value={withdrawFeesToken}
+                onChange={(e) => setWithdrawFeesToken(e.target.value as 'HBAR' | 'LAZY')}
+                disabled={withdrawFeesLoading}
+                className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-brand focus:outline-none disabled:opacity-50"
+              >
+                <option value="HBAR">HBAR</option>
+                <option value="LAZY">LAZY</option>
+              </select>
+            </div>
+
+            <div className="mb-4">
+              <label htmlFor="wf-amount" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+                Amount
+              </label>
+              <input
+                id="wf-amount"
+                type="number"
+                min="0"
+                step="any"
+                value={withdrawFeesAmount}
+                onChange={(e) => setWithdrawFeesAmount(e.target.value)}
+                disabled={withdrawFeesLoading}
+                placeholder="0.00"
+                className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground placeholder:text-muted focus:border-brand focus:outline-none disabled:opacity-50"
+              />
+            </div>
+
+            <div className="mb-5">
+              <label htmlFor="wf-to" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+                Recipient (optional — env var overrides)
+              </label>
+              <input
+                id="wf-to"
+                type="text"
+                value={withdrawFeesTo}
+                onChange={(e) => setWithdrawFeesTo(e.target.value)}
+                disabled={withdrawFeesLoading}
+                placeholder="0.0.XXXXXX"
+                className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground placeholder:text-muted focus:border-brand focus:outline-none disabled:opacity-50"
+              />
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setWithdrawFeesOpen(false)}
+                disabled={withdrawFeesLoading}
+                className="flex-1 rounded-lg border border-secondary px-4 py-2.5 text-sm font-medium text-muted transition-colors hover:text-foreground disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={submitWithdrawFees}
+                disabled={withdrawFeesLoading || !withdrawFeesAmount}
+                className="flex-1 rounded-lg bg-brand px-4 py-2.5 text-sm font-semibold text-background transition-opacity hover:opacity-90 disabled:opacity-50"
+              >
+                {withdrawFeesLoading ? 'Withdrawing…' : 'Confirm Withdraw'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

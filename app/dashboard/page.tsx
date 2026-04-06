@@ -216,6 +216,35 @@ export default function DashboardPage() {
   const [showAll, setShowAll] = useState(false);
   const [depositsChecking, setDepositsChecking] = useState(false);
 
+  // Self-serve register + withdraw state
+  const [registerLoading, setRegisterLoading] = useState(false);
+  const [withdrawOpen, setWithdrawOpen] = useState(false);
+  const [withdrawAmount, setWithdrawAmount] = useState('');
+  const [withdrawToken, setWithdrawToken] = useState('hbar');
+  const [withdrawLoading, setWithdrawLoading] = useState(false);
+
+  // Stuck deposits (dead letters) belonging to this user
+  interface UserDeadLetter {
+    transactionId: string;
+    timestamp: string;
+    error: string;
+    sender?: string;
+    memo?: string;
+  }
+  const [deadLetters, setDeadLetters] = useState<UserDeadLetter[]>([]);
+
+  // Public agent stats (for trust panel)
+  interface PublicStats {
+    agentName: string;
+    network: string;
+    agentWallet: string | null;
+    users: { total: number; active: number };
+    rake: { defaultPercent: number };
+    tvl: Record<string, number>;
+    hcs20TopicId: string | null;
+  }
+  const [publicStats, setPublicStats] = useState<PublicStats | null>(null);
+
   // Overall "still loading something" flag for the full-page skeleton
   const loading = statusLoading && historyLoading;
 
@@ -322,6 +351,33 @@ export default function DashboardPage() {
       }
     })();
 
+    // Background trust stats fetch — public, no auth needed
+    void (async () => {
+      try {
+        const res = await fetch('/api/public/stats');
+        if (!res.ok) return;
+        const data = (await res.json()) as PublicStats;
+        setPublicStats(data);
+      } catch {
+        /* silent */
+      }
+    })();
+
+    // Background dead-letter check — surfaces stuck deposits to the user.
+    // Failure is silent, this is purely informational.
+    void (async () => {
+      try {
+        const res = await fetch('/api/user/dead-letters', { headers });
+        if (!res.ok) return;
+        const data = (await res.json()) as { deadLetters?: UserDeadLetter[] };
+        if (data.deadLetters && data.deadLetters.length > 0) {
+          setDeadLetters(data.deadLetters);
+        }
+      } catch {
+        /* silent */
+      }
+    })();
+
     // Background deposit check — fire-and-forget, updates balance in place.
     // Runs in parallel with status/history so it never blocks initial paint.
     void (async () => {
@@ -394,6 +450,88 @@ export default function DashboardPage() {
       setLockLoading(false);
     }
   }, [sessionToken]);
+
+  // Self-serve registration from the not-registered empty state
+  const handleRegister = useCallback(async () => {
+    const token = localStorage.getItem('lazylotto:sessionToken');
+    if (!token) {
+      window.location.href = '/auth';
+      return;
+    }
+    setRegisterLoading(true);
+    try {
+      const res = await fetch('/api/user/register', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ strategy: 'balanced' }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(
+          (body as { error?: string }).error ?? `Registration failed (${res.status})`,
+        );
+      }
+      // Reload the dashboard so the now-registered state renders
+      toast('Registered successfully');
+      window.location.reload();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast(`Registration failed: ${message}`);
+      setError(message);
+    } finally {
+      setRegisterLoading(false);
+    }
+  }, [toast]);
+
+  // Self-serve withdrawal
+  const handleWithdraw = useCallback(async () => {
+    const amount = Number(withdrawAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      toast('Enter a valid amount greater than 0');
+      return;
+    }
+    const token = localStorage.getItem('lazylotto:sessionToken');
+    if (!token) {
+      window.location.href = '/auth';
+      return;
+    }
+    setWithdrawLoading(true);
+    try {
+      const res = await fetch('/api/user/withdraw', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ amount, token: withdrawToken }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          (body as { error?: string }).error ?? `Withdrawal failed (${res.status})`,
+        );
+      }
+      const { record, balances } = body as {
+        record: { transactionId: string; amount: number };
+        balances?: StatusResponse['balances'];
+      };
+      toast(`Withdrew ${record.amount} ${withdrawToken.toUpperCase()}`);
+      // Update balance in place
+      if (balances) {
+        setStatus((prev) => (prev ? { ...prev, balances } : prev));
+      }
+      setWithdrawOpen(false);
+      setWithdrawAmount('');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast(`Withdrawal failed: ${message}`);
+    } finally {
+      setWithdrawLoading(false);
+    }
+  }, [withdrawAmount, withdrawToken, toast]);
 
   const handleRevoke = useCallback(async () => {
     if (!sessionToken) return;
@@ -505,20 +643,23 @@ export default function DashboardPage() {
           <h1 className="mb-3 font-heading text-xl text-foreground">
             Welcome, {accountId ?? 'Explorer'}
           </h1>
-          <p className="mb-2 text-sm text-muted">
-            You&apos;re authenticated but not yet registered as a player.
-          </p>
           <p className="mb-6 text-sm text-muted">
-            To get started, connect the LazyLotto Agent to your Claude Desktop
-            using the MCP URL from the authentication page, then ask Claude to
-            register you and deposit funds.
+            You&apos;re signed in but haven&apos;t registered as a player yet.
+            One click and you&apos;ll get a deposit memo so you can fund your
+            account and start playing.
           </p>
-          <a
-            href="/auth"
-            className="inline-block rounded-lg bg-primary px-6 py-3 font-semibold text-white transition-colors hover:bg-primary/90"
+          <button
+            type="button"
+            onClick={handleRegister}
+            disabled={registerLoading}
+            className="inline-block rounded-lg bg-primary px-6 py-3 font-semibold text-white transition-colors hover:bg-primary/90 disabled:opacity-50"
           >
-            Get Your MCP Connection
-          </a>
+            {registerLoading ? 'Registering…' : 'Register Now'}
+          </button>
+          <p className="mt-4 text-xs text-muted">
+            You&apos;ll be using the <span className="text-foreground">balanced</span> strategy by default.
+            You can switch later via Claude Desktop.
+          </p>
         </div>
       </div>
     );
@@ -692,6 +833,17 @@ export default function DashboardPage() {
                     <span className="text-foreground">{status.rakePercent}%</span>
                   </div>
                 </div>
+
+                {/* Withdraw button */}
+                {balanceEntries.some(([, e]) => e.available > 0) && (
+                  <button
+                    type="button"
+                    onClick={() => setWithdrawOpen(true)}
+                    className="w-full rounded-lg border border-brand bg-brand/10 px-4 py-2.5 text-sm font-semibold text-brand transition-colors hover:bg-brand/20"
+                  >
+                    Withdraw Funds
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -749,9 +901,90 @@ export default function DashboardPage() {
                   Important: Always include the deposit memo when sending tokens.
                   Transfers without the correct memo cannot be automatically credited.
                 </p>
+
+                {/* Wallet-specific instructions */}
+                <details className="rounded-lg bg-secondary/30 px-4 py-3 text-xs text-muted">
+                  <summary className="cursor-pointer text-foreground">
+                    How do I add the memo in my wallet?
+                  </summary>
+                  <div className="mt-3 space-y-3">
+                    <div>
+                      <p className="font-semibold text-foreground">HashPack</p>
+                      <p>
+                        On the Send screen, tap <span className="text-foreground">Advanced</span> →
+                        paste the memo into the <span className="text-foreground">Memo</span> field
+                        before confirming.
+                      </p>
+                    </div>
+                    <div>
+                      <p className="font-semibold text-foreground">Blade</p>
+                      <p>
+                        On the Send screen, expand <span className="text-foreground">Optional Fields</span> and
+                        paste the memo into the <span className="text-foreground">Memo</span> field
+                        before confirming.
+                      </p>
+                    </div>
+                    <div>
+                      <p className="font-semibold text-foreground">Other wallets</p>
+                      <p>
+                        Look for a <span className="text-foreground">Memo</span> or
+                        <span className="text-foreground"> Note</span> field on the send screen.
+                        It&apos;s often hidden under an &quot;Advanced&quot; or &quot;Optional&quot; toggle.
+                      </p>
+                    </div>
+                  </div>
+                </details>
               </div>
             )}
           </div>
+
+          {/* ---- Stuck deposits (dead letters) ---- */}
+          {deadLetters.length > 0 && (
+            <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 shadow lg:col-span-2">
+              <h2 className="mb-1 font-heading text-lg text-destructive">
+                Stuck Deposits
+              </h2>
+              <p className="mb-4 text-xs text-muted">
+                {deadLetters.length === 1 ? 'A deposit' : 'These deposits'} from your wallet
+                couldn&apos;t be credited automatically. The funds are still in the agent
+                wallet — contact the operator with the transaction ID below to request
+                a refund.
+              </p>
+              <div className="space-y-2">
+                {deadLetters.map((dl) => {
+                  const network = (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_HEDERA_NETWORK) || 'testnet';
+                  const hashscanUrl = network === 'mainnet'
+                    ? `https://hashscan.io/mainnet/transaction/${dl.transactionId}`
+                    : `https://hashscan.io/${network}/transaction/${dl.transactionId}`;
+                  return (
+                    <div key={dl.transactionId} className="rounded-lg bg-secondary/30 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <code className="break-all font-mono text-xs text-destructive">
+                          {dl.transactionId}
+                        </code>
+                        <a
+                          href={hashscanUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="shrink-0 rounded border border-destructive/40 px-2 py-1 text-[10px] font-semibold text-destructive transition-colors hover:bg-destructive/10"
+                        >
+                          HashScan
+                        </a>
+                      </div>
+                      <p className="mt-1.5 text-xs text-muted">
+                        {dl.error}
+                      </p>
+                      {dl.memo && (
+                        <p className="mt-0.5 text-[10px] text-muted">
+                          Memo: <code className="font-mono">{dl.memo || '(none)'}</code>
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* ---- Play History (full width) ---- */}
           <div className="lg:col-span-2">
@@ -962,6 +1195,79 @@ export default function DashboardPage() {
           </div>
         </div>
 
+        {/* ── About this agent — trust panel ─────────────────── */}
+        {publicStats && (
+          <div className="mt-8 rounded-xl border border-secondary p-6 shadow">
+            <h2 className="mb-4 font-heading text-sm uppercase tracking-wider text-muted">
+              About This Agent
+            </h2>
+            <div className="grid grid-cols-2 gap-4 text-sm md:grid-cols-4">
+              <div>
+                <p className="text-xs text-muted">Network</p>
+                <p className="font-semibold text-foreground capitalize">
+                  {publicStats.network}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted">Active Users</p>
+                <p className="font-semibold text-foreground">
+                  {publicStats.users.active}
+                  <span className="ml-1 text-xs text-muted">
+                    of {publicStats.users.total}
+                  </span>
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted">Rake Rate</p>
+                <p className="font-semibold text-foreground">
+                  {publicStats.rake.defaultPercent}%
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted">Total Held</p>
+                <p className="font-semibold text-foreground">
+                  {Object.entries(publicStats.tvl)
+                    .slice(0, 2)
+                    .map(
+                      ([k, v]) =>
+                        `${formatAmount(v)} ${tokenSymbol(k)}`,
+                    )
+                    .join(' + ') || '—'}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-x-4 gap-y-1 border-t border-secondary pt-4 text-xs text-muted">
+              {publicStats.agentWallet && (
+                <a
+                  href={`https://hashscan.io/${publicStats.network === 'mainnet' ? 'mainnet' : publicStats.network}/account/${publicStats.agentWallet}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-brand hover:underline"
+                >
+                  Agent wallet on HashScan ↗
+                </a>
+              )}
+              {publicStats.hcs20TopicId && (
+                <a
+                  href={`https://hashscan.io/${publicStats.network === 'mainnet' ? 'mainnet' : publicStats.network}/topic/${publicStats.hcs20TopicId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-brand hover:underline"
+                >
+                  HCS-20 audit trail ↗
+                </a>
+              )}
+              <a
+                href="/audit"
+                className="text-brand hover:underline"
+              >
+                On-chain audit page →
+              </a>
+            </div>
+          </div>
+        )}
+
         {/* ---- Session Section (compact, demoted) ---- */}
         <div className="border-t border-secondary mt-8 pt-6">
           <h2 className="mb-3 font-heading text-sm text-foreground">
@@ -1010,6 +1316,81 @@ export default function DashboardPage() {
           )}
         </div>
       </div>
+
+      {/* ── Withdraw modal ───────────────────────────────────── */}
+      {withdrawOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+          onClick={() => !withdrawLoading && setWithdrawOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-secondary bg-background p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="mb-2 font-heading text-lg text-foreground">
+              Withdraw Funds
+            </h3>
+            <p className="mb-5 text-xs text-muted">
+              Funds will be sent to your registered Hedera account.
+            </p>
+
+            <div className="mb-4">
+              <label htmlFor="withdraw-token" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+                Token
+              </label>
+              <select
+                id="withdraw-token"
+                value={withdrawToken}
+                onChange={(e) => setWithdrawToken(e.target.value)}
+                disabled={withdrawLoading}
+                className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-brand focus:outline-none disabled:opacity-50"
+              >
+                {balanceEntries.map(([key, entry]) => (
+                  <option key={key} value={key}>
+                    {tokenSymbol(key)} (available: {formatAmount(entry.available)})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="mb-5">
+              <label htmlFor="withdraw-amount" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+                Amount
+              </label>
+              <input
+                id="withdraw-amount"
+                type="number"
+                min="0"
+                step="any"
+                value={withdrawAmount}
+                onChange={(e) => setWithdrawAmount(e.target.value)}
+                disabled={withdrawLoading}
+                placeholder="0.00"
+                className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground placeholder:text-muted focus:border-brand focus:outline-none disabled:opacity-50"
+              />
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setWithdrawOpen(false)}
+                disabled={withdrawLoading}
+                className="flex-1 rounded-lg border border-secondary px-4 py-2.5 text-sm font-medium text-muted transition-colors hover:text-foreground disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleWithdraw}
+                disabled={withdrawLoading || !withdrawAmount}
+                className="flex-1 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-primary/90 disabled:opacity-50"
+              >
+                {withdrawLoading ? 'Withdrawing…' : 'Confirm Withdraw'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
