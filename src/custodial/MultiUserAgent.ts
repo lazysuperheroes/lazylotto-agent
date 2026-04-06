@@ -18,6 +18,7 @@ import { UserNotFoundError, InsufficientBalanceError, UserInactiveError, hasAvai
 import type { SessionReport } from '../agent/ReportGenerator.js';
 import { randomUUID } from 'node:crypto';
 import { reconcile, type ReconciliationResult } from './Reconciliation.js';
+import { logger } from '../lib/logger.js';
 
 // ── Health snapshot returned by getHealth() ─────────────────────
 
@@ -129,7 +130,10 @@ export class MultiUserAgent {
     this.isRunning = true;
     this.startedAt = new Date().toISOString();
     this.depositWatcher.start();
-    console.log('[MultiUserAgent] Multi-user agent started');
+    logger.info('multi-user agent started', {
+      component: 'MultiUserAgent',
+      event: 'agent_started',
+    });
   }
 
   /**
@@ -151,7 +155,10 @@ export class MultiUserAgent {
     }
 
     await this.store.flush();
-    console.log('[MultiUserAgent] Multi-user agent stopped');
+    logger.info('multi-user agent stopped', {
+      component: 'MultiUserAgent',
+      event: 'agent_stopped',
+    });
   }
 
   /**
@@ -340,6 +347,17 @@ export class MultiUserAgent {
       this.store.recordPlaySession(session);
       this.store.saveUser(user);
 
+      logger.info('play session completed', {
+        component: 'MultiUserAgent',
+        event: 'play_completed',
+        userId,
+        sessionId: session.sessionId,
+        poolsPlayed: session.poolsPlayed,
+        totalSpent: actualSpent,
+        totalWins: session.totalWins,
+        token: primaryToken,
+      });
+
       // Batch HCS-20 accounting
       const hcs20Ops = report.poolResults
         .filter((r) => r.amountSpent > 0)
@@ -502,6 +520,16 @@ export class MultiUserAgent {
       };
 
       this.store.recordWithdrawal(record);
+
+      logger.info('withdrawal processed', {
+        component: 'MultiUserAgent',
+        event: 'withdrawal_processed',
+        userId,
+        amount,
+        token: withdrawToken,
+        txId: transactionId,
+        recipient: user.hederaAccountId,
+      });
 
       const newBalance = this.ledger.getBalance(userId);
 

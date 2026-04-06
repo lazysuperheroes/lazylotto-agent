@@ -38,6 +38,7 @@ import type {
   WithdrawalRecord,
   GasRecord,
 } from './types.js';
+import { CURRENT_SCHEMA_VERSION } from './types.js';
 import { emptyOperatorState, UserNotFoundError } from './types.js';
 import type { IStore, DeadLetterEntry } from './IStore.js';
 
@@ -451,6 +452,9 @@ export class RedisStore implements IStore {
   }
 
   saveUser(user: UserAccount): void {
+    // Stamp the schema version on every write so future reads know how to
+    // interpret the record. Legacy (unversioned) records remain readable.
+    user.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.users.set(user.userId, user);
     this.memoIndex.set(user.depositMemo, user.userId);
     if (user.hederaAccountId) {
@@ -500,6 +504,7 @@ export class RedisStore implements IStore {
   }
 
   recordDeposit(record: DepositRecord): void {
+    record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.processedTxIds.add(record.transactionId);
     this.deposits.push(record);
 
@@ -517,6 +522,7 @@ export class RedisStore implements IStore {
   // ── Play sessions ────────────────────────────────────────────
 
   recordPlaySession(record: PlaySessionResult): void {
+    record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.plays.push(record);
 
     const pipeline = this.redis.pipeline();
@@ -532,6 +538,7 @@ export class RedisStore implements IStore {
   // ── Withdrawals ──────────────────────────────────────────────
 
   recordWithdrawal(record: WithdrawalRecord): void {
+    record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.withdrawals.push(record);
 
     const pipeline = this.redis.pipeline();
@@ -554,6 +561,7 @@ export class RedisStore implements IStore {
   // ── Gas ──────────────────────────────────────────────────────
 
   recordGas(record: GasRecord): void {
+    record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.gasLog.push(record);
 
     const rid = record.transactionId || recordId();

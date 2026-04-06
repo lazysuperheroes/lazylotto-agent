@@ -4,6 +4,7 @@ import type { UserLedger } from './UserLedger.js';
 import type { CustodialConfig } from './types.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
 import { getTokenMeta, getTokenMetaSync } from '../utils/math.js';
+import { logger } from '../lib/logger.js';
 
 interface CreditInfo {
   amount: number;
@@ -46,9 +47,10 @@ export class DepositWatcher {
 
   start(): void {
     if (this.intervalId) return;
-    console.log(
-      `[DepositWatcher] polling every ${this.config.depositPollIntervalMs}ms`,
-    );
+    logger.info('deposit watcher started', {
+      component: 'DepositWatcher',
+      pollIntervalMs: this.config.depositPollIntervalMs,
+    });
     // Do an initial poll immediately
     void this.pollOnce();
     this.intervalId = setInterval(
@@ -88,7 +90,10 @@ export class DepositWatcher {
       if (!watermark) {
         watermark = `${Math.floor(Date.now() / 1000)}.000000000`;
         this.store.setWatermark(watermark);
-        console.log(`[DepositWatcher] No watermark found — starting from now (${watermark})`);
+        logger.info('no watermark found, starting from now', {
+          component: 'DepositWatcher',
+          watermark,
+        });
       }
 
       const txs = await getTransactionsByAccount(this.agentAccountId, {
@@ -210,9 +215,15 @@ export class DepositWatcher {
       credit.token,
     );
 
-    console.log(
-      `[DepositWatcher] Deposit: ${credit.amount} ${credit.token} for user ${user.userId} (memo: ${memo})`,
-    );
+    logger.info('deposit credited', {
+      component: 'DepositWatcher',
+      event: 'deposit_credited',
+      userId: user.userId,
+      amount: credit.amount,
+      token: credit.token,
+      txId: tx.transaction_id,
+      memo,
+    });
 
     return true;
   }

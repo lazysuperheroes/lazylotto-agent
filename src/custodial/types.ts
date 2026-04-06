@@ -3,9 +3,23 @@ import { fileURLToPath } from 'node:url';
 import type { Strategy } from '../config/strategy.js';
 import type { PrizeDetail } from '../agent/ReportGenerator.js';
 
+// ── Schema version ────────────────────────────────────────────
+// Bump when the shape of any persisted record changes in an
+// incompatible way. Writes always stamp records with this value;
+// reads tolerate missing/older versions (legacy data without a
+// version is treated as v0 and passed through unchanged).
+//
+// Version history:
+//   0 — pre-versioning (no schemaVersion field)
+//   1 — initial versioned schema (2026-04-06)
+
+export const CURRENT_SCHEMA_VERSION = 1;
+
 // ── User ──────────────────────────────────────────────────────
 
 export interface UserAccount {
+  /** Schema version stamped at write time. Missing = legacy (v0). */
+  schemaVersion?: number;
   userId: string;
   depositMemo: string;
   hederaAccountId: string;
@@ -106,6 +120,8 @@ export function emptyOperatorState(): OperatorState {
 // ── Records ───────────────────────────────────────────────────
 
 export interface DepositRecord {
+  /** Schema version stamped at write time. Missing = legacy (v0). */
+  schemaVersion?: number;
   transactionId: string;
   userId: string;
   grossAmount: number;
@@ -117,6 +133,8 @@ export interface DepositRecord {
 }
 
 export interface PlaySessionResult {
+  /** Schema version stamped at write time. Missing = legacy (v0). */
+  schemaVersion?: number;
   sessionId: string;
   userId: string;
   timestamp: string;
@@ -146,6 +164,8 @@ export interface PlaySessionResult {
 }
 
 export interface WithdrawalRecord {
+  /** Schema version stamped at write time. Missing = legacy (v0). */
+  schemaVersion?: number;
   userId: string;
   amount: number;
   tokenId: string | null;
@@ -155,6 +175,8 @@ export interface WithdrawalRecord {
 }
 
 export interface GasRecord {
+  /** Schema version stamped at write time. Missing = legacy (v0). */
+  schemaVersion?: number;
   transactionId: string;
   userId: string | 'system';
   operation: string;

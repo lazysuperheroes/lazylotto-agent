@@ -19,6 +19,7 @@ import { getUserState } from '../client.js';
 import type { ServerContext, SessionRecord } from './types.js';
 import { hbarToNumber } from '../../utils/format.js';
 import { transferHbar, transferToken } from '../../hedera/transfers.js';
+import { assertKillSwitchDisabled } from '../../lib/killswitch.js';
 
 // ── Registration ────────────────────────────────────────────────
 
@@ -58,6 +59,9 @@ export function registerSingleUserTools(
       }
 
       try {
+        // Block new plays while the kill switch is engaged
+        await assertKillSwitchDisabled();
+
         setIsSessionActive(true);
 
         const report = await agent.play();

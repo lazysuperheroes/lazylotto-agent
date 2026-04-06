@@ -23,6 +23,7 @@ import { withChecksum } from '../utils/checksum.js';
 import type { IStore } from '../custodial/IStore.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
 import { getRedis, KEY_PREFIX } from '../auth/redis.js';
+import { logger } from '../lib/logger.js';
 
 const REFUND_KEY_PREFIX = KEY_PREFIX.session.replace('session:', 'refunded:');
 
@@ -233,9 +234,14 @@ export async function processRefund(
         });
 
         ledgerAdjusted = user.userId;
-        console.log(
-          `[Refund] Ledger adjusted: deducted ${humanRefundAmount} ${tokenKey} from user ${user.userId}`,
-        );
+        logger.info('refund ledger adjusted', {
+          component: 'Refund',
+          event: 'refund_ledger_adjusted',
+          userId: user.userId,
+          amount: humanRefundAmount,
+          token: tokenKey,
+          originalTx: transactionId,
+        });
       }
     } catch (e) {
       // Ledger adjustment is best-effort — the on-chain refund already succeeded.

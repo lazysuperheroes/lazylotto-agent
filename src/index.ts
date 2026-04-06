@@ -158,9 +158,14 @@ async function main(): Promise<void> {
   }
 
   // In MCP stdio mode, stdout is the JSON-RPC transport — redirect all
-  // console.log to stderr BEFORE any subsystem starts writing output.
-  if (args.includes('--mcp-server')) {
+  // console.log/info to stderr BEFORE any subsystem starts writing output.
+  // Only needed for stdio transport; HTTP transport doesn't use stdout.
+  // Structured logs from src/lib/logger.ts already go to stderr, so this
+  // guard is a belt-and-braces catch for any stray console.log calls.
+  const isStdioMcp = args.includes('--mcp-server') && !args.includes('--http');
+  if (isStdioMcp) {
     console.log = console.error;
+    console.info = console.error;
   }
 
   if (args.includes('--multi-user')) {

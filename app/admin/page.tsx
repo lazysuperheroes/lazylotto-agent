@@ -225,6 +225,16 @@ export default function AdminPage() {
 
   const [refundMessages, setRefundMessages] = useState<Record<string, string>>({});
 
+  // Kill switch state
+  interface KillSwitchState {
+    enabled: boolean;
+    reason?: string;
+    enabledAt?: string;
+    enabledBy?: string;
+  }
+  const [killSwitch, setKillSwitch] = useState<KillSwitchState | null>(null);
+  const [killSwitchLoading, setKillSwitchLoading] = useState(false);
+
   const [sortColumn, setSortColumn] = useState<string>('hederaAccountId');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
 
@@ -332,6 +342,18 @@ export default function AdminPage() {
         setDeadLetters(data.deadLetters);
       } catch {
         /* silent failure — dead letters shows empty state */
+      }
+    })();
+
+    void (async () => {
+      try {
+        const res = await authFetch('/api/admin/killswitch');
+        if (cancelled || !res.ok) return;
+        const data: KillSwitchState = await res.json();
+        if (cancelled) return;
+        setKillSwitch(data);
+      } catch {
+        /* silent failure — kill switch card just won't render */
       }
     })();
 
@@ -523,6 +545,61 @@ export default function AdminPage() {
     }
   }, [withdrawFeesAmount, withdrawFeesTo, withdrawFeesToken, authFetch, toast]);
 
+  // --- Kill switch ---
+  const handleEnableKillSwitch = useCallback(async () => {
+    // Browser prompt is fine here — this is an admin-only emergency flow and
+    // the two-click confirm (prompt + then it takes effect) beats a bespoke
+    // modal for a tool that should ship fast and be rarely used.
+    // eslint-disable-next-line no-alert
+    const reason = window.prompt(
+      'Enable kill switch?\n\nThis will immediately block new plays and registrations. ' +
+        'Withdrawals and reads will stay working.\n\nReason (shown to users):',
+    );
+    if (!reason || !reason.trim()) return;
+
+    setKillSwitchLoading(true);
+    try {
+      const res = await authFetch('/api/admin/killswitch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason.trim() }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          (body as { error?: string }).error ?? `Failed (${res.status})`,
+        );
+      }
+      setKillSwitch(body as KillSwitchState);
+      toast('Kill switch ENABLED — new plays and registrations blocked');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast(`Kill switch enable failed: ${message}`, { variant: 'error' });
+    } finally {
+      setKillSwitchLoading(false);
+    }
+  }, [authFetch, toast]);
+
+  const handleDisableKillSwitch = useCallback(async () => {
+    setKillSwitchLoading(true);
+    try {
+      const res = await authFetch('/api/admin/killswitch', { method: 'DELETE' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          (body as { error?: string }).error ?? `Failed (${res.status})`,
+        );
+      }
+      setKillSwitch({ enabled: false });
+      toast('Kill switch disabled — operations resumed');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast(`Kill switch disable failed: ${message}`, { variant: 'error' });
+    } finally {
+      setKillSwitchLoading(false);
+    }
+  }, [authFetch, toast]);
+
   // --- Sort indicator ---
   const sortArrow = (column: string) => {
     if (sortColumn !== column) return null;
@@ -577,6 +654,71 @@ export default function AdminPage() {
             Agent Administration
           </h1>
         </header>
+
+        {/* ---- Kill Switch ---- */}
+        {killSwitch && (
+          <div
+            className={`mb-6 rounded-xl border p-4 ${
+              killSwitch.enabled
+                ? 'border-destructive/60 bg-destructive/10'
+                : 'border-secondary bg-secondary/20'
+            }`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`inline-block h-2.5 w-2.5 rounded-full ${
+                      killSwitch.enabled ? 'bg-destructive' : 'bg-success'
+                    }`}
+                  />
+                  <p className="font-heading text-sm text-foreground">
+                    {killSwitch.enabled ? 'Kill switch ENGAGED' : 'Kill switch disengaged'}
+                  </p>
+                </div>
+                <p className="mt-1 text-xs text-muted">
+                  {killSwitch.enabled
+                    ? 'New plays and registrations are blocked. Withdrawals and reads remain available.'
+                    : 'Operations are running normally. Engage to pause new plays and registrations during an incident.'}
+                </p>
+                {killSwitch.enabled && killSwitch.reason && (
+                  <p className="mt-2 rounded bg-background/40 px-2 py-1 text-xs text-foreground">
+                    Reason: <span className="font-mono">{killSwitch.reason}</span>
+                    {killSwitch.enabledBy && (
+                      <>
+                        {' '}— <span className="text-muted">by {killSwitch.enabledBy}</span>
+                      </>
+                    )}
+                    {killSwitch.enabledAt && (
+                      <>
+                        {' '}— <span className="text-muted">{formatTimestamp(killSwitch.enabledAt)}</span>
+                      </>
+                    )}
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (killSwitch.enabled) void handleDisableKillSwitch();
+                  else void handleEnableKillSwitch();
+                }}
+                disabled={killSwitchLoading}
+                className={`rounded-md px-4 py-1.5 text-sm font-semibold transition-opacity disabled:opacity-50 ${
+                  killSwitch.enabled
+                    ? 'bg-success text-background hover:opacity-90'
+                    : 'bg-destructive text-white hover:opacity-90'
+                }`}
+              >
+                {killSwitchLoading
+                  ? '...'
+                  : killSwitch.enabled
+                  ? 'Disengage'
+                  : 'Engage'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* ---- Overview Banner ---- */}
         {overview && (

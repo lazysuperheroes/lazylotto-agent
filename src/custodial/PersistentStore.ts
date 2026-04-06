@@ -10,7 +10,7 @@ import type {
   WithdrawalRecord,
   GasRecord,
 } from './types.js';
-import { emptyOperatorState, UserNotFoundError } from './types.js';
+import { emptyOperatorState, UserNotFoundError, CURRENT_SCHEMA_VERSION } from './types.js';
 import type { IStore } from './IStore.js';
 
 // ── File names ───────────────────────────────────────────────────
@@ -336,6 +336,8 @@ export class PersistentStore implements IStore {
   }
 
   saveUser(user: UserAccount): void {
+    // Stamp schema version so future readers know how to interpret the record
+    user.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.users.set(user.userId, user);
     this.memoIndex.set(user.depositMemo, user.userId);
     if (user.hederaAccountId) {
@@ -382,6 +384,7 @@ export class PersistentStore implements IStore {
   }
 
   recordDeposit(record: DepositRecord): void {
+    record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.processedTxIds.add(record.transactionId);
     this.deposits.push(record);
     this.dirtyDeposits = true;
@@ -395,6 +398,7 @@ export class PersistentStore implements IStore {
   // ── Play sessions ────────────────────────────────────────────
 
   recordPlaySession(record: PlaySessionResult): void {
+    record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.plays.push(record);
     this.dirtyPlays = true;
     this.scheduleDirtyFlush();
@@ -407,6 +411,7 @@ export class PersistentStore implements IStore {
   // ── Withdrawals ──────────────────────────────────────────────
 
   recordWithdrawal(record: WithdrawalRecord): void {
+    record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.withdrawals.push(record);
     this.dirtyWithdrawals = true;
     this.scheduleDirtyFlush();
@@ -428,6 +433,7 @@ export class PersistentStore implements IStore {
   // ── Gas ──────────────────────────────────────────────────────
 
   recordGas(record: GasRecord): void {
+    record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.gasLog.push(record);
     this.dirtyGas = true;
     this.scheduleDirtyFlush();
