@@ -204,7 +204,9 @@ export default function DashboardPage() {
   const { toast } = useToast();
 
   const [sessionToken, setSessionToken] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Per-section loading states so balance/deposit and history render independently
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notRegistered, setNotRegistered] = useState(false);
   const [status, setStatus] = useState<StatusResponse | null>(null);
@@ -212,6 +214,10 @@ export default function DashboardPage() {
   const [lockLoading, setLockLoading] = useState(false);
   const [revokeLoading, setRevokeLoading] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const [depositsChecking, setDepositsChecking] = useState(false);
+
+  // Overall "still loading something" flag for the full-page skeleton
+  const loading = statusLoading && historyLoading;
 
   // Extract raw NFT refs from all sessions for lazy enrichment.
   // The hook dedupes internally by ${hederaId}!${serial} so duplicates are fine.
@@ -227,73 +233,129 @@ export default function DashboardPage() {
     return refs;
   }, [sessions]);
 
-  const { data: enrichedMap, loading: enrichmentLoading } = useNftEnrichment(rawNftRefs);
+  const {
+    data: enrichedMap,
+    loading: enrichmentLoading,
+    error: enrichmentError,
+    retry: retryEnrichment,
+  } = useNftEnrichment(rawNftRefs);
 
   // Set page title
   useEffect(() => {
     document.title = 'Dashboard | LazyLotto Agent';
   }, []);
 
-  // Check for auth token on mount, then fetch data
+  // Check for auth token on mount, then fetch data independently
   useEffect(() => {
     const token = localStorage.getItem('lazylotto:sessionToken');
     setSessionToken(token);
 
     if (!token) {
-      setLoading(false);
+      setStatusLoading(false);
+      setHistoryLoading(false);
       return;
     }
 
     const headers = { Authorization: `Bearer ${token}` };
 
-    Promise.all([
-      fetch('/api/user/status', { headers }),
-      fetch('/api/user/history', { headers }),
-    ])
-      .then(async ([statusRes, historyRes]) => {
-        if (statusRes.status === 401 || historyRes.status === 401) {
+    // Fire status + history in parallel but treat them as independent.
+    // Each section renders as soon as its own fetch resolves — history
+    // no longer waits for status (and vice versa).
+    void (async () => {
+      try {
+        const res = await fetch('/api/user/status', { headers });
+        if (res.status === 401) {
           localStorage.removeItem('lazylotto:sessionToken');
           localStorage.removeItem('lazylotto:accountId');
           window.location.href = '/auth';
           return;
         }
-
-        if (statusRes.status === 404) {
+        if (res.status === 404) {
           // User authenticated but not registered as a player
           setNotRegistered(true);
-          setLoading(false);
+          setHistoryLoading(false); // nothing to load
           return;
         }
-
-        if (!statusRes.ok) {
-          const body = await statusRes.json().catch(() => ({}));
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
           throw new Error(
-            (body as { error?: string }).error ??
-              `Status API returned ${statusRes.status}`,
+            (body as { error?: string }).error ?? `Status API returned ${res.status}`,
           );
         }
-
-        if (!historyRes.ok) {
-          const body = await historyRes.json().catch(() => ({}));
-          throw new Error(
-            (body as { error?: string }).error ??
-              `History API returned ${historyRes.status}`,
-          );
-        }
-
-        const statusData: StatusResponse = await statusRes.json();
-        const historyData: HistoryResponse = await historyRes.json();
-
-        setStatus(statusData);
-        setSessions(historyData.sessions ?? []);
-      })
-      .catch((err: unknown) => {
+        const data: StatusResponse = await res.json();
+        setStatus(data);
+      } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
-      })
-      .finally(() => {
-        setLoading(false);
-      });
+      } finally {
+        setStatusLoading(false);
+      }
+    })();
+
+    void (async () => {
+      try {
+        const res = await fetch('/api/user/history', { headers });
+        if (res.status === 401) {
+          localStorage.removeItem('lazylotto:sessionToken');
+          localStorage.removeItem('lazylotto:accountId');
+          window.location.href = '/auth';
+          return;
+        }
+        if (res.status === 404) {
+          // Not registered — history empty, handled by the status branch
+          return;
+        }
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(
+            (body as { error?: string }).error ?? `History API returned ${res.status}`,
+          );
+        }
+        const data: HistoryResponse = await res.json();
+        setSessions(data.sessions ?? []);
+      } catch (err) {
+        // History failure shouldn't break the whole dashboard — log to console
+        // and let the empty state render.
+        console.warn('[dashboard] history fetch failed:', err);
+      } finally {
+        setHistoryLoading(false);
+      }
+    })();
+
+    // Background deposit check — fire-and-forget, updates balance in place.
+    // Runs in parallel with status/history so it never blocks initial paint.
+    void (async () => {
+      setDepositsChecking(true);
+      try {
+        const res = await fetch('/api/user/check-deposits', {
+          method: 'POST',
+          headers,
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          processed?: number;
+          balances?: StatusResponse['balances'];
+          lastPlayedAt?: string | null;
+        };
+        if (data.processed && data.processed > 0 && data.balances) {
+          // Patch balance + lastPlayedAt into the current status without
+          // refetching the whole thing
+          setStatus((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  balances: data.balances!,
+                  lastPlayedAt: data.lastPlayedAt ?? prev.lastPlayedAt,
+                }
+              : prev,
+          );
+        }
+      } catch {
+        /* Silent failure — user can refresh manually */
+      } finally {
+        setDepositsChecking(false);
+      }
+    })();
   }, []);
 
   const handleCopy = useCallback(
@@ -405,7 +467,10 @@ export default function DashboardPage() {
   }, [sessions, status]);
 
   // --- Loading state ---
-  if (loading) {
+  // Show full-page skeleton while the critical section (status/balance) is
+  // still loading. Once status resolves, the dashboard renders; the play
+  // history section has its own inline skeleton if it's still in-flight.
+  if (statusLoading && !notRegistered) {
     return <DashboardSkeleton />;
   }
 
@@ -566,6 +631,12 @@ export default function DashboardPage() {
             </div>
             <p className="mb-4 text-xs text-muted">
               Your current token balances held by the agent. Available funds can be used for lottery entries.
+              {depositsChecking && (
+                <span className="ml-2 inline-flex items-center gap-1 text-brand">
+                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
+                  Checking for new deposits…
+                </span>
+              )}
             </p>
 
             {status && (
@@ -691,6 +762,22 @@ export default function DashboardPage() {
               Your lottery play history. Each entry represents one agent play session across one or more pools.
             </p>
 
+            {/* NFT enrichment error banner */}
+            {enrichmentError && rawNftRefs.length > 0 && (
+              <div className="mb-4 flex items-center justify-between rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm">
+                <span className="text-destructive">
+                  Couldn&apos;t load NFT details. Your raw wins are shown below.
+                </span>
+                <button
+                  type="button"
+                  onClick={retryEnrichment}
+                  className="shrink-0 rounded border border-destructive/40 px-3 py-1 text-xs font-semibold text-destructive transition-colors hover:bg-destructive/20"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
             {/* ---- Total P&L Summary ---- */}
             {perfSummary && (
               <div className="mb-4 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted">
@@ -708,7 +795,23 @@ export default function DashboardPage() {
             )}
 
             {/* ---- Timeline ---- */}
-            {sessions.length > 0 ? (
+            {historyLoading ? (
+              <div className="space-y-3">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="rounded-lg border border-secondary p-4">
+                    <div className="mb-3 flex items-center justify-between">
+                      <SkeletonBox className="h-4 w-32" />
+                      <SkeletonBox className="h-4 w-16" />
+                    </div>
+                    <div className="flex gap-2">
+                      <SkeletonBox className="h-6 w-20" />
+                      <SkeletonBox className="h-6 w-20" />
+                      <SkeletonBox className="h-6 w-20" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : sessions.length > 0 ? (
               <>
                 <div className="space-y-4">
                   {displayedSessions.map((s) => {

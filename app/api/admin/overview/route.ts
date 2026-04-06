@@ -31,6 +31,15 @@ export async function GET(request: Request) {
     if (isErrorResponse(auth)) return auth;
 
     const store = await getStore();
+
+    // Targeted refresh: user index + operator + dead letters in parallel.
+    // Avoids the full ~8-12 round trip load().
+    await Promise.all([
+      store.refreshUserIndex(),
+      store.refreshOperator(),
+      store.refreshDeadLetters(),
+    ]);
+
     const allUsers = store.getAllUsers();
     const operator = store.getOperator();
     const deadLetters = store.getDeadLetters();

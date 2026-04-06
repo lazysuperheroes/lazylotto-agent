@@ -244,7 +244,12 @@ export default function AuditPage() {
     return refs;
   }, [data]);
 
-  const { data: enrichedMap, loading: enrichmentLoading } = useNftEnrichment(rawNftRefs);
+  const {
+    data: enrichedMap,
+    loading: enrichmentLoading,
+    error: enrichmentError,
+    retry: retryEnrichment,
+  } = useNftEnrichment(rawNftRefs);
 
   // Set page title
   useEffect(() => {
@@ -528,6 +533,22 @@ export default function AuditPage() {
             </span>
           </span>
         </div>
+
+        {/* NFT enrichment error banner */}
+        {enrichmentError && rawNftRefs.length > 0 && (
+          <div className="mb-4 flex items-center justify-between rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm">
+            <span className="text-destructive">
+              Couldn&apos;t load NFT details. Your raw wins are shown below.
+            </span>
+            <button
+              type="button"
+              onClick={retryEnrichment}
+              className="shrink-0 rounded border border-destructive/40 px-3 py-1 text-xs font-semibold text-destructive transition-colors hover:bg-destructive/20"
+            >
+              Retry
+            </button>
+          </div>
+        )}
 
         {/* ---- Timeline ---- */}
         {entries.length > 0 ? (

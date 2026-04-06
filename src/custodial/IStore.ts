@@ -75,4 +75,25 @@ export interface IStore {
 
   // ── Rotation ───────────────────────────────────────────────────
   rotateRecords(): Promise<void>;
+
+  // ── Targeted refresh (serverless) ─────────────────────────────
+  // Cheap refresh methods for API routes that only need part of the
+  // store to be up-to-date. Avoids the full ~8-12 round trip load().
+  // Default implementation can delegate to load() if a backend can't
+  // refresh partially.
+
+  /** Reload one user's record from the backing store. */
+  refreshUser(userId: string): Promise<void>;
+
+  /** Reload the plays list for one user. */
+  refreshPlaysForUser(userId: string): Promise<void>;
+
+  /** Reload the operator state. */
+  refreshOperator(): Promise<void>;
+
+  /** Reload the dead letter queue. */
+  refreshDeadLetters(): Promise<void>;
+
+  /** Reload the full user list (indexes only, not records). */
+  refreshUserIndex(): Promise<void>;
 }

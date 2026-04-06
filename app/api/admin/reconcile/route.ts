@@ -34,6 +34,12 @@ export async function POST(request: Request) {
 
     const client = getClient();
     const store = await getStore();
+
+    // Refresh everything reconciliation reads: all user balances + operator.
+    // Reconciliation is an explicit admin action so paying a few round trips
+    // on click is fine.
+    await Promise.all([store.refreshUserIndex(), store.refreshOperator()]);
+
     const result = await reconcile(client, store);
 
     return NextResponse.json(result, { headers: CORS_HEADERS });

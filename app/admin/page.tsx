@@ -244,44 +244,59 @@ export default function AdminPage() {
 
     let cancelled = false;
 
-    async function loadDashboard() {
+    // Fire all three requests independently so each section renders as soon
+    // as its own data arrives. Overview is the critical path (header stats +
+    // operator balance), so it gates the skeleton; users table and dead
+    // letters fill in separately.
+
+    void (async () => {
       try {
-        const [overviewRes, usersRes, dlRes] = await Promise.all([
-          authFetch('/api/admin/overview'),
-          authFetch('/api/admin/users'),
-          authFetch('/api/admin/dead-letters'),
-        ]);
-
+        const res = await authFetch('/api/admin/overview');
         if (cancelled) return;
-
-        if (!overviewRes.ok || !usersRes.ok || !dlRes.ok) {
-          const failedRes = [overviewRes, usersRes, dlRes].find((r) => !r.ok);
-          const body = failedRes ? await failedRes.json().catch(() => ({})) : {};
-          setError((body as { error?: string }).error ?? `Request failed with status ${failedRes?.status}`);
-          setLoading(false);
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          setError(
+            (body as { error?: string }).error ?? `Overview failed (${res.status})`,
+          );
           return;
         }
-
-        const overviewData: OverviewResponse = await overviewRes.json();
-        const usersData: UsersResponse = await usersRes.json();
-        const dlData: DeadLettersResponse = await dlRes.json();
-
+        const data: OverviewResponse = await res.json();
         if (cancelled) return;
-
-        setOverview(overviewData);
-        setUsers(usersData.users);
-        setDeadLetters(dlData.deadLetters);
-        setOperatorBalances(deriveOperatorBalances(overviewData.operator));
-        setLoading(false);
+        setOverview(data);
+        setOperatorBalances(deriveOperatorBalances(data.operator));
       } catch (err) {
         if (cancelled) return;
         if (err instanceof Error && err.message === 'forbidden') return;
-        setError(err instanceof Error ? err.message : 'Failed to load dashboard data');
-        setLoading(false);
+        setError(err instanceof Error ? err.message : 'Failed to load overview');
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-    }
+    })();
 
-    void loadDashboard();
+    void (async () => {
+      try {
+        const res = await authFetch('/api/admin/users');
+        if (cancelled || !res.ok) return;
+        const data: UsersResponse = await res.json();
+        if (cancelled) return;
+        setUsers(data.users);
+      } catch {
+        /* silent failure — table shows empty state */
+      }
+    })();
+
+    void (async () => {
+      try {
+        const res = await authFetch('/api/admin/dead-letters');
+        if (cancelled || !res.ok) return;
+        const data: DeadLettersResponse = await res.json();
+        if (cancelled) return;
+        setDeadLetters(data.deadLetters);
+      } catch {
+        /* silent failure — dead letters shows empty state */
+      }
+    })();
+
     return () => {
       cancelled = true;
     };

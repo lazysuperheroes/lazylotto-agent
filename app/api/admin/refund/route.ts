@@ -38,6 +38,9 @@ export async function POST(request: Request) {
     }
 
     const store = await getStore();
+    // Refresh user index so the memo→user lookup inside processRefund works
+    // against fresh data (user could have been registered since last load).
+    await store.refreshUserIndex();
     const result = await processRefund(getClient(), body.transactionId, { store });
 
     return NextResponse.json(result, { headers: CORS_HEADERS });

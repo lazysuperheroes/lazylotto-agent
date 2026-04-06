@@ -276,6 +276,31 @@ export class PersistentStore implements IStore {
     await this.flush();
   }
 
+  // ── Targeted refresh (no-ops for file store) ─────────────────
+  // PersistentStore is single-process — once load() runs at startup,
+  // the in-memory cache is authoritative. Mutations write through
+  // immediately. So targeted refresh is a no-op.
+
+  async refreshUser(_userId: string): Promise<void> {
+    /* no-op */
+  }
+
+  async refreshPlaysForUser(_userId: string): Promise<void> {
+    /* no-op */
+  }
+
+  async refreshOperator(): Promise<void> {
+    /* no-op */
+  }
+
+  async refreshDeadLetters(): Promise<void> {
+    /* no-op */
+  }
+
+  async refreshUserIndex(): Promise<void> {
+    /* no-op */
+  }
+
   // ── Users ────────────────────────────────────────────────────
 
   getUser(userId: string): UserAccount | undefined {

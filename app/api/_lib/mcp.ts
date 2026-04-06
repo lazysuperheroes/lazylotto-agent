@@ -33,7 +33,7 @@ let multiUser: MultiUserAgent | null = null;
 let cachedStore: IStore | null = null;
 let cachedClient: Client | null = null;
 
-const AGENT_VERSION = '0.1.10';
+const AGENT_VERSION = '0.1.11';
 
 // ── Helpers ─────────────────────────────────────────────────────
 

@@ -26,6 +26,10 @@ export async function GET(request: Request) {
     if (isErrorResponse(auth)) return auth;
 
     const store = await getStore();
+
+    // Refresh the user index + records from Redis
+    await store.refreshUserIndex();
+
     const allUsers = store.getAllUsers();
 
     const users = allUsers.map((user) => ({

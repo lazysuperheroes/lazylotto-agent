@@ -14,7 +14,6 @@
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
-import { checkDeposits } from '../../_lib/deposits';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -31,13 +30,12 @@ export async function GET(request: Request) {
     const auth = await requireTier(request, 'user');
     if (isErrorResponse(auth)) return auth;
 
-    // Process any pending deposits before returning history
-    await checkDeposits();
-
     const store = await getStore();
     const accountId = auth.accountId;
 
-    // Resolve userId from accountId
+    // Refresh only the user index so we can resolve accountId → userId.
+    await store.refreshUserIndex();
+
     let user = store.getUserByAccountId(accountId);
 
     if (!user) {
@@ -54,6 +52,9 @@ export async function GET(request: Request) {
         { status: 404, headers: CORS_HEADERS },
       );
     }
+
+    // Refresh just this user's plays from Redis so we see recent sessions.
+    await store.refreshPlaysForUser(user.userId);
 
     // Get play sessions for this user, return the most recent 20.
     // Raw prizeDetails (including captured { token, hederaId, serial } refs)

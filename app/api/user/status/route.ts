@@ -12,7 +12,6 @@ import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
 import { getClient } from '../../_lib/hedera';
-import { checkDeposits } from '../../_lib/deposits';
 import { getOperatorAccountId } from '~/hedera/wallet';
 import { withChecksum } from '~/utils/checksum';
 
@@ -31,11 +30,12 @@ export async function GET(request: Request) {
     const auth = await requireTier(request, 'user');
     if (isErrorResponse(auth)) return auth;
 
-    // Process any pending deposits before returning balance
-    await checkDeposits();
-
     const store = await getStore();
     const accountId = auth.accountId;
+
+    // Refresh the user index so we pick up cross-Lambda writes (registrations
+    // from other requests). This is ~1 round trip vs ~8-12 for full load().
+    await store.refreshUserIndex();
 
     // Look up user by Hedera account ID (primary) or EOA address (fallback).
     // PersistentStore has an accountId index, so try that first.
@@ -48,6 +48,13 @@ export async function GET(request: Request) {
         (u) =>
           u.eoaAddress.toLowerCase() === accountId.toLowerCase(),
       );
+    }
+
+    // If found, refresh just this user to pick up any balance/lastPlayedAt
+    // updates from recent MCP play sessions. Another 1 round trip.
+    if (user) {
+      await store.refreshUser(user.userId);
+      user = store.getUser(user.userId) ?? user;
     }
 
     if (!user) {

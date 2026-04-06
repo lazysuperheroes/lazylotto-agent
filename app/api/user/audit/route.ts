@@ -200,6 +200,9 @@ export async function GET(request: Request) {
     const store = await getStore();
     const accountId = auth.accountId;
 
+    // Refresh user index (so recently-registered accounts are resolvable)
+    await store.refreshUserIndex();
+
     // Resolve user
     let user = store.getUserByAccountId(accountId);
 
@@ -266,7 +269,9 @@ export async function GET(request: Request) {
       nextPath = data.links?.next ?? null;
     }
 
-    // Load play sessions for enriching play entries with win data
+    // Load play sessions for enriching play entries with win data.
+    // Refresh just this user's plays so we see recent wins.
+    await store.refreshPlaysForUser(user.userId);
     const playSessions = store.getPlaySessionsForUser(user.userId);
     const sessionMap = new Map(playSessions.map(s => [s.sessionId, s]));
 

@@ -303,6 +303,82 @@ export class RedisStore implements IStore {
     await this.flush();
   }
 
+  // ── Targeted refresh (serverless) ────────────────────────────
+  // Only re-fetch what an API route actually needs. Much cheaper than
+  // full load() on every getStore() call — typically 1-2 Redis round
+  // trips instead of 8-12.
+
+  async refreshUser(userId: string): Promise<void> {
+    const raw = await this.redis.get<UserAccount>(k('users', userId));
+    if (!raw) return;
+    const account = (typeof raw === 'string' ? JSON.parse(raw) : raw) as UserAccount;
+    // Update all three indexes
+    this.users.set(account.userId, account);
+    this.memoIndex.set(account.depositMemo, account.userId);
+    if (account.hederaAccountId) {
+      this.accountIdIndex.set(account.hederaAccountId, account.userId);
+    }
+  }
+
+  async refreshPlaysForUser(userId: string): Promise<void> {
+    const ids = await this.redis.lrange(k('plays', 'user', userId), 0, -1);
+    if (ids.length === 0) {
+      // Remove any cached plays for this user
+      this.plays = this.plays.filter((p) => p.userId !== userId);
+      return;
+    }
+
+    const pipeline = this.redis.pipeline();
+    for (const id of ids) pipeline.get(k('plays', id));
+    const results = await pipeline.exec<(PlaySessionResult | null)[]>();
+
+    // Replace this user's plays (drop stale, add fresh)
+    this.plays = this.plays.filter((p) => p.userId !== userId);
+    for (const r of results) {
+      if (!r) continue;
+      const rec = (typeof r === 'string' ? JSON.parse(r) : r) as PlaySessionResult;
+      this.plays.push(rec);
+    }
+  }
+
+  async refreshOperator(): Promise<void> {
+    const raw = await this.redis.get<OperatorState>(k('operator'));
+    if (raw) {
+      this.operator = (typeof raw === 'string' ? JSON.parse(raw) : raw) as OperatorState;
+    }
+  }
+
+  async refreshDeadLetters(): Promise<void> {
+    const rawDL = await this.redis.lrange(k('deadletters'), 0, -1);
+    this.deadLetters = rawDL.map((raw) =>
+      (typeof raw === 'string' ? JSON.parse(raw) : raw) as DeadLetterEntry,
+    );
+  }
+
+  async refreshUserIndex(): Promise<void> {
+    const userIds = await this.redis.smembers(k('users', 'all'));
+    if (userIds.length === 0) return;
+
+    const pipeline = this.redis.pipeline();
+    for (const id of userIds) pipeline.get(k('users', id));
+    const results = await pipeline.exec<(UserAccount | null)[]>();
+
+    this.users.clear();
+    this.memoIndex.clear();
+    this.accountIdIndex.clear();
+
+    for (let i = 0; i < userIds.length; i++) {
+      const user = results[i];
+      if (!user) continue;
+      const account = (typeof user === 'string' ? JSON.parse(user) : user) as UserAccount;
+      this.users.set(account.userId, account);
+      this.memoIndex.set(account.depositMemo, account.userId);
+      if (account.hederaAccountId) {
+        this.accountIdIndex.set(account.hederaAccountId, account.userId);
+      }
+    }
+  }
+
   // ── Users ────────────────────────────────────────────────────
 
   getUser(userId: string): UserAccount | undefined {

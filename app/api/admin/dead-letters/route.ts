@@ -26,6 +26,7 @@ export async function GET(request: Request) {
     if (isErrorResponse(auth)) return auth;
 
     const store = await getStore();
+    await store.refreshDeadLetters();
     const deadLetters = store.getDeadLetters();
 
     return NextResponse.json(
