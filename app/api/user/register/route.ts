@@ -20,7 +20,7 @@ import { getAgentContext } from '../../_lib/mcp';
 import { getClient } from '../../_lib/hedera';
 import { getOperatorAccountId } from '~/hedera/wallet';
 import { withChecksum } from '~/utils/checksum';
-import { isKillSwitchEnabled, getKillSwitchState } from '~/lib/killswitch';
+import { KillSwitchError } from '~/lib/killswitch';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -40,19 +40,6 @@ export const POST = withStore(async (request: Request) => {
 
     const auth = await requireTier(request, 'user');
     if (isErrorResponse(auth)) return auth;
-
-    // Block new registrations while the kill switch is engaged.
-    // Existing users can still withdraw and read their data.
-    if (await isKillSwitchEnabled()) {
-      const state = await getKillSwitchState();
-      return NextResponse.json(
-        {
-          error: 'Registrations are temporarily paused by the operator.',
-          reason: state.reason ?? null,
-        },
-        { status: 503, headers: CORS_HEADERS },
-      );
-    }
 
     const body = (await request.json().catch(() => ({}))) as {
       eoaAddress?: string;
@@ -109,6 +96,14 @@ export const POST = withStore(async (request: Request) => {
       { headers: CORS_HEADERS },
     );
   } catch (err) {
+    // Kill switch translates to 503 + reason so the frontend can show
+    // the "Agent temporarily closed" banner cleanly instead of a 500.
+    if (err instanceof KillSwitchError) {
+      return NextResponse.json(
+        { error: err.message, reason: (err as KillSwitchError).reason ?? null },
+        { status: 503, headers: CORS_HEADERS },
+      );
+    }
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
       { error: message },

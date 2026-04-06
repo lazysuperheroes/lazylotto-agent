@@ -493,6 +493,7 @@ export class RedisStore implements IStore {
 
   updateOperator(updater: (s: OperatorState) => OperatorState): OperatorState {
     this.operator = updater(this.operator);
+    this.operator.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.fire(this.redis.set(k('operator'), JSON.stringify(this.operator)));
     return this.operator;
   }

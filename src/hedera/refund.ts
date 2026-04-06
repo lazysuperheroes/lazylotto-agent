@@ -24,6 +24,7 @@ import type { IStore } from '../custodial/IStore.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
 import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 import { logger } from '../lib/logger.js';
+import { acquireUserLock, releaseUserLock } from '../lib/locks.js';
 
 const REFUND_KEY_PREFIX = KEY_PREFIX.session.replace('session:', 'refunded:');
 
@@ -92,6 +93,12 @@ export async function processRefund(
   // ── Replay protection ────────────────────────────────────────
   // Check Redis for an existing refund record before doing anything.
   // We persist the refund record AFTER the on-chain transfer succeeds.
+  //
+  // FAIL CLOSED: if Redis is unreachable we cannot verify that this
+  // refund hasn't already been processed. Refunds are irreversible
+  // on-chain — "proceed anyway" would allow a 30-second Redis flake
+  // to become a double-refund incident. Refuse the refund with a
+  // clear error the operator can act on (retry once Redis recovers).
   let redisLockKey: string | null = null;
   try {
     const redis = await getRedis();
@@ -104,13 +111,16 @@ export async function processRefund(
       );
     }
   } catch (e) {
-    // If the error is our "already refunded" sentinel, rethrow.
-    // Otherwise it's a Redis read failure — log and proceed (don't
-    // block legit refunds on Redis being down).
+    // Rethrow the "already refunded" sentinel unchanged
     if (e instanceof Error && e.message.includes('already been refunded')) {
       throw e;
     }
-    console.warn('[Refund] Redis replay check failed (proceeding):', e);
+    // Any other error means we couldn't verify — refuse the refund.
+    throw new Error(
+      'Refund replay protection unavailable: the Redis backend is not ' +
+      'reachable right now. Refusing to refund without a duplicate-check. ' +
+      'Retry once the backend recovers.',
+    );
   }
 
   // ── Mirror node lookup ──────────────────────────────────────
@@ -225,23 +235,43 @@ export async function processRefund(
           humanRefundAmount = refundAmount / 1e8;
         }
 
-        options.store.updateBalance(user.userId, (b) => {
-          const entry = b.tokens[tokenKey];
-          if (!entry) return b;
-          // Deduct from available (clamp to 0)
-          entry.available = Math.max(0, entry.available - humanRefundAmount);
-          return b;
-        });
+        // Per-user distributed lock around the ledger adjustment —
+        // prevents two concurrent refunds for the same user (different
+        // txIds, both legitimate) from racing on entry.available and
+        // losing one of the deductions. Best-effort: if the lock is
+        // already held by another operation (play/withdraw/refund),
+        // we skip the adjustment with a warning rather than block. The
+        // on-chain refund has already succeeded at this point.
+        const lockToken = await acquireUserLock(user.userId, 30);
+        if (!lockToken) {
+          logger.warn('refund ledger adjustment skipped — user lock held', {
+            component: 'Refund',
+            userId: user.userId,
+            originalTx: transactionId,
+          });
+        } else {
+          try {
+            options.store.updateBalance(user.userId, (b) => {
+              const entry = b.tokens[tokenKey];
+              if (!entry) return b;
+              // Deduct from available (clamp to 0)
+              entry.available = Math.max(0, entry.available - humanRefundAmount);
+              return b;
+            });
 
-        ledgerAdjusted = user.userId;
-        logger.info('refund ledger adjusted', {
-          component: 'Refund',
-          event: 'refund_ledger_adjusted',
-          userId: user.userId,
-          amount: humanRefundAmount,
-          token: tokenKey,
-          originalTx: transactionId,
-        });
+            ledgerAdjusted = user.userId;
+            logger.info('refund ledger adjusted', {
+              component: 'Refund',
+              event: 'refund_ledger_adjusted',
+              userId: user.userId,
+              amount: humanRefundAmount,
+              token: tokenKey,
+              originalTx: transactionId,
+            });
+          } finally {
+            await releaseUserLock(user.userId, lockToken);
+          }
+        }
       }
     } catch (e) {
       // Ledger adjustment is best-effort — the on-chain refund already succeeded.

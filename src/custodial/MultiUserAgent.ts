@@ -19,6 +19,9 @@ import type { SessionReport } from '../agent/ReportGenerator.js';
 import { randomUUID } from 'node:crypto';
 import { reconcile, type ReconciliationResult } from './Reconciliation.js';
 import { logger } from '../lib/logger.js';
+import { assertKillSwitchDisabled } from '../lib/killswitch.js';
+import { acquireOperatorLock, releaseOperatorLock } from '../lib/locks.js';
+import { HBAR_TOKEN_KEY } from '../config/strategy.js';
 
 // ── Health snapshot returned by getHealth() ─────────────────────
 
@@ -191,6 +194,10 @@ export class MultiUserAgent {
     strategyName: string,
     rakePercent?: number,
   ): Promise<UserAccount> {
+    // Domain-layer gate: any caller (MCP tool, Next.js route, HCS-10
+    // handler, test harness) must go through this method and therefore
+    // cannot bypass the kill switch by skipping the route layer.
+    await assertKillSwitchDisabled();
     return this.negotiation.registerUser(accountId, eoaAddress, strategyName, rakePercent);
   }
 
@@ -220,6 +227,11 @@ export class MultiUserAgent {
    * released back to the user's available balance.
    */
   async playForUser(userId: string): Promise<PlaySessionResult> {
+    // Domain-layer kill switch gate — runs BEFORE lock acquisition so a
+    // frozen agent doesn't even briefly hold the user mutex. Covers CLI
+    // cron, MCP tools, API routes, tests — no caller can bypass it.
+    await assertKillSwitchDisabled();
+
     await this.acquireLock(userId);
 
     const user = this.store.getUser(userId);
@@ -414,6 +426,11 @@ export class MultiUserAgent {
    * Capped at config.maxUsersPerPlayCycle to bound cycle duration.
    */
   async playForAllEligible(): Promise<PlaySessionResult[]> {
+    // Fail fast if the kill switch is engaged — avoid scanning the user
+    // list only to have each playForUser() throw. (playForUser() also
+    // checks; this is defense in depth + early exit.)
+    await assertKillSwitchDisabled();
+
     const results: PlaySessionResult[] = [];
     const eligible = this.store.getAllUsers().filter(
       (u) => u.active && hasAvailableToken(u.balances, this.config.minDepositAmount),
@@ -452,24 +469,41 @@ export class MultiUserAgent {
 
       // Velocity cap: limit total withdrawal volume per user per 24 hours.
       // Bounds blast radius if a user session is compromised.
-      // Default 1000 (HBAR equivalent) — override via WITHDRAWAL_DAILY_CAP_HBAR env.
-      // We track HBAR-equivalent only (FT prizes are denominated in their own token,
-      // so the cap applies to HBAR withdrawals — extend per-token if needed).
-      const dailyCap = Number(process.env.WITHDRAWAL_DAILY_CAP_HBAR ?? '1000');
-      if (token === 'hbar' && dailyCap > 0) {
-        const remaining = await this.checkWithdrawalVelocity(userId, amount, dailyCap);
+      //
+      // Normalize the token key first — callers may pass 'hbar', 'HBAR',
+      // 'Hbar', or a raw token ID. Without normalization, a string-literal
+      // compare like `token === 'hbar'` silently disables the cap for
+      // 'HBAR' (uppercase) — a very plausible caller bug.
+      const normalizedToken = token.toLowerCase();
+      const isHbar = normalizedToken === 'hbar' || normalizedToken === HBAR_TOKEN_KEY;
+
+      // Caps are per-token. HBAR cap is the primary one. FT caps default
+      // to a very large number unless WITHDRAWAL_DAILY_CAP_<TOKEN> is set
+      // (e.g. WITHDRAWAL_DAILY_CAP_LAZY). A zero value disables the cap.
+      const capEnvKey = isHbar
+        ? 'WITHDRAWAL_DAILY_CAP_HBAR'
+        : `WITHDRAWAL_DAILY_CAP_${normalizedToken.replace(/[^a-z0-9]/gi, '_').toUpperCase()}`;
+      const capDefault = isHbar ? 1000 : Number.POSITIVE_INFINITY;
+      const dailyCap = Number(process.env[capEnvKey] ?? capDefault);
+
+      if (Number.isFinite(dailyCap) && dailyCap > 0) {
+        const remaining = await this.checkWithdrawalVelocity(
+          userId,
+          amount,
+          dailyCap,
+          normalizedToken,
+        );
         if (remaining < 0) {
           throw new Error(
             `Daily withdrawal cap exceeded for user ${userId}. ` +
-            `Cap: ${dailyCap} HBAR, would exceed by ${Math.abs(remaining)}. ` +
+            `Cap: ${dailyCap} ${normalizedToken}, would exceed by ${Math.abs(remaining)}. ` +
             `Try a smaller amount or wait for the rolling window to reset.`,
           );
         }
       }
 
-      // Use the token parameter for withdrawal currency selection
-      const withdrawToken = token;
-      const isHbar = withdrawToken === 'hbar';
+      // Use the normalized token for downstream logic
+      const withdrawToken = normalizedToken;
 
       // Reserve funds first — safe to release if transfer fails
       this.ledger.reserve(userId, amount, withdrawToken);
@@ -569,6 +603,21 @@ export class MultiUserAgent {
       );
     }
 
+    // Distributed lock around the entire balance-check → transfer →
+    // state-update sequence. Without this, two concurrent admin
+    // withdraw-fees calls can both pass the TOCTOU balance check and
+    // double-spend the operator float. The lock is per-operation, not
+    // per-operator, so different admin actions (refund, reconcile) can
+    // still run in parallel.
+    const lockToken = await acquireOperatorLock('withdraw-fees', 120);
+    if (!lockToken) {
+      throw new Error(
+        'Another operator fee withdrawal is in progress. ' +
+        'Wait a moment and try again.',
+      );
+    }
+
+    try {
     const operator = this.store.getOperator();
     const tokenKey = token === 'HBAR' ? 'hbar' : (process.env.LAZY_TOKEN_ID ?? 'lazy');
     const tokenBalance = operator.balances[tokenKey] ?? 0;
@@ -636,6 +685,9 @@ export class MultiUserAgent {
     }
 
     return transactionId;
+    } finally {
+      await releaseOperatorLock('withdraw-fees', lockToken);
+    }
   }
 
   // ── Queries ────────────────────────────────────────────────────
@@ -756,35 +808,76 @@ export class MultiUserAgent {
   // Falls back to "always allow" if Redis isn't available — the cap
   // is a defense-in-depth measure, not the primary auth check.
 
+  /**
+   * Per-token 24h rolling withdrawal volume cap.
+   * Returns remaining allowance (positive) or the deficit (negative).
+   *
+   * The key is namespaced under `KEY_PREFIX.rateLimit + 'withdrawal-vol:'`
+   * plus the token identifier so different tokens have independent budgets.
+   * The per-user lock held by processWithdrawal() serializes the
+   * get-then-set within a single process; multi-Lambda concurrency is
+   * bounded by the distributed user lock acquired at the route layer.
+   */
   private async checkWithdrawalVelocity(
     userId: string,
     amount: number,
-    capHbar: number,
+    cap: number,
+    tokenKey: string,
   ): Promise<number> {
     try {
       const { getRedis, KEY_PREFIX } = await import('../auth/redis.js');
       const redis = await getRedis();
-      const key = `${KEY_PREFIX.rateLimit}withdrawal-vol:${userId}`;
+      const key = `${KEY_PREFIX.rateLimit}withdrawal-vol:${tokenKey}:${userId}`;
 
       // Read current cumulative volume in the rolling window
       const currentRaw = await redis.get<string>(key);
       const current = currentRaw ? Number(currentRaw) || 0 : 0;
       const proposed = current + amount;
 
-      if (proposed > capHbar) {
-        return capHbar - proposed; // negative = over cap
+      if (proposed > cap) {
+        return cap - proposed; // negative = over cap
       }
 
       // Within budget — increment and (re)set TTL to 24h
-      // Use a get-then-set pattern (incrby would be cleaner but
-      // RedisLike doesn't expose it; we already hold the per-user lock
-      // so the race is bounded to multi-Lambda which is rare for
-      // withdrawals from the same user).
       await redis.set(key, String(proposed), { ex: 24 * 60 * 60 });
-      return capHbar - proposed; // positive = remaining
+      return cap - proposed; // positive = remaining
     } catch (e) {
       console.warn('[velocity] check failed (allowing withdrawal):', e);
-      return capHbar; // fail-open — don't block legit withdrawals on Redis hiccup
+      return cap; // fail-open — don't block legit withdrawals on Redis hiccup
+    }
+  }
+
+  /**
+   * Public accessor for the current 24h withdrawal volume (and cap) for
+   * a given user/token. Used by /api/user/status to surface the
+   * "remaining today" counter in the Withdraw modal so users don't get
+   * a raw backend error at submit time.
+   */
+  async getWithdrawalVelocityState(
+    userId: string,
+    token: string,
+  ): Promise<{ cap: number | null; usedToday: number; remaining: number | null }> {
+    const normalized = token.toLowerCase();
+    const isHbar = normalized === 'hbar' || normalized === HBAR_TOKEN_KEY;
+    const capEnvKey = isHbar
+      ? 'WITHDRAWAL_DAILY_CAP_HBAR'
+      : `WITHDRAWAL_DAILY_CAP_${normalized.replace(/[^a-z0-9]/gi, '_').toUpperCase()}`;
+    const capDefault = isHbar ? 1000 : Number.POSITIVE_INFINITY;
+    const cap = Number(process.env[capEnvKey] ?? capDefault);
+
+    if (!Number.isFinite(cap) || cap <= 0) {
+      return { cap: null, usedToday: 0, remaining: null };
+    }
+
+    try {
+      const { getRedis, KEY_PREFIX } = await import('../auth/redis.js');
+      const redis = await getRedis();
+      const key = `${KEY_PREFIX.rateLimit}withdrawal-vol:${normalized}:${userId}`;
+      const currentRaw = await redis.get<string>(key);
+      const usedToday = currentRaw ? Number(currentRaw) || 0 : 0;
+      return { cap, usedToday, remaining: Math.max(0, cap - usedToday) };
+    } catch {
+      return { cap, usedToday: 0, remaining: cap };
     }
   }
 }

@@ -131,6 +131,111 @@ authenticated identity.
 
 ---
 
+## Production Hardening
+
+Operational features and explicit trade-offs for running the hosted agent.
+
+### Kill Switch
+
+Emergency freeze for write-path operations. When engaged, the agent refuses
+new plays and new registrations but continues to serve withdrawals,
+deregistration, and reads. The intent is *"stop creating new financial
+obligations while we figure out what's wrong"* — not *"lock users out of
+their money."*
+
+**How to use it:**
+- Navigate to `/admin` (operator tier required).
+- The banner at the top of the page shows the current state (engaged /
+  disengaged) and a one-click toggle.
+- Engaging prompts for a **reason**, which is persisted and shown to any
+  user who hits a blocked endpoint.
+
+**What it blocks:**
+- `multi_user_play`, `agent_play` — no new lottery sessions
+- `multi_user_register`, `POST /api/user/register` — no new user sign-ups
+
+**What it leaves open:**
+- Withdrawals and deregistration — users can always exit
+- Balance / history / audit reads — users can always see their state
+- Admin operations (refund, reconcile, health) — operators still have tools
+
+Fails open: if Redis is unreachable when the flag is checked, the agent
+allows the operation rather than halting. The kill switch is an override,
+not a gate.
+
+### Structured Logging
+
+`src/lib/logger.ts` emits structured events to `process.stderr` in one of
+two formats, selected automatically:
+
+| Env | Format | Use |
+|-----|--------|-----|
+| `LOG_FORMAT=json` (or `NODE_ENV=production`) | One JSON object per line | Pipe into Logtail / Axiom / Datadog |
+| Default in local dev | Pretty coloured text | Human-readable tail in your terminal |
+
+`LOG_LEVEL` (`debug` \| `info` \| `warn` \| `error`) filters output.
+`info` is the default.
+
+**Safety invariant:** the logger writes ONLY to stderr. stdio MCP (Claude
+Desktop) uses stdout as the JSON-RPC transport, so anything on stdout
+corrupts the protocol. `src/index.ts` also redirects stray `console.log`
+and `console.info` calls to stderr when running in `--mcp-server` mode
+without `--http`, as a belt-and-braces guard.
+
+Structured events currently emitted include `deposit_credited`,
+`play_completed`, `withdrawal_processed`, `refund_ledger_adjusted`, and
+`agent_started`/`agent_stopped`.
+
+### Schema Versioning
+
+Every persisted record is stamped with a `schemaVersion` field at write
+time, sourced from the `CURRENT_SCHEMA_VERSION` constant in
+`src/custodial/types.ts`. This costs nothing today but leaves a clean
+migration path when the shape of any stored record changes.
+
+- Current version: **1**
+- Legacy records without a version are treated as v0 and passed through
+  unchanged (the field is optional).
+- When you change a record shape incompatibly: bump `CURRENT_SCHEMA_VERSION`,
+  add a read-side upgrader keyed on the stamped version, and note the change
+  in the version history comment at the top of `types.ts`.
+
+Full migration tooling (bulk-rewrite scripts, `flashback`-style migration
+runner) is intentionally deferred until the first real schema change —
+cheapest to add in context rather than speculatively.
+
+### Deferred Hardening
+
+These items were deliberately skipped after weighing risk, cost, and
+operational reality. Each has a clear trigger for when to revisit.
+
+**KMS-backed signing** — The Hedera operator private key is stored in
+Vercel environment variables rather than a KMS. For hosted deployments,
+the key is set using Vercel's **Sensitive** env var mode, which hides the
+value from the dashboard after it's written — only one team member (the
+person who set it) ever sees the plaintext. With a two-person team, this
+trust boundary is considered acceptable for testnet and early mainnet.
+**Revisit when:** team size grows past the original two-person circle,
+the agent wallet holds balances large enough to justify KMS operational
+cost, or a compliance requirement mandates hardware-backed signing.
+
+**Vercel Cron for deposit polling** — Deposits are detected on demand:
+when a user calls `multi_user_deposit_info`, `multi_user_play`, or
+`multi_user_play_history`, the route first runs a single mirror node
+poll. If a user never interacts, their deposit sits in the agent wallet
+and credits the moment they next check. This is a deliberate design
+choice — no cron means no per-minute background cost, no timer drift,
+and no idle-Lambda spin-up. **Revisit when:** users start complaining
+that deposits take too long to appear, or push notifications are added
+that need balance-change events.
+
+**Full schema migration tooling** — Only the `schemaVersion` field is in
+place today. The bulk-rewrite scripts, dry-run diff tooling, and
+version-bump CLI are not. **Revisit when:** the first incompatible
+record-shape change happens.
+
+---
+
 ## Getting Started
 
 ### Single-User Mode
@@ -721,11 +826,12 @@ externalized from webpack server-side builds because minification breaks its
 transport layer. This is a standard pattern (similar to Prisma, etc.) but means the
 SDK is loaded from `node_modules` at runtime rather than bundled.
 
-**On-demand deposit detection.** Deposits are only detected when a user interacts
-(checks balance, plays, views history). If no interaction occurs, deposits sit
-unprocessed in the agent wallet. If this becomes a UX issue at scale, add a Vercel
-cron route (`/api/cron/deposits`) polling every 1-2 minutes. The architecture
-supports this cleanly via `DepositWatcher.pollOnce()`.
+**On-demand deposit detection.** Covered in detail under
+[Production Hardening → Deferred Hardening](#deferred-hardening). Summary:
+deposits are detected when a user interacts, not on a cron schedule. This is
+a deliberate choice documented there with an explicit "revisit when"
+condition. The `DepositWatcher.pollOnce()` API is already in place if a cron
+route is ever added.
 
 **Mirror node latency at scale.** Each balance-dependent request triggers a mirror
 node query (~1-2s). With many concurrent users, consider adding a short cache layer

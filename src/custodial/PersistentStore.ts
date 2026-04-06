@@ -372,6 +372,7 @@ export class PersistentStore implements IStore {
     updater: (s: OperatorState) => OperatorState,
   ): OperatorState {
     this.operator = updater(this.operator);
+    this.operator.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.dirtyOperator = true;
     this.scheduleDirtyFlush();
     return this.operator;

@@ -16,8 +16,11 @@ import { z } from 'zod';
 import type { MultiUserAgent } from '../../custodial/MultiUserAgent.js';
 import { getOperatorAccountId } from '../../hedera/wallet.js';
 import { withChecksum } from '../../utils/checksum.js';
-import { assertKillSwitchDisabled } from '../../lib/killswitch.js';
 import type { ServerContext } from './types.js';
+
+// Kill switch is now enforced at the domain layer (MultiUserAgent.playForUser,
+// registerUser, etc). The error surfaces through the normal try/catch here
+// and lands in errorResult() with the reason included in the message.
 
 // ── Registration ────────────────────────────────────────────────
 
@@ -92,9 +95,6 @@ export function registerMultiUserTools(
       const { auth } = authResult;
 
       try {
-        // Block new registrations while the kill switch is engaged
-        await assertKillSwitchDisabled();
-
         // For user tier, auto-fill accountId from their session
         const resolvedAccountId = auth.tier === 'user'
           ? auth.accountId
@@ -216,9 +216,6 @@ export function registerMultiUserTools(
       if (!userId) return errorResult('userId is required');
 
       try {
-        // Block new plays while the kill switch is engaged
-        await assertKillSwitchDisabled();
-
         // Check for new deposits before playing
         await checkDeposits();
 

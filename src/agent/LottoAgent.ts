@@ -35,6 +35,7 @@ import {
 } from '../mcp/client.js';
 import { BudgetManager } from './BudgetManager.js';
 import { StrategyEngine, type ScoredPool } from './StrategyEngine.js';
+import { assertKillSwitchDisabled } from '../lib/killswitch.js';
 import {
   ReportGenerator,
   type PoolResult,
@@ -170,6 +171,11 @@ export class LottoAgent {
   // ══════════════════════════════════════════════════════════════
 
   async play(): Promise<SessionReport> {
+    // Domain-layer kill switch gate covers single-user mode too —
+    // catches any direct LottoAgent.play() caller (scheduled cron,
+    // agent_play MCP tool, tests) without relying on tool-layer checks.
+    await assertKillSwitchDisabled();
+
     this._playing = true;
     try {
       return await this._runPlaySession();

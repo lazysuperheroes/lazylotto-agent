@@ -19,7 +19,10 @@ import { getUserState } from '../client.js';
 import type { ServerContext, SessionRecord } from './types.js';
 import { hbarToNumber } from '../../utils/format.js';
 import { transferHbar, transferToken } from '../../hedera/transfers.js';
-import { assertKillSwitchDisabled } from '../../lib/killswitch.js';
+
+// Kill switch is enforced inside LottoAgent.play() — the domain layer
+// is the single source of truth. This tool just calls agent.play() and
+// lets any KillSwitchError surface through the normal error path.
 
 // ── Registration ────────────────────────────────────────────────
 
@@ -59,9 +62,6 @@ export function registerSingleUserTools(
       }
 
       try {
-        // Block new plays while the kill switch is engaged
-        await assertKillSwitchDisabled();
-
         setIsSessionActive(true);
 
         const report = await agent.play();

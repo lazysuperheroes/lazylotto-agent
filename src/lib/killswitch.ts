@@ -35,6 +35,22 @@ export interface KillSwitchState {
   enabledBy?: string;
 }
 
+/**
+ * Thrown by `assertKillSwitchDisabled()` when the switch is engaged.
+ * Callers (HTTP routes, MCP tools) can detect this specifically to
+ * translate into a 503 / structured error response with the reason.
+ */
+export class KillSwitchError extends Error {
+  constructor(public reason: string | undefined) {
+    const tail = reason ? `: ${reason}` : '';
+    super(
+      `Operation paused by operator${tail}. ` +
+        'Withdrawals and read operations remain available.',
+    );
+    this.name = 'KillSwitchError';
+  }
+}
+
 /** Check whether the kill switch is currently engaged. */
 export async function isKillSwitchEnabled(): Promise<boolean> {
   try {
@@ -94,16 +110,18 @@ export async function disableKillSwitch(disabledBy: string): Promise<void> {
 }
 
 /**
- * Throws a user-friendly error if the kill switch is engaged.
- * Call at the start of any write-path operation that creates new
- * financial obligations.
+ * Throws a KillSwitchError if the switch is engaged. Call at the start
+ * of any write-path operation that creates new financial obligations.
+ *
+ * This is the single source of truth — invoke from the domain layer
+ * (MultiUserAgent.playForUser, registerUser, playForAllEligible,
+ * LottoAgent.play) so that alternative callers (CLI cron, tests, future
+ * HCS-10 negotiation handlers) can never bypass the gate by going
+ * around the MCP tool layer.
  */
 export async function assertKillSwitchDisabled(): Promise<void> {
   const state = await getKillSwitchState();
   if (state.enabled) {
-    const reason = state.reason ? `: ${state.reason}` : '';
-    throw new Error(
-      `Operation paused by operator${reason}. Withdrawals and read operations remain available.`,
-    );
+    throw new KillSwitchError(state.reason);
   }
 }

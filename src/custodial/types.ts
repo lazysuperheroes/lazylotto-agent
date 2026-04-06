@@ -98,6 +98,8 @@ export function reserveSummary(
 // ── Operator ──────────────────────────────────────────────────
 
 export interface OperatorState {
+  /** Schema version stamped at write time. Missing = legacy (v0). */
+  schemaVersion?: number;
   /** Per-token platform balance (rake collected minus gas minus withdrawn). */
   balances: Record<string, number>;
   /** Per-token cumulative rake collected. */
