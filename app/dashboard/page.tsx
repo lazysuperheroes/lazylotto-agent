@@ -894,16 +894,17 @@ export default function DashboardPage() {
   if (!sessionToken) {
     return (
       <div className="flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-md rounded-xl border border-secondary p-8 text-center shadow-lg">
-          <h1 className="mb-3 font-heading text-xl text-foreground">
+        <div className="w-full max-w-md border-2 border-secondary p-8 text-center">
+          <p className="label-caps-brand-lg mb-3">Sign in required</p>
+          <h1 className="display-md mb-3 text-foreground">
             Authentication Required
           </h1>
-          <p className="mb-6 text-sm text-muted">
+          <p className="type-body mb-6 text-muted">
             Please authenticate with your Hedera wallet to access your dashboard.
           </p>
           <a
             href="/auth"
-            className="inline-block rounded-lg bg-primary px-6 py-3 font-semibold text-white transition-colors hover:bg-primary/90"
+            className="inline-block border-2 border-brand bg-brand px-6 py-3 font-pixel text-[10px] uppercase tracking-wider text-background transition-opacity hover:opacity-90"
           >
             Go to Authentication
           </a>
@@ -916,11 +917,12 @@ export default function DashboardPage() {
   if (notRegistered) {
     return (
       <div className="flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-md rounded-xl border border-secondary p-8 text-center shadow-lg">
-          <h1 className="mb-3 font-heading text-xl text-foreground">
-            Welcome, {storedAccountId ?? 'Explorer'}
+        <div className="w-full max-w-md border-2 border-brand bg-brand/5 p-8 text-center panel-shadow-sm">
+          <p className="label-caps-brand-lg mb-3">Welcome</p>
+          <h1 className="display-md mb-3 text-foreground">
+            {storedAccountId ?? 'Explorer'}
           </h1>
-          <p className="mb-6 text-sm text-muted">
+          <p className="type-body mb-6 text-muted">
             You&apos;re signed in but haven&apos;t registered as a player yet.
             One click and you&apos;ll get a deposit memo so you can fund your
             account and start playing.
@@ -929,13 +931,14 @@ export default function DashboardPage() {
             type="button"
             onClick={handleRegister}
             disabled={registerLoading}
-            className="inline-block rounded-lg bg-primary px-6 py-3 font-semibold text-white transition-colors hover:bg-primary/90 disabled:opacity-50"
+            className="inline-block border-2 border-brand bg-brand px-6 py-3 font-pixel text-[10px] uppercase tracking-wider text-background transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             {registerLoading ? 'Registering…' : 'Register Now'}
           </button>
-          <p className="mt-4 text-xs text-muted">
-            You&apos;ll be using the <span className="text-foreground">balanced</span> strategy by default.
-            You can change it later from the dashboard.
+          <p className="type-caption mt-4">
+            You&apos;ll be using the{' '}
+            <span className="text-foreground font-semibold">balanced</span> strategy by
+            default. You can change it later from the dashboard.
           </p>
         </div>
       </div>
@@ -1009,10 +1012,8 @@ export default function DashboardPage() {
             a comic book page than a dashboard nameplate. */}
         <header className="mb-10 flex items-baseline justify-between gap-4">
           <div>
-            <p className="label-caps mb-1">Your agent</p>
-            <h1 className="font-heading text-3xl font-extrabold uppercase tracking-tight text-foreground">
-              Dashboard
-            </h1>
+            <p className="label-caps-lg mb-2">Your agent</p>
+            <h1 className="display-lg text-foreground">Dashboard</h1>
           </div>
           {status?.userId && (
             <p className="hidden font-pixel text-[9px] uppercase tracking-wider text-muted sm:block">
@@ -1084,14 +1085,14 @@ export default function DashboardPage() {
                         {step.n}
                       </span>
                       <span
-                        className={`font-heading text-base font-semibold uppercase tracking-wider ${
+                        className={`heading-2 uppercase tracking-wider ${
                           step.active ? 'text-foreground' : 'text-muted'
                         }`}
                       >
                         {step.label}
                       </span>
                     </div>
-                    <p className="mt-1 text-xs text-muted">{step.desc}</p>
+                    <p className="type-caption mt-1">{step.desc}</p>
                   </li>
                 ))}
               </ol>
@@ -1118,10 +1119,10 @@ export default function DashboardPage() {
               >
                 <span className="mt-1 inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-destructive" />
                 <div className="min-w-0 flex-1">
-                  <p className="font-heading text-sm font-semibold text-foreground">
+                  <p className="heading-2 text-foreground">
                     {publicStats.statusMessage ?? 'Agent temporarily closed'}
                   </p>
-                  <p className="mt-1 text-xs text-muted">
+                  <p className="type-caption mt-1">
                     New plays and registrations are paused.
                     Your balance is safe and withdrawals remain available.
                   </p>
@@ -1188,13 +1189,13 @@ export default function DashboardPage() {
 
               {/* Hero content */}
               <div className="min-w-0">
-                {/* Metadata row — small caps, tight tracking */}
+                {/* Metadata row — small caps lg for prominence */}
                 <div className="mb-5 flex flex-wrap items-center gap-x-5 gap-y-2">
-                  <span className="label-caps">Your agent</span>
-                  <span className="label-caps-brand">
+                  <span className="label-caps-lg">Your agent</span>
+                  <span className="label-caps-brand-lg">
                     Strategy · {status.strategyName}
                   </span>
-                  <span className="label-caps">Rake {status.rakePercent}%</span>
+                  <span className="label-caps-lg">Rake {status.rakePercent}%</span>
                   {depositsChecking && (
                     <span className="label-caps-brand inline-flex items-center gap-1.5">
                       <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
@@ -1206,8 +1207,9 @@ export default function DashboardPage() {
                 {/* Display number — the hero moment. Always render, even
                     when the user has no token entries yet: show a muted
                     zero so the hero feels committed instead of broken.
-                    "Loading balance…" was misleading because the balance
-                    wasn't loading, the user just didn't have one. */}
+                    Uses the formal .display-xl scale utility so the
+                    hero balance is the ONE place in the app that uses
+                    this size — no accidental duplication elsewhere. */}
                 {(() => {
                   const displayAvailable = primaryBalanceEntry?.[1].available ?? 0;
                   const displayReserved = primaryBalanceEntry?.[1].reserved ?? 0;
@@ -1217,11 +1219,11 @@ export default function DashboardPage() {
                   const isEmpty = displayAvailable === 0 && displayReserved === 0;
                   return (
                     <div className="mb-2">
-                      <p className="label-caps mb-1">
+                      <p className="label-caps-lg mb-2">
                         {isEmpty ? 'Empty' : 'Pot'}
                       </p>
                       <p
-                        className={`num-tabular font-heading text-[clamp(3.5rem,10vw,6.5rem)] font-extrabold leading-[0.95] ${
+                        className={`display-xl ${
                           isEmpty ? 'text-muted/40' : 'text-brand'
                         }`}
                         aria-label={
@@ -1233,13 +1235,13 @@ export default function DashboardPage() {
                         {formatAmount(displayAvailable)}
                       </p>
                       <p
-                        className={`mt-1 font-heading text-lg font-semibold ${
+                        className={`heading-1 mt-2 ${
                           isEmpty ? 'text-muted/70' : 'text-foreground'
                         }`}
                       >
                         {displayToken}
                         {displayReserved > 0 && (
-                          <span className="ml-3 text-xs font-normal text-muted">
+                          <span className="type-caption num-tabular ml-3 font-normal">
                             {formatAmount(displayReserved)} reserved
                           </span>
                         )}
@@ -1265,11 +1267,25 @@ export default function DashboardPage() {
                   </div>
                 )}
 
-                {/* Character quip — speech bubble feel */}
+                {/* Character quip — editorial italic pull-quote with
+                    hanging oversized open-quote glyph. Gives the mascot
+                    a real voice on the page rather than a tiny footnote. */}
                 {characterLine && (
-                  <p className="mt-5 max-w-md text-sm italic text-muted">
-                    &ldquo;{characterLine}&rdquo;
-                  </p>
+                  <blockquote className="prose-width mt-6 relative pl-6">
+                    <span
+                      className="absolute left-0 top-0 font-heading text-3xl font-extrabold leading-none text-brand"
+                      aria-hidden="true"
+                    >
+                      “
+                    </span>
+                    <p className="type-body-lg italic text-muted">
+                      {characterLine}
+                      <span className="not-italic text-brand">”</span>
+                    </p>
+                    <cite className="label-caps-brand mt-2 block not-italic">
+                      — {character.name}
+                    </cite>
+                  </blockquote>
                 )}
 
                 {/* ── Primary action: PLAY ─────────────────────────── */}
@@ -1351,10 +1367,10 @@ export default function DashboardPage() {
         {!status && !statusLoading && error && (
           <ComicPanel label="ERROR" tone="destructive" halftone="none" className="mb-12">
             <div className="p-6">
-              <p className="mb-2 font-heading text-base text-destructive">
+              <p className="heading-1 mb-2 text-destructive">
                 Balance temporarily unavailable
               </p>
-              <p className="mb-4 text-xs text-muted">{error}</p>
+              <p className="type-caption mb-4">{error}</p>
               <button
                 type="button"
                 onClick={retryStatus}
@@ -1401,10 +1417,10 @@ export default function DashboardPage() {
                   ▸
                 </span>
                 <div className="min-w-0">
-                  <h2 className="font-heading text-base text-foreground">
+                  <h2 className="heading-1 text-foreground">
                     Fund Your Account
                   </h2>
-                  <p className="label-caps mt-0.5">
+                  <p className="label-caps mt-1">
                     {depositCardOpen
                       ? 'Agent wallet & deposit memo'
                       : hasPlayableBalance
@@ -1445,7 +1461,7 @@ export default function DashboardPage() {
               <div className="collapsible-inner">
                 {status && (
                   <div className="space-y-5 border-t border-secondary px-6 py-5">
-                    <p className="text-xs text-muted">
+                    <p className="type-body prose-width text-muted">
                       Send HBAR or LAZY to the agent wallet below with your
                       unique deposit memo. Deposits usually arrive within ~10
                       seconds — hit{' '}
@@ -1637,31 +1653,31 @@ export default function DashboardPage() {
             )}
 
             {/* ---- Header + P&L strip ---- */}
-            <div className="flex flex-wrap items-end justify-between gap-3 px-5 pb-3 pt-5">
+            <div className="flex flex-wrap items-end justify-between gap-4 px-5 pb-4 pt-6">
               <div>
-                <p className="label-caps mb-1">Play log</p>
-                <p className="font-heading text-base text-foreground">
-                  Each row is one agent session across one or more pools
-                </p>
+                <p className="label-caps-lg mb-2">Play log</p>
+                <h2 className="heading-1 text-foreground">
+                  Recent agent sessions
+                </h2>
               </div>
               {perfSummary && (
-                <div className="flex flex-wrap items-center gap-4 text-xs">
+                <div className="flex flex-wrap items-end gap-5">
                   <div>
-                    <p className="label-caps mb-0.5">Spent</p>
-                    <p className="num-tabular text-foreground">
+                    <p className="label-caps mb-1">Spent</p>
+                    <p className="num-tabular type-body text-foreground">
                       {formatAmount(perfSummary.totalSpentAll)} {perfSummary.primaryToken}
                     </p>
                   </div>
                   <div>
-                    <p className="label-caps mb-0.5">Won</p>
-                    <p className="num-tabular text-foreground">
+                    <p className="label-caps mb-1">Won</p>
+                    <p className="num-tabular type-body text-foreground">
                       {formatAmount(perfSummary.totalWonAll)} {perfSummary.primaryToken}
                     </p>
                   </div>
                   <div>
-                    <p className="label-caps mb-0.5">Net</p>
+                    <p className="label-caps mb-1">Net</p>
                     <p
-                      className={`num-tabular font-semibold ${
+                      className={`num-tabular type-body font-semibold ${
                         perfSummary.net >= 0 ? 'text-success' : 'text-destructive'
                       }`}
                     >
@@ -1715,7 +1731,7 @@ export default function DashboardPage() {
                               {formatTimestamp(s.timestamp)}
                             </span>
                             <span
-                              className={`num-tabular font-heading text-sm font-semibold ${
+                              className={`num-tabular heading-2 ${
                                 isWin ? 'text-brand' : 'text-muted'
                               }`}
                             >
@@ -1914,10 +1930,8 @@ export default function DashboardPage() {
         )}
 
         {/* ---- Session Section (compact, demoted) ---- */}
-        <div className="border-t border-secondary mt-8 pt-6">
-          <h2 className="mb-3 font-heading text-sm text-foreground">
-            Session
-          </h2>
+        <div className="mt-10 border-t border-secondary/60 pt-6">
+          <p className="label-caps mb-3">Session</p>
 
           <div className="flex flex-wrap items-center gap-3">
             <code className="font-mono text-sm text-muted">

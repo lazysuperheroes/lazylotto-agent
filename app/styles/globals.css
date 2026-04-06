@@ -195,14 +195,45 @@ body {
   box-shadow: 4px 4px 0 0 var(--color-ink);
 }
 
-/* Small-caps label — the uppercase track-tight typography that
-   replaces generic "muted small text" as section labels, metadata
-   rows, and microcopy throughout the dashboard. */
+/* ─────────────────────────────────────────────────────────────
+   Small-caps label system
+   ─────────────────────────────────────────────────────────────
+   The uppercase track-tight typography that replaces generic
+   "muted small text" as section labels, metadata rows, table
+   headers, and microcopy. Three sizes for three contexts:
+
+   - .label-caps-xs (9px): dense contexts — table headers,
+     metadata chips inside rows, inline micro-annotations
+   - .label-caps    (10px, default): section kickers, card
+     labels, form labels — the most common variant
+   - .label-caps-lg (12px): prominent section kickers above
+     display moments, hero metadata, top-bar eyebrows
+
+   All share 600+ weight, open letter-spacing, and line-height 1
+   so they sit as architectural markers rather than body text.
+   ───────────────────────────────────────────────────────────── */
+
+.label-caps-xs {
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
 .label-caps {
   font-size: 10px;
   line-height: 1;
   font-weight: 600;
   letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+.label-caps-lg {
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.15em;
   text-transform: uppercase;
   color: var(--color-muted);
 }
@@ -213,6 +244,111 @@ body {
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: var(--color-brand);
+}
+.label-caps-brand-lg {
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--color-brand);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Display scale
+   ─────────────────────────────────────────────────────────────
+   Three editorial display sizes for the moments that need to
+   shout — the hero balance, page titles, and panel headlines.
+   All use Unbounded 800 weight with tight leading and slightly
+   condensed tracking so big numbers sit together as a block
+   rather than floating apart.
+
+   - .display-xl: hero balance (clamp 3.5rem–6.5rem)
+   - .display-lg: page titles (clamp 2rem–3rem)
+   - .display-md: panel headlines (clamp 1.25rem–1.5rem)
+
+   Weight, family, and case are baked in so callers only need
+   the utility class — no more `font-heading text-2xl font-
+   extrabold uppercase tracking-tight` soup at every heading.
+   ───────────────────────────────────────────────────────────── */
+
+.display-xl {
+  font-family: var(--font-heading);
+  font-size: clamp(3.5rem, 10vw, 6.5rem);
+  font-weight: 800;
+  line-height: 0.95;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+.display-lg {
+  font-family: var(--font-heading);
+  font-size: clamp(2rem, 4vw, 3rem);
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+}
+
+.display-md {
+  font-family: var(--font-heading);
+  font-size: clamp(1.25rem, 2.5vw, 1.5rem);
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Heading + body scale
+   ─────────────────────────────────────────────────────────────
+   Below the display tier for normal content hierarchy. These
+   use Heebo (the body sans) at consistent sizes so headings
+   inside panels don't compete with the display moments and
+   body paragraphs read comfortably at the dense-app UI scale.
+   ───────────────────────────────────────────────────────────── */
+
+.heading-1 {
+  font-family: var(--font-heading);
+  font-size: 1.25rem; /* 20px */
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.005em;
+}
+
+.heading-2 {
+  font-family: var(--font-heading);
+  font-size: 1rem; /* 16px */
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/* Body + caption — prefixed with `type-` to avoid visual
+   confusion with the `body` HTML element selector and any
+   generic class name. */
+.type-body-lg {
+  font-size: 1.0625rem; /* 17px */
+  line-height: 1.55;
+}
+
+.type-body {
+  font-size: 0.9375rem; /* 15px */
+  line-height: 1.55;
+}
+
+.type-caption {
+  font-size: 0.75rem; /* 12px */
+  line-height: 1.45;
+  color: var(--color-muted);
+}
+
+/* Constrain paragraph prose to a comfortable reading line.
+   Apply to any <p> or prose container whose content is real
+   sentences (not labels, not data rows). Uses ch units so the
+   constraint tracks font size — ~65 characters per line is the
+   typographic sweet spot. */
+.prose-width {
+  max-width: 65ch;
 }
 
 /* Pixel-font utility — used for issue-number stickers and comic SFX

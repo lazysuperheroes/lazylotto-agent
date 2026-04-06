@@ -624,7 +624,7 @@ export default function AdminPage() {
     return (
       <div className="flex flex-1 items-center justify-center">
         <div className="max-w-md rounded-xl border border-destructive/30 bg-destructive/10 p-8 text-center">
-          <p className="font-heading text-lg text-destructive">Access Denied</p>
+          <p className="heading-1 text-destructive">Access Denied</p>
           <p className="mt-2 text-sm text-muted">{error}</p>
           <button
             type="button"
@@ -658,10 +658,8 @@ export default function AdminPage() {
             surfaces — no mascot, no gold flourish, just a clear
             chapter title. */}
         <header className="mb-10">
-          <p className="label-caps mb-1">Operator view</p>
-          <h1 className="font-heading text-3xl font-extrabold uppercase tracking-tight text-foreground">
-            Agent Administration
-          </h1>
+          <p className="label-caps-lg mb-2">Operator view</p>
+          <h1 className="display-lg text-foreground">Agent Administration</h1>
         </header>
 
         {/* ---- Kill Switch ──────────────────────────────────
@@ -685,7 +683,7 @@ export default function AdminPage() {
                     />
                     <p className="label-caps">Kill switch</p>
                     <p
-                      className={`font-heading text-sm font-semibold uppercase tracking-wider ${
+                      className={`heading-2 uppercase tracking-wider ${
                         killSwitch.enabled ? 'text-destructive' : 'text-success'
                       }`}
                     >
@@ -750,32 +748,32 @@ export default function AdminPage() {
           <div className="mb-8">
             <ComicPanel label="OVERVIEW" halftone="light">
               <div className="grid grid-cols-2 gap-0 divide-x divide-y divide-brand/15 md:grid-cols-4 md:divide-y-0">
-                <div className="p-5">
-                  <p className="label-caps mb-1">Active users</p>
-                  <p className="num-tabular font-heading text-3xl font-extrabold text-brand">
+                <div className="p-6">
+                  <p className="label-caps mb-2">Active users</p>
+                  <p className="num-tabular display-md text-brand">
                     {overview.users.active}
                   </p>
-                  <p className="mt-1 text-[11px] text-muted">
+                  <p className="type-caption mt-1">
                     of {overview.users.total} total
                   </p>
                 </div>
-                <div className="p-5">
-                  <p className="label-caps mb-1">Deposited</p>
-                  <p className="num-tabular font-heading text-2xl font-extrabold text-brand">
+                <div className="p-6">
+                  <p className="label-caps mb-2">Deposited</p>
+                  <p className="num-tabular display-md text-brand">
                     {summariseTokenMap(overview.balances.totalDeposited)}
                   </p>
                 </div>
-                <div className="p-5">
-                  <p className="label-caps mb-1">Operator rake</p>
-                  <p className="num-tabular font-heading text-2xl font-extrabold text-brand">
+                <div className="p-6">
+                  <p className="label-caps mb-2">Operator rake</p>
+                  <p className="num-tabular display-md text-brand">
                     {summariseTokenMap(overview.operator.totalRakeCollected)}
                   </p>
                 </div>
-                <div className="p-5">
-                  <p className="label-caps mb-1">Gas spent</p>
-                  <p className="num-tabular font-heading text-2xl font-extrabold text-brand">
+                <div className="p-6">
+                  <p className="label-caps mb-2">Gas spent</p>
+                  <p className="num-tabular display-md text-brand">
                     {fmt(overview.operator.totalGasSpent, 2)}{' '}
-                    <span className="text-sm text-muted">HBAR</span>
+                    <span className="type-caption text-muted">HBAR</span>
                   </p>
                 </div>
               </div>
@@ -790,8 +788,8 @@ export default function AdminPage() {
         <div className="mb-8">
           <ComicPanel label="USERS" tone="muted" halftone="none">
             <div className="border-b border-secondary px-5 py-4">
-              <p className="label-caps mb-1">Managed users</p>
-              <p className="text-xs text-muted">
+              <p className="label-caps-lg mb-1">Managed users</p>
+              <p className="type-caption">
                 Click a column to sort. Columns scroll horizontally on narrow viewports.
               </p>
             </div>
@@ -975,8 +973,8 @@ export default function AdminPage() {
               className="flex w-full items-center justify-between px-5 py-4 text-left"
             >
               <div>
-                <p className="label-caps mb-1">Balance reconciliation</p>
-                <p className="font-heading text-base text-foreground">
+                <p className="label-caps-lg mb-1">Balance reconciliation</p>
+                <p className="heading-2 text-foreground">
                   Compare on-chain vs ledger
                 </p>
               </div>
@@ -1133,8 +1131,8 @@ export default function AdminPage() {
                 ▸
               </span>
               <div className="min-w-0">
-                <p className="label-caps mb-1">Operator balance</p>
-                <p className="font-heading text-base text-foreground">
+                <p className="label-caps-lg mb-1">Operator balance</p>
+                <p className="heading-2 text-foreground">
                   Accumulated rake, gas, and net profit
                 </p>
               </div>
