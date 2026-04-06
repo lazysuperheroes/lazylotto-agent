@@ -2,6 +2,12 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useToast } from '../components/Toast';
+import {
+  PrizeNftCard,
+  type PrizeNftRef,
+  type EnrichedPrizeNft,
+} from '../components/PrizeNftCard';
+import { useNftEnrichment } from '../components/useNftEnrichment';
 
 // ---------------------------------------------------------------------------
 // Types -- mapped to real API response shapes
@@ -34,27 +40,12 @@ interface StatusResponse {
   agentWallet?: string;
 }
 
-interface EnrichedPrizeNft {
-  hederaId: string;
-  serial: number;
-  nftName: string;
-  collection: string;
-  niceName: string;
-  showNiceName: boolean;
-  verificationLevel: 'lazysuperheroes' | 'complete' | 'simple' | 'unverified';
-  image: string;
-  source: 'directus' | 'mirror' | 'fallback';
-  tokenUrl: string;
-  serialUrl: string;
-}
-
 interface PrizeDetail {
   fungibleAmount?: number;
   fungibleToken?: string;
   nftCount?: number;
-  nfts?: { token: string; hederaId: string; serial: number }[];
-  /** Populated server-side after enrichment from Directus + mirror node. */
-  enrichedNfts?: EnrichedPrizeNft[];
+  /** Raw NFT refs captured at win time — enriched lazily on the client. */
+  nfts?: PrizeNftRef[];
 }
 
 interface PoolResult {
@@ -91,106 +82,6 @@ interface PlaySession {
 interface HistoryResponse {
   userId: string;
   sessions: PlaySession[];
-}
-
-// ---------------------------------------------------------------------------
-// Verification badge — mirrors lazy-dapp-v3's VerificationBadge.tsx tiers
-// ---------------------------------------------------------------------------
-
-const VERIFICATION_BADGE: Record<
-  EnrichedPrizeNft['verificationLevel'],
-  { label: string; className: string; tooltip: string; icon: string }
-> = {
-  lazysuperheroes: {
-    label: 'LSH Verified',
-    className: 'bg-brand/20 text-brand border-brand/40',
-    tooltip: 'Verified token, part of the Lazy Superheroes ecosystem',
-    icon: '🛡',
-  },
-  complete: {
-    label: 'Verified',
-    className: 'bg-success/20 text-success border-success/40',
-    tooltip: 'Known and fully verified token',
-    icon: '🛡',
-  },
-  simple: {
-    label: 'Known',
-    className: 'bg-blue-500/20 text-blue-300 border-blue-500/40',
-    tooltip: 'Known token in the Hedera ecosystem but has not been verified',
-    icon: 'ℹ',
-  },
-  unverified: {
-    label: 'Unverified',
-    className: 'bg-muted/20 text-muted border-muted/40',
-    tooltip: 'This token has not been verified',
-    icon: '?',
-  },
-};
-
-function PrizeNftCard({ nft }: { nft: EnrichedPrizeNft }) {
-  const badge = VERIFICATION_BADGE[nft.verificationLevel];
-  // Nice-name rule: only show friendly name for verified tiers, else raw hederaId
-  const displayCollection = nft.showNiceName
-    ? nft.niceName
-    : `${nft.hederaId.slice(0, 6)}…${nft.hederaId.slice(-4)}`;
-
-  return (
-    <div className="flex items-center gap-3 rounded-lg border border-secondary bg-[#111113] p-2 pr-3">
-      {/* Image (or placeholder) */}
-      <a
-        href={nft.serialUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="relative block h-14 w-14 shrink-0 overflow-hidden rounded bg-secondary"
-        title={`View #${nft.serial} on HashScan`}
-      >
-        {nft.image ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={nft.image}
-            alt={nft.nftName}
-            className="h-full w-full object-cover"
-            onError={(e) => {
-              (e.target as HTMLImageElement).style.display = 'none';
-            }}
-          />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-lg text-muted">
-            ?
-          </div>
-        )}
-      </a>
-
-      {/* Details */}
-      <div className="flex min-w-0 flex-col gap-0.5">
-        <a
-          href={nft.serialUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="truncate text-sm font-semibold text-foreground hover:text-brand"
-          title={nft.nftName}
-        >
-          {nft.nftName}
-        </a>
-        <a
-          href={nft.tokenUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="truncate text-[11px] text-muted hover:text-foreground"
-          title={nft.showNiceName ? `${nft.niceName} (${nft.hederaId})` : nft.hederaId}
-        >
-          {displayCollection}
-        </a>
-        <span
-          className={`mt-0.5 inline-flex w-fit items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-semibold ${badge.className}`}
-          title={badge.tooltip}
-        >
-          <span>{badge.icon}</span>
-          <span>{badge.label}</span>
-        </span>
-      </div>
-    </div>
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +126,77 @@ function formatTimestamp(iso: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Skeleton — structural placeholder shown while the first payload loads.
+// Mirrors the real dashboard layout so the page doesn't reflow on arrival.
+// ---------------------------------------------------------------------------
+
+function SkeletonBox({ className = '' }: { className?: string }) {
+  return <div className={`animate-pulse rounded bg-secondary/50 ${className}`} />;
+}
+
+function DashboardSkeleton() {
+  return (
+    <div className="mx-auto w-full max-w-6xl px-4 py-8 lg:px-8">
+      {/* Header */}
+      <div className="mb-8 flex flex-col gap-2">
+        <SkeletonBox className="h-8 w-48" />
+        <SkeletonBox className="h-4 w-64" />
+      </div>
+
+      {/* Two-column row: balance + deposit */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        {/* Balance card skeleton */}
+        <div className="rounded-xl border border-secondary p-6 shadow">
+          <SkeletonBox className="mb-4 h-5 w-32" />
+          <SkeletonBox className="mb-2 h-8 w-40" />
+          <div className="mt-4 space-y-2">
+            <SkeletonBox className="h-4 w-full" />
+            <SkeletonBox className="h-4 w-3/4" />
+            <SkeletonBox className="h-4 w-2/3" />
+          </div>
+        </div>
+
+        {/* Deposit card skeleton */}
+        <div className="rounded-xl border border-secondary p-6 shadow">
+          <SkeletonBox className="mb-4 h-5 w-32" />
+          <SkeletonBox className="mb-3 h-3 w-full" />
+          <div className="space-y-4">
+            <div>
+              <SkeletonBox className="mb-1.5 h-3 w-24" />
+              <SkeletonBox className="h-10 w-full" />
+            </div>
+            <div>
+              <SkeletonBox className="mb-1.5 h-3 w-24" />
+              <SkeletonBox className="h-10 w-full" />
+            </div>
+          </div>
+        </div>
+
+        {/* Play history skeleton (full width) */}
+        <div className="rounded-xl border border-secondary p-6 shadow lg:col-span-2">
+          <SkeletonBox className="mb-4 h-5 w-32" />
+          <div className="space-y-3">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="rounded-lg border border-secondary p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <SkeletonBox className="h-4 w-32" />
+                  <SkeletonBox className="h-4 w-16" />
+                </div>
+                <div className="flex gap-2">
+                  <SkeletonBox className="h-6 w-20" />
+                  <SkeletonBox className="h-6 w-20" />
+                  <SkeletonBox className="h-6 w-20" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -250,6 +212,22 @@ export default function DashboardPage() {
   const [lockLoading, setLockLoading] = useState(false);
   const [revokeLoading, setRevokeLoading] = useState(false);
   const [showAll, setShowAll] = useState(false);
+
+  // Extract raw NFT refs from all sessions for lazy enrichment.
+  // The hook dedupes internally by ${hederaId}!${serial} so duplicates are fine.
+  const rawNftRefs = useMemo((): PrizeNftRef[] => {
+    const refs: PrizeNftRef[] = [];
+    for (const session of sessions) {
+      for (const pr of session.poolResults) {
+        for (const pd of pr.prizeDetails) {
+          if (pd.nfts) refs.push(...pd.nfts);
+        }
+      }
+    }
+    return refs;
+  }, [sessions]);
+
+  const { data: enrichedMap, loading: enrichmentLoading } = useNftEnrichment(rawNftRefs);
 
   // Set page title
   useEffect(() => {
@@ -428,14 +406,7 @@ export default function DashboardPage() {
 
   // --- Loading state ---
   if (loading) {
-    return (
-      <div className="flex flex-1 items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-muted border-t-primary" />
-          <p className="text-sm text-muted">Loading your dashboard...</p>
-        </div>
-      </div>
-    );
+    return <DashboardSkeleton />;
   }
 
   // --- No auth token ---
@@ -824,20 +795,26 @@ export default function DashboardPage() {
                                 ) : null;
                               })()}
 
-                              {/* NFT prizes — enriched cards */}
+                              {/* NFT prizes — raw first, enriched in background */}
                               {(() => {
-                                const enrichedNfts = s.poolResults
+                                const rawNfts = s.poolResults
                                   .flatMap((pr) => pr.prizeDetails)
-                                  .flatMap((pd) => pd.enrichedNfts ?? []);
-                                if (enrichedNfts.length === 0) return null;
+                                  .flatMap((pd) => pd.nfts ?? []);
+                                if (rawNfts.length === 0) return null;
                                 return (
                                   <div className="flex flex-wrap gap-2">
-                                    {enrichedNfts.map((nft) => (
-                                      <PrizeNftCard
-                                        key={`${nft.hederaId}-${nft.serial}`}
-                                        nft={nft}
-                                      />
-                                    ))}
+                                    {rawNfts.map((raw) => {
+                                      const key = `${raw.hederaId}!${raw.serial}`;
+                                      const enriched = enrichedMap.get(key);
+                                      return (
+                                        <PrizeNftCard
+                                          key={key}
+                                          raw={raw}
+                                          enriched={enriched}
+                                          loading={!enriched && enrichmentLoading}
+                                        />
+                                      );
+                                    })}
                                   </div>
                                 );
                               })()}

@@ -1,6 +1,11 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import {
+  PrizeNftCard,
+  type PrizeNftRef,
+} from '../components/PrizeNftCard';
+import { useNftEnrichment } from '../components/useNftEnrichment';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -11,25 +16,15 @@ interface BurnEntry {
   memo: string;
 }
 
-interface EnrichedPrizeNft {
-  hederaId: string;
-  serial: number;
-  nftName: string;
-  collection: string;
-  niceName: string;
-  showNiceName: boolean;
-  verificationLevel: 'lazysuperheroes' | 'complete' | 'simple' | 'unverified';
-  image: string;
-  source: 'directus' | 'mirror' | 'fallback';
-  tokenUrl: string;
-  serialUrl: string;
-}
-
 interface PoolWinResult {
   poolName: string;
   wins: number;
-  prizeDetails: unknown[];
-  enrichedNfts?: EnrichedPrizeNft[];
+  prizeDetails: Array<{
+    fungibleAmount?: number;
+    fungibleToken?: string;
+    nftCount?: number;
+    nfts?: PrizeNftRef[];
+  }>;
 }
 
 interface AuditEntry {
@@ -68,103 +63,6 @@ interface AuditResponse {
   // Admin-only fields
   filteredBy?: string | null;
   users?: string[];
-}
-
-// ---------------------------------------------------------------------------
-// Verification badge — mirrors lazy-dapp-v3's VerificationBadge.tsx tiers
-// ---------------------------------------------------------------------------
-
-const VERIFICATION_BADGE: Record<
-  EnrichedPrizeNft['verificationLevel'],
-  { label: string; className: string; tooltip: string; icon: string }
-> = {
-  lazysuperheroes: {
-    label: 'LSH Verified',
-    className: 'bg-brand/20 text-brand border-brand/40',
-    tooltip: 'Verified token, part of the Lazy Superheroes ecosystem',
-    icon: '🛡',
-  },
-  complete: {
-    label: 'Verified',
-    className: 'bg-success/20 text-success border-success/40',
-    tooltip: 'Known and fully verified token',
-    icon: '🛡',
-  },
-  simple: {
-    label: 'Known',
-    className: 'bg-blue-500/20 text-blue-300 border-blue-500/40',
-    tooltip: 'Known token in the Hedera ecosystem but has not been verified',
-    icon: 'ℹ',
-  },
-  unverified: {
-    label: 'Unverified',
-    className: 'bg-muted/20 text-muted border-muted/40',
-    tooltip: 'This token has not been verified',
-    icon: '?',
-  },
-};
-
-function PrizeNftBadge({ nft }: { nft: EnrichedPrizeNft }) {
-  const badge = VERIFICATION_BADGE[nft.verificationLevel];
-  const displayCollection = nft.showNiceName
-    ? nft.niceName
-    : `${nft.hederaId.slice(0, 6)}…${nft.hederaId.slice(-4)}`;
-
-  return (
-    <div className="flex items-center gap-2 rounded border border-secondary bg-[#111113] p-1.5 pr-2">
-      <a
-        href={nft.serialUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="relative block h-10 w-10 shrink-0 overflow-hidden rounded bg-secondary"
-        title={`${nft.nftName} — View on HashScan`}
-      >
-        {nft.image ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={nft.image}
-            alt={nft.nftName}
-            className="h-full w-full object-cover"
-            onError={(e) => {
-              (e.target as HTMLImageElement).style.display = 'none';
-            }}
-          />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-sm text-muted">
-            ?
-          </div>
-        )}
-      </a>
-      <div className="flex min-w-0 flex-col gap-0.5">
-        <a
-          href={nft.serialUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="truncate text-xs font-semibold text-foreground hover:text-brand"
-          title={nft.nftName}
-        >
-          {nft.nftName}
-        </a>
-        <span className="flex items-center gap-1">
-          <a
-            href={nft.tokenUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="truncate text-[10px] text-muted hover:text-foreground"
-            title={nft.showNiceName ? `${nft.niceName} (${nft.hederaId})` : nft.hederaId}
-          >
-            {displayCollection}
-          </a>
-          <span
-            className={`inline-flex items-center gap-0.5 rounded border px-1 py-[1px] text-[9px] font-semibold ${badge.className}`}
-            title={badge.tooltip}
-          >
-            <span>{badge.icon}</span>
-          </span>
-        </span>
-      </div>
-    </div>
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +157,62 @@ function typeLabel(type: AuditEntry['type']): string {
 }
 
 // ---------------------------------------------------------------------------
+// Skeleton — structural placeholder shown while the first payload loads.
+// The audit route is slower than most (mirror node topic scan) so giving the
+// user a structured view sooner is especially worthwhile here.
+// ---------------------------------------------------------------------------
+
+function SkeletonBox({ className = '' }: { className?: string }) {
+  return <div className={`animate-pulse rounded bg-secondary/50 ${className}`} />;
+}
+
+function AuditSkeleton() {
+  return (
+    <div className="mx-auto w-full max-w-4xl px-4 py-8 lg:px-8">
+      {/* Header */}
+      <div className="mb-6 flex flex-col gap-2">
+        <SkeletonBox className="h-8 w-48" />
+        <SkeletonBox className="h-4 w-96 max-w-full" />
+      </div>
+
+      {/* Topic link box */}
+      <SkeletonBox className="mb-6 h-12 w-full" />
+
+      {/* Summary bar */}
+      <div className="mb-8 flex flex-wrap gap-x-4 gap-y-2">
+        <SkeletonBox className="h-4 w-24" />
+        <SkeletonBox className="h-4 w-24" />
+        <SkeletonBox className="h-4 w-24" />
+        <SkeletonBox className="h-4 w-24" />
+        <SkeletonBox className="h-4 w-24" />
+      </div>
+
+      {/* Timeline */}
+      <div className="space-y-4">
+        {[0, 1, 2, 3].map((i) => (
+          <div
+            key={i}
+            className="rounded-lg border border-l-4 border-secondary p-4 pl-6"
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <SkeletonBox className="h-5 w-16" />
+                <SkeletonBox className="h-4 w-32" />
+              </div>
+              <SkeletonBox className="h-4 w-24" />
+            </div>
+            <div className="space-y-2">
+              <SkeletonBox className="h-3 w-3/4" />
+              <SkeletonBox className="h-3 w-1/2" />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -274,6 +228,23 @@ export default function AuditPage() {
   const [users, setUsers] = useState<string[]>([]);
   const [selectedUser, setSelectedUser] = useState<string>('');
   const [filterLoading, setFilterLoading] = useState(false);
+
+  // Extract all raw NFT refs across play entries for lazy enrichment.
+  const rawNftRefs = useMemo((): PrizeNftRef[] => {
+    const refs: PrizeNftRef[] = [];
+    if (!data) return refs;
+    for (const entry of data.entries) {
+      if (entry.type !== 'play' || !entry.poolResults) continue;
+      for (const pr of entry.poolResults) {
+        for (const pd of pr.prizeDetails) {
+          if (pd.nfts) refs.push(...pd.nfts);
+        }
+      }
+    }
+    return refs;
+  }, [data]);
+
+  const { data: enrichedMap, loading: enrichmentLoading } = useNftEnrichment(rawNftRefs);
 
   // Set page title
   useEffect(() => {
@@ -394,14 +365,7 @@ export default function AuditPage() {
 
   // --- Loading ---
   if (loading) {
-    return (
-      <div className="flex flex-1 items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-muted border-t-primary" />
-          <p className="text-sm text-muted">Loading audit trail...</p>
-        </div>
-      </div>
-    );
+    return <AuditSkeleton />;
   }
 
   // --- Not registered ---
@@ -664,17 +628,30 @@ export default function AuditPage() {
                                       </span>
                                     )}
                                   </p>
-                                  {/* Enriched NFT cards */}
-                                  {pr.enrichedNfts && pr.enrichedNfts.length > 0 && (
-                                    <div className="mt-1 flex flex-wrap gap-2">
-                                      {pr.enrichedNfts.map((nft) => (
-                                        <PrizeNftBadge
-                                          key={`${nft.hederaId}-${nft.serial}`}
-                                          nft={nft}
-                                        />
-                                      ))}
-                                    </div>
-                                  )}
+                                  {/* NFT cards — raw first, enriched in background */}
+                                  {(() => {
+                                    const rawNfts = pr.prizeDetails.flatMap(
+                                      (pd) => pd.nfts ?? [],
+                                    );
+                                    if (rawNfts.length === 0) return null;
+                                    return (
+                                      <div className="mt-1 flex flex-wrap gap-2">
+                                        {rawNfts.map((raw) => {
+                                          const key = `${raw.hederaId}!${raw.serial}`;
+                                          const enriched = enrichedMap.get(key);
+                                          return (
+                                            <PrizeNftCard
+                                              key={key}
+                                              raw={raw}
+                                              enriched={enriched}
+                                              loading={!enriched && enrichmentLoading}
+                                              size="compact"
+                                            />
+                                          );
+                                        })}
+                                      </div>
+                                    );
+                                  })()}
                                 </div>
                               );
                             })}

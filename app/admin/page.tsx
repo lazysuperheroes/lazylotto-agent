@@ -108,6 +108,63 @@ function deriveOperatorBalances(
 }
 
 // ---------------------------------------------------------------------------
+// Skeleton — structural placeholder for the admin landing page.
+// ---------------------------------------------------------------------------
+
+function SkeletonBox({ className = '' }: { className?: string }) {
+  return <div className={`animate-pulse rounded bg-secondary/50 ${className}`} />;
+}
+
+function AdminSkeleton() {
+  return (
+    <div className="mx-auto w-full max-w-6xl px-4 py-8 lg:px-8">
+      {/* Header */}
+      <div className="mb-6">
+        <SkeletonBox className="h-8 w-56" />
+      </div>
+
+      {/* Top stats row: Users / Deposited / Rake / Gas */}
+      <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="rounded-xl border border-secondary p-4 shadow">
+            <SkeletonBox className="mb-2 h-3 w-24" />
+            <SkeletonBox className="h-7 w-32" />
+          </div>
+        ))}
+      </div>
+
+      {/* Managed Users table */}
+      <div className="mb-6 rounded-xl border border-secondary p-6 shadow">
+        <SkeletonBox className="mb-4 h-5 w-32" />
+        <div className="space-y-3">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="flex items-center gap-4">
+              <SkeletonBox className="h-4 w-24" />
+              <SkeletonBox className="h-4 w-32" />
+              <SkeletonBox className="h-4 w-20" />
+              <SkeletonBox className="h-4 w-24" />
+              <SkeletonBox className="h-6 w-16 rounded-full" />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Two-column row: Dead letters + Reconciliation */}
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+        <div className="rounded-xl border border-secondary p-6 shadow">
+          <SkeletonBox className="mb-4 h-5 w-40" />
+          <SkeletonBox className="h-12 w-full" />
+        </div>
+        <div className="rounded-xl border border-secondary p-6 shadow">
+          <SkeletonBox className="mb-4 h-5 w-40" />
+          <SkeletonBox className="h-12 w-full" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -371,14 +428,7 @@ export default function AdminPage() {
 
   // --- Loading state ---
   if (loading) {
-    return (
-      <div className="flex flex-1 items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-muted border-t-primary" />
-          <p className="text-sm text-muted">Loading dashboard...</p>
-        </div>
-      </div>
-    );
+    return <AdminSkeleton />;
   }
 
   // --- Permission denied state ---

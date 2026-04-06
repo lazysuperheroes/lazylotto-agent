@@ -12,8 +12,6 @@ import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
 import { HEDERA_DEFAULTS } from '~/config/defaults';
-import { enrichPrizes, type EnrichedPrizeNft } from '~/enrichment/prizes';
-import type { PrizeNft } from '~/agent/ReportGenerator';
 
 // ---------------------------------------------------------------------------
 // Mirror node types
@@ -49,11 +47,11 @@ interface AuditEntry {
   /** Play session results (enriched from store when sessionId matches) */
   totalWins?: number;
   totalSpent?: number;
+  /** Pool results with raw PrizeDetail[]. Client lazily enriches via enrich-nfts. */
   poolResults?: {
     poolName: string;
     wins: number;
     prizeDetails: unknown[];
-    enrichedNfts?: EnrichedPrizeNft[];
   }[];
   raw: Record<string, unknown>;
 }
@@ -286,7 +284,9 @@ export async function GET(request: Request) {
 
       const entry = toAuditEntry(seq, timestamp, payload, hederaAccountId);
 
-      // Enrich play entries with win results from the store
+      // Enrich play entries with win results from the store.
+      // Prize NFT display metadata (images, badges) is lazy-loaded on the
+      // client via /api/user/enrich-nfts to keep this response fast.
       if (entry.type === 'play' && entry.sessionId) {
         const session = sessionMap.get(entry.sessionId);
         if (session) {
@@ -298,7 +298,6 @@ export async function GET(request: Request) {
               poolName: p.poolName,
               wins: p.wins,
               prizeDetails: p.prizeDetails,
-              enrichedNfts: undefined, // populated in a single batch pass after the loop
             }));
         }
       }
@@ -329,43 +328,6 @@ export async function GET(request: Request) {
     }
 
     const netBalance = totalDeposited - totalRake - totalBurned - totalWithdrawn;
-
-    // Batch NFT enrichment across all play entries.
-    // Extract every PrizeNft ref once, enrich in a single call, then index
-    // back onto each pool result's enrichedNfts field.
-    const allNftRefs: PrizeNft[] = [];
-    for (const entry of entries) {
-      if (entry.type !== 'play' || !entry.poolResults) continue;
-      for (const pr of entry.poolResults) {
-        for (const pd of pr.prizeDetails as Array<{ nfts?: PrizeNft[] }>) {
-          if (pd?.nfts) allNftRefs.push(...pd.nfts);
-        }
-      }
-    }
-
-    if (allNftRefs.length > 0) {
-      try {
-        const enriched = await enrichPrizes(allNftRefs);
-        const enrichedByKey = new Map(
-          enriched.map((n) => [`${n.hederaId}!${n.serial}`, n] as const),
-        );
-        for (const entry of entries) {
-          if (entry.type !== 'play' || !entry.poolResults) continue;
-          for (const pr of entry.poolResults) {
-            const resolved: EnrichedPrizeNft[] = [];
-            for (const pd of pr.prizeDetails as Array<{ nfts?: PrizeNft[] }>) {
-              for (const n of pd?.nfts ?? []) {
-                const hit = enrichedByKey.get(`${n.hederaId}!${n.serial}`);
-                if (hit) resolved.push(hit);
-              }
-            }
-            if (resolved.length > 0) pr.enrichedNfts = resolved;
-          }
-        }
-      } catch (err) {
-        console.warn('[audit] prize enrichment failed:', err);
-      }
-    }
 
     const explorerBase = network === 'mainnet'
       ? 'https://hashscan.io/mainnet'

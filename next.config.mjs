@@ -7,6 +7,7 @@ const config = {
   reactStrictMode: true,
   env: {
     NEXT_PUBLIC_APP_VERSION: pkg.version,
+    NEXT_PUBLIC_HEDERA_NETWORK: process.env.HEDERA_NETWORK ?? 'testnet',
   },
   transpilePackages: ['@hashgraph/hedera-wallet-connect'],
   images: {
