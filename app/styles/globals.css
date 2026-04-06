@@ -228,3 +228,22 @@ body {
   font-variant-numeric: tabular-nums;
   font-feature-settings: 'tnum';
 }
+
+/* ─────────────────────────────────────────────────────────────
+   Collapsible section — grid-template-rows trick so height
+   transitions animate without touching layout properties. The
+   inner div needs overflow:hidden so children clip correctly
+   while the row height is interpolating.
+   ───────────────────────────────────────────────────────────── */
+.collapsible-grid {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 250ms ease-out;
+}
+.collapsible-grid[data-open='true'] {
+  grid-template-rows: 1fr;
+}
+.collapsible-grid > .collapsible-inner {
+  overflow: hidden;
+  min-height: 0;
+}

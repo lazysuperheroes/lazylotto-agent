@@ -15,10 +15,17 @@
 import { createStore } from '~/custodial/createStore';
 import type { IStore } from '~/custodial/IStore';
 
-let store: IStore | null = null;
+// Pinned to globalThis so Next.js dev HMR doesn't re-create the store
+// on every file save — see src/auth/redis.ts for the full rationale.
+// Re-creating the store mid-session loses the in-memory cache and
+// forces a slow reload from disk/Redis on every request.
+
+type StoreGlobals = { __lazylottoStore__?: IStore };
+const globalForStore = globalThis as unknown as StoreGlobals;
 
 export async function getStore(): Promise<IStore> {
-  if (store) return store;
-  store = await createStore();
-  return store;
+  if (globalForStore.__lazylottoStore__) return globalForStore.__lazylottoStore__;
+  const created = await createStore();
+  globalForStore.__lazylottoStore__ = created;
+  return created;
 }

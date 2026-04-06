@@ -9,10 +9,19 @@
 import { createClient } from '~/hedera/wallet';
 import type { Client } from '@hashgraph/sdk';
 
-let client: Client | null = null;
+// Pinned to globalThis so Next.js dev HMR doesn't rebuild the client
+// on every file save. The Hedera SDK client holds open connections —
+// recreating it per HMR tick leaks resources and spams gRPC with
+// fresh handshakes. See src/auth/redis.ts for the full rationale.
+
+type HederaGlobals = { __lazylottoHederaClient__?: Client };
+const globalForHedera = globalThis as unknown as HederaGlobals;
 
 export function getClient(): Client {
-  if (client) return client;
-  client = createClient();
-  return client;
+  if (globalForHedera.__lazylottoHederaClient__) {
+    return globalForHedera.__lazylottoHederaClient__;
+  }
+  const created = createClient();
+  globalForHedera.__lazylottoHederaClient__ = created;
+  return created;
 }

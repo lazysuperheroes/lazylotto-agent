@@ -3,6 +3,12 @@
 import { useState, useCallback, useEffect } from 'react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
+import {
+  LSH_CHARACTERS,
+  loadOrPickCharacterIdx,
+  persistCharacterIdx,
+  randomCharacterIdx,
+} from '../lib/characters';
 
 // ---------------------------------------------------------------------------
 // Inline SVG icons (16x16)
@@ -106,10 +112,12 @@ const NAV_ITEMS = [
 function UserContext() {
   const [accountId, setAccountId] = useState<string | null>(null);
   const [hasSession, setHasSession] = useState(false);
+  const [characterIdx, setCharacterIdx] = useState(0);
 
   useEffect(() => {
     setAccountId(localStorage.getItem('lazylotto:accountId'));
     setHasSession(!!localStorage.getItem('lazylotto:sessionToken'));
+    setCharacterIdx(loadOrPickCharacterIdx());
   }, []);
 
   const handleDisconnect = useCallback(() => {
@@ -123,47 +131,115 @@ function UserContext() {
   }, []);
 
   const networkName =
-    typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_HEDERA_NETWORK
-      ? process.env.NEXT_PUBLIC_HEDERA_NETWORK
-      : 'Testnet';
+    (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_HEDERA_NETWORK) ||
+    'testnet';
+  const isMainnet = networkName === 'mainnet';
 
   const truncatedId =
     accountId && accountId.length > 14
-      ? `${accountId.slice(0, 7)}...${accountId.slice(-4)}`
+      ? `${accountId.slice(0, 7)}…${accountId.slice(-4)}`
       : accountId;
 
-  return (
-    <div className="border-t border-[#27272a] px-3 py-3">
-      {/* Network badge */}
-      <span className="mb-2 inline-flex items-center rounded bg-brand/15 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-brand">
-        {networkName}
-      </span>
+  const character = LSH_CHARACTERS[characterIdx] ?? LSH_CHARACTERS[0]!;
+  const version = process.env.NEXT_PUBLIC_APP_VERSION ?? '0.0.0';
 
-      {/* Account badge */}
-      {accountId && (
-        <div className="mt-1.5 flex items-center gap-2 text-xs text-[#a1a1aa]">
-          <span className="h-2 w-2 shrink-0 rounded-full bg-success" />
-          <span className="truncate" title={accountId}>
-            {truncatedId}
-          </span>
+  return (
+    <div className="border-t-2 border-brand/30 bg-brand/5">
+      {/* ── Mascot + name + reroll ────────────────────────────
+          Sidebar echo of the hero mascot — persistent across
+          every page so the character presence never breaks. The
+          reroll die sits in the top-right corner of the panel
+          frame (same affordance as /auth) so users who don't
+          love their randomly-picked character can swap without
+          signing out and back in. */}
+      {hasSession && (
+        <div className="flex flex-col items-center gap-1 px-3 pt-4 pb-3">
+          <div className="relative border-2 border-brand bg-[var(--color-panel)] p-1 panel-shadow-sm">
+            <img
+              src={character.img}
+              alt={character.name}
+              width={56}
+              height={56}
+              className="block h-14 w-14 select-none"
+              draggable={false}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                const nextIdx = randomCharacterIdx();
+                setCharacterIdx(nextIdx);
+                persistCharacterIdx(nextIdx);
+              }}
+              aria-label="Change mascot"
+              title="Change mascot"
+              className="absolute -right-2 -top-2 flex h-6 w-6 items-center justify-center border-2 border-brand bg-background text-[11px] transition-transform hover:rotate-12 hover:bg-brand/20 focus-visible:rotate-12"
+            >
+              <span aria-hidden="true">🎲</span>
+            </button>
+          </div>
+          <p className="mt-1 font-pixel text-[8px] uppercase tracking-wider text-brand">
+            {character.name}
+          </p>
         </div>
       )}
 
-      {/* Disconnect link */}
-      {hasSession && (
-        <button
-          type="button"
-          onClick={handleDisconnect}
-          className="mt-2 text-[11px] text-[#a1a1aa] underline-offset-2 transition-colors hover:text-destructive hover:underline"
+      {/* ── Network + account ─────────────────────────────────
+          Both in prominent, high-contrast treatments — the old
+          version had these at 10-12px muted grey and they were
+          effectively invisible on the dark bg. Now the network
+          gets a full-width gold sticker band (brand for mainnet,
+          muted for testnet so users don't mistake one for the
+          other). Account sits under it in a mono readout. */}
+      <div className="px-3 py-3">
+        <div
+          className={`mb-2 border-2 px-2 py-1 text-center font-pixel text-[9px] uppercase tracking-wider ${
+            isMainnet
+              ? 'border-brand bg-brand text-background'
+              : 'border-brand/40 bg-brand/10 text-brand'
+          }`}
         >
-          Disconnect
-        </button>
-      )}
+          {networkName}
+        </div>
 
-      {/* Version */}
-      <p className="mt-3 text-[10px] text-[#52525b]">
-        v{process.env.NEXT_PUBLIC_APP_VERSION ?? '0.0.0'}
-      </p>
+        {accountId && (
+          <div className="mb-3 flex items-center gap-2">
+            <span
+              className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-success"
+              title="Signed in"
+              aria-hidden="true"
+            />
+            <code
+              className="truncate font-mono text-[11px] text-foreground"
+              title={accountId}
+            >
+              {truncatedId}
+            </code>
+          </div>
+        )}
+
+        {/* ── Disconnect ─────────────────────────────────────
+            Proper button, not a 11px underlined text link.
+            Ghost styling so it doesn't compete with nav items,
+            but visible and hoverable with clear affordance. */}
+        {hasSession && (
+          <button
+            type="button"
+            onClick={handleDisconnect}
+            className="w-full border border-secondary px-2 py-1.5 font-pixel text-[8px] uppercase tracking-wider text-muted transition-colors hover:border-destructive hover:text-destructive"
+          >
+            Disconnect
+          </button>
+        )}
+      </div>
+
+      {/* ── Version ───────────────────────────────────────────
+          Now in pixel font so it reads as an "imprint" — the
+          corner of a comic book cover, not dead fine print. */}
+      <div className="border-t border-brand/20 px-3 py-2 text-center">
+        <p className="font-pixel text-[8px] uppercase tracking-wider text-brand/60">
+          LazyLotto · v{version}
+        </p>
+      </div>
     </div>
   );
 }

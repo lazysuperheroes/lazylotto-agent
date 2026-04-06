@@ -222,10 +222,29 @@ export function loadOrPickCharacterIdx(): number {
   return idx;
 }
 
-/** Persist a new character index (used by the reroll handler). */
+/**
+ * Custom event fired when the persisted character index changes.
+ * Listened to by Sidebar + dashboard hero so a reroll in one place
+ * updates the mascot everywhere without a full page reload.
+ */
+export const CHARACTER_CHANGE_EVENT = 'lazylotto:character-change';
+
+export interface CharacterChangeDetail {
+  idx: number;
+}
+
+/** Persist a new character index and broadcast the change. */
 export function persistCharacterIdx(idx: number): void {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(CHARACTER_STORAGE_KEY, String(idx));
+  // Notify other components in the same tab. localStorage `storage`
+  // events only fire for OTHER tabs, so we use a custom event for
+  // same-tab propagation.
+  window.dispatchEvent(
+    new CustomEvent<CharacterChangeDetail>(CHARACTER_CHANGE_EVENT, {
+      detail: { idx },
+    }),
+  );
 }
 
 /** Pick a deterministic-but-varied line from a list based on a seed. */

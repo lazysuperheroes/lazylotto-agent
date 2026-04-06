@@ -34,8 +34,14 @@ import type { Client } from '@hashgraph/sdk';
 // init instead of racing and doing two parallel Hedera-client creations
 // and two DepositWatcher wire-ups. If init rejects, we clear the cache
 // so the next request retries cleanly rather than sticking the error.
+//
+// Also pinned to globalThis so Next.js dev HMR doesn't rebuild the
+// entire agent context (LottoAgent + MultiUserAgent + store wiring)
+// on every file save — that's several hundred ms of cold-start work
+// per tick and throws off any in-progress test session.
 
-let contextPromise: Promise<AgentContext> | null = null;
+type McpGlobals = { __lazylottoContextPromise__?: Promise<AgentContext> | null };
+const globalForMcp = globalThis as unknown as McpGlobals;
 
 const AGENT_VERSION = '0.1.13';
 
@@ -113,9 +119,11 @@ export interface AgentContext {
  * failure poisons the Lambda for its whole warm lifetime).
  */
 export async function getAgentContext(): Promise<AgentContext> {
-  if (contextPromise) return contextPromise;
+  if (globalForMcp.__lazylottoContextPromise__) {
+    return globalForMcp.__lazylottoContextPromise__;
+  }
 
-  contextPromise = (async (): Promise<AgentContext> => {
+  const promise = (async (): Promise<AgentContext> => {
     const store = await getStore();
     const client = getClient();
 
@@ -134,13 +142,15 @@ export async function getAgentContext(): Promise<AgentContext> {
     return { agent, multiUser, store, client };
   })();
 
+  globalForMcp.__lazylottoContextPromise__ = promise;
+
   // If init fails, clear the cache so the next call retries cleanly.
   // We still rethrow so this call's caller sees the error.
-  contextPromise.catch(() => {
-    contextPromise = null;
+  promise.catch(() => {
+    globalForMcp.__lazylottoContextPromise__ = null;
   });
 
-  return contextPromise;
+  return promise;
 }
 
 /**

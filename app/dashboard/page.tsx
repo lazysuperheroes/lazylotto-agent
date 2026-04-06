@@ -15,6 +15,8 @@ import {
   LSH_CHARACTERS,
   loadOrPickCharacterIdx,
   pickLine,
+  CHARACTER_CHANGE_EVENT,
+  type CharacterChangeDetail,
 } from '../lib/characters';
 
 // ---------------------------------------------------------------------------
@@ -243,6 +245,11 @@ export default function DashboardPage() {
   const [withdrawToken, setWithdrawToken] = useState('hbar');
   const [withdrawLoading, setWithdrawLoading] = useState(false);
   const [playLoading, setPlayLoading] = useState(false);
+  // Deposit card collapse — starts closed; auto-opens on mount if the
+  // user has no balance (they need the info to fund). After that it's
+  // user-controlled via the header toggle.
+  const [depositCardOpen, setDepositCardOpen] = useState(false);
+  const [depositCardAutoDecided, setDepositCardAutoDecided] = useState(false);
 
   // Stuck deposits (dead letters) belonging to this user
   interface UserDeadLetter {
@@ -347,6 +354,20 @@ export default function DashboardPage() {
   // Set page title
   useEffect(() => {
     document.title = 'Dashboard | LazyLotto Agent';
+  }, []);
+
+  // Listen for mascot reroll from the sidebar. Same-tab CustomEvent —
+  // the localStorage storage event doesn't fire for the tab that
+  // performed the write, so we broadcast our own.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<CharacterChangeDetail>).detail;
+      if (typeof detail?.idx === 'number') {
+        setCharacterIdx(detail.idx);
+      }
+    };
+    window.addEventListener(CHARACTER_CHANGE_EVENT, handler);
+    return () => window.removeEventListener(CHARACTER_CHANGE_EVENT, handler);
   }, []);
 
   // ── Status fetch (mount + retry) ─────────────────────────────
@@ -527,6 +548,66 @@ export default function DashboardPage() {
     },
     [toast],
   );
+
+  // Manual "Check for deposits" trigger — lets the user nudge the
+  // deposit watcher after they send HBAR from their wallet without
+  // having to reload the whole page. Shares the depositsChecking
+  // loading state with the mount-time background check so only one
+  // spinner is ever visible.
+  const handleCheckDeposits = useCallback(async () => {
+    const token = localStorage.getItem('lazylotto:sessionToken');
+    if (!token) {
+      router.replace('/auth');
+      return;
+    }
+    if (depositsChecking) return; // already running
+    setDepositsChecking(true);
+    try {
+      const res = await fetch('/api/user/check-deposits', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(
+          (body as { error?: string }).error ?? `Check failed (${res.status})`,
+        );
+      }
+      const data = (await res.json()) as {
+        processed?: number;
+        balances?: StatusResponse['balances'];
+        lastPlayedAt?: string | null;
+      };
+      const processed = data.processed ?? 0;
+      if (processed > 0 && data.balances) {
+        // Patch the status in place so the hero balance updates
+        // immediately without a full refetch.
+        setStatus((prev) =>
+          prev
+            ? {
+                ...prev,
+                balances: data.balances!,
+                lastPlayedAt: data.lastPlayedAt ?? prev.lastPlayedAt,
+              }
+            : prev,
+        );
+        toast(
+          processed === 1
+            ? 'Found 1 new deposit'
+            : `Found ${processed} new deposits`,
+        );
+      } else {
+        toast('No new deposits yet — try again in a few seconds', {
+          variant: 'info',
+        });
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast(`Check failed: ${message}`, { variant: 'error' });
+    } finally {
+      setDepositsChecking(false);
+    }
+  }, [depositsChecking, router, toast]);
 
   const handleLock = useCallback(async () => {
     if (!sessionToken) return;
@@ -736,6 +817,26 @@ export default function DashboardPage() {
       window.location.href = '/auth';
     }
   }, [sessionToken]);
+
+  // Auto-open the deposit card once — on first status load, open it
+  // iff the user has no balance yet. After that, the user controls it
+  // manually via the header toggle. The `depositCardAutoDecided` flag
+  // prevents this effect from re-running and clobbering a deliberate
+  // user toggle when status refetches (e.g. after a play session).
+  //
+  // MUST live here — above the early returns — so React's Rules of
+  // Hooks is satisfied (hooks must be called in the same order on
+  // every render, regardless of which branch the component takes).
+  // We compute hasBalance inline from `status` rather than referencing
+  // the outer derivation, which is defined further down the function
+  // body after the early-return block.
+  useEffect(() => {
+    if (!status || depositCardAutoDecided) return;
+    const entries = Object.entries(status.balances.tokens);
+    const hasBalance = entries.some(([, e]) => e.available > 0);
+    setDepositCardOpen(!hasBalance);
+    setDepositCardAutoDecided(true);
+  }, [status, depositCardAutoDecided]);
 
   // --- Derived performance data ---
   const perfSummary = useMemo(() => {
@@ -1088,30 +1189,50 @@ export default function DashboardPage() {
                   )}
                 </div>
 
-                {/* Display number — the hero moment */}
-                {primaryBalanceEntry ? (
-                  <div className="mb-2">
-                    <p className="label-caps mb-1">Pot</p>
-                    <p
-                      className="num-tabular font-heading text-[clamp(3.5rem,10vw,6.5rem)] font-extrabold leading-[0.95] text-brand"
-                      aria-label={`Primary balance ${formatAmount(primaryBalanceEntry[1].available)} ${tokenSymbol(primaryBalanceEntry[0])}`}
-                    >
-                      {formatAmount(primaryBalanceEntry[1].available)}
-                    </p>
-                    <p className="mt-1 font-heading text-lg font-semibold text-foreground">
-                      {tokenSymbol(primaryBalanceEntry[0])}
-                      {primaryBalanceEntry[1].reserved > 0 && (
-                        <span className="ml-3 text-xs font-normal text-muted">
-                          {formatAmount(primaryBalanceEntry[1].reserved)} reserved
-                        </span>
-                      )}
-                    </p>
-                  </div>
-                ) : (
-                  <p className="mb-2 font-heading text-2xl font-semibold text-muted">
-                    Loading balance…
-                  </p>
-                )}
+                {/* Display number — the hero moment. Always render, even
+                    when the user has no token entries yet: show a muted
+                    zero so the hero feels committed instead of broken.
+                    "Loading balance…" was misleading because the balance
+                    wasn't loading, the user just didn't have one. */}
+                {(() => {
+                  const displayAvailable = primaryBalanceEntry?.[1].available ?? 0;
+                  const displayReserved = primaryBalanceEntry?.[1].reserved ?? 0;
+                  const displayToken = primaryBalanceEntry
+                    ? tokenSymbol(primaryBalanceEntry[0])
+                    : 'HBAR';
+                  const isEmpty = displayAvailable === 0 && displayReserved === 0;
+                  return (
+                    <div className="mb-2">
+                      <p className="label-caps mb-1">
+                        {isEmpty ? 'Empty' : 'Pot'}
+                      </p>
+                      <p
+                        className={`num-tabular font-heading text-[clamp(3.5rem,10vw,6.5rem)] font-extrabold leading-[0.95] ${
+                          isEmpty ? 'text-muted/40' : 'text-brand'
+                        }`}
+                        aria-label={
+                          isEmpty
+                            ? `Balance is empty`
+                            : `Primary balance ${formatAmount(displayAvailable)} ${displayToken}`
+                        }
+                      >
+                        {formatAmount(displayAvailable)}
+                      </p>
+                      <p
+                        className={`mt-1 font-heading text-lg font-semibold ${
+                          isEmpty ? 'text-muted/70' : 'text-foreground'
+                        }`}
+                      >
+                        {displayToken}
+                        {displayReserved > 0 && (
+                          <span className="ml-3 text-xs font-normal text-muted">
+                            {formatAmount(displayReserved)} reserved
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  );
+                })()}
 
                 {/* Secondary token pills — only shown when multi-token */}
                 {secondaryBalanceEntries.length > 0 && (
@@ -1169,14 +1290,15 @@ export default function DashboardPage() {
                     </div>
                   </div>
                 ) : (
-                  // Empty-state CTA — points down at the deposit card.
-                  <div className="mt-6 border-2 border-dashed border-brand/40 p-5 text-center">
-                    <p className="label-caps-brand mb-2">Step 1</p>
-                    <p className="text-sm text-foreground">
-                      Fund your agent to play.
-                    </p>
-                    <p className="mt-1 text-xs text-muted">
-                      Send HBAR or LAZY to the address below with your deposit memo.
+                  // Zero-balance state — points down at the deposit card
+                  // below. The dashed Step 1 block was removed because
+                  // the Fund Your Account card is now full-width right
+                  // underneath and the duplication was noisy. Single
+                  // subtle brand-gold inline hint is enough.
+                  <div className="mt-6 border-t-2 border-brand/30 pt-4">
+                    <p className="label-caps-brand">
+                      Your agent is empty →{' '}
+                      <span className="text-brand">fund it below to start playing</span>
                     </p>
                   </div>
                 )}
@@ -1234,100 +1356,161 @@ export default function DashboardPage() {
         {/* ---- Secondary Cards Grid ---- */}
         <div className="grid gap-6 lg:grid-cols-2">
 
-          {/* ---- Deposit Info Card ---- */}
-          <div className="rounded-xl border border-secondary p-6 shadow">
-            <h2 className="mb-1 font-heading text-lg text-foreground">
-              Fund Your Account
-            </h2>
-            <p className="mb-2 text-xs text-muted">
-              Send tokens to the agent wallet with your unique deposit memo to credit your account.
-            </p>
-            <p className="mb-4 text-[11px] text-muted">
-              Your deposit credits the next time you load this page or hit{' '}
-              <span className="font-semibold text-foreground">Play Now</span> —
-              usually within ~10 seconds of arriving on-chain.
-            </p>
+          {/* ---- Fund Your Account — collapsible ──────────────
+              Spans full width. Defaults open when the user has no
+              balance (they need the deposit info to get started),
+              collapses once they have funds (they're past this step).
+              Header row has title + chevron toggle + persistent
+              "Check for deposits" button that works in either state. */}
+          <section className="border-2 border-secondary lg:col-span-2">
+            {/* Clickable header — whole row toggles collapse except the
+                refresh button which has its own click target. */}
+            <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => setDepositCardOpen((o) => !o)}
+                aria-expanded={depositCardOpen}
+                aria-controls="fund-your-account-body"
+                className="group flex min-w-0 flex-1 items-center gap-3 text-left"
+              >
+                <span
+                  className={`inline-block font-pixel text-[10px] text-brand transition-transform ${
+                    depositCardOpen ? 'rotate-90' : ''
+                  }`}
+                  aria-hidden="true"
+                >
+                  ▸
+                </span>
+                <div className="min-w-0">
+                  <h2 className="font-heading text-base text-foreground">
+                    Fund Your Account
+                  </h2>
+                  <p className="label-caps mt-0.5">
+                    {depositCardOpen
+                      ? 'Agent wallet & deposit memo'
+                      : hasPlayableBalance
+                        ? 'You\u2019re funded — tap to top up'
+                        : 'Tap to see deposit instructions'}
+                  </p>
+                </div>
+              </button>
+              {/* Manual refresh — always visible so the user can nudge
+                  the deposit watcher even while the card is collapsed. */}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleCheckDeposits();
+                }}
+                disabled={depositsChecking}
+                className="shrink-0 inline-flex items-center gap-2 border-2 border-brand bg-brand/10 px-4 py-2 font-pixel text-[9px] uppercase tracking-wider text-brand transition-colors hover:bg-brand hover:text-background disabled:cursor-not-allowed disabled:opacity-50"
+                aria-live="polite"
+              >
+                <span
+                  className={`inline-block h-1.5 w-1.5 rounded-full bg-brand ${
+                    depositsChecking ? 'animate-pulse' : ''
+                  }`}
+                  aria-hidden="true"
+                />
+                {depositsChecking ? 'Checking…' : 'Check for deposits'}
+              </button>
+            </div>
 
-            {status && (
-              <div className="space-y-5">
-                {agentWallet && (
-                  <div>
-                    <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
-                      Agent Wallet
-                    </label>
-                    <div className="flex items-center gap-2 rounded-lg border border-secondary bg-[#111113] px-4 py-3">
-                      <code className="flex-1 break-all font-mono text-sm text-brand">
-                        {agentWallet}
-                      </code>
-                      <button
-                        type="button"
-                        onClick={() => handleCopy(agentWallet, 'Agent wallet')}
-                        className="shrink-0 rounded-md border border-secondary px-3 py-1.5 text-xs text-muted transition-colors hover:text-foreground"
-                      >
-                        Copy
-                      </button>
+            {/* Collapsible body — grid-template-rows transition so
+                we're not animating layout props. */}
+            <div
+              id="fund-your-account-body"
+              className="collapsible-grid"
+              data-open={depositCardOpen ? 'true' : 'false'}
+            >
+              <div className="collapsible-inner">
+                {status && (
+                  <div className="space-y-5 border-t border-secondary px-6 py-5">
+                    <p className="text-xs text-muted">
+                      Send HBAR or LAZY to the agent wallet below with your
+                      unique deposit memo. Deposits usually arrive within ~10
+                      seconds — hit{' '}
+                      <span className="font-semibold text-brand">Check for deposits</span>{' '}
+                      above to pull them in.
+                    </p>
+
+                    {agentWallet && (
+                      <div>
+                        <label className="label-caps mb-2 block">Agent Wallet</label>
+                        <div className="flex items-center gap-2 border border-secondary bg-[var(--color-panel)] px-4 py-3">
+                          <code className="flex-1 break-all font-mono text-sm text-brand">
+                            {agentWallet}
+                          </code>
+                          <button
+                            type="button"
+                            onClick={() => handleCopy(agentWallet, 'Agent wallet')}
+                            className="shrink-0 border border-secondary px-3 py-1.5 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
+                          >
+                            Copy
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="label-caps mb-2 block">Deposit Memo</label>
+                      <div className="flex items-center gap-2 border border-secondary bg-[var(--color-panel)] px-4 py-3">
+                        <code className="flex-1 break-all font-mono text-sm text-brand">
+                          {status.depositMemo}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={() => handleCopy(status.depositMemo, 'Deposit memo')}
+                          className="shrink-0 border border-secondary px-3 py-1.5 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
+                        >
+                          Copy
+                        </button>
+                      </div>
                     </div>
+
+                    <p className="border-l-2 border-brand bg-brand/10 px-4 py-3 text-xs text-brand">
+                      <span className="font-semibold">Important:</span> always include the
+                      deposit memo when sending tokens. Transfers without the correct memo
+                      cannot be automatically credited.
+                    </p>
+
+                    {/* Wallet-specific instructions */}
+                    <details className="border border-secondary bg-[var(--color-panel)] px-4 py-3 text-xs text-muted">
+                      <summary className="cursor-pointer font-pixel text-[10px] uppercase tracking-wider text-foreground">
+                        How do I add the memo in my wallet?
+                      </summary>
+                      <div className="mt-3 space-y-3">
+                        <div>
+                          <p className="font-semibold text-foreground">HashPack</p>
+                          <p>
+                            On the Send screen, tap <span className="text-foreground">Advanced</span> →
+                            paste the memo into the <span className="text-foreground">Memo</span> field
+                            before confirming.
+                          </p>
+                        </div>
+                        <div>
+                          <p className="font-semibold text-foreground">Blade</p>
+                          <p>
+                            On the Send screen, expand <span className="text-foreground">Optional Fields</span> and
+                            paste the memo into the <span className="text-foreground">Memo</span> field
+                            before confirming.
+                          </p>
+                        </div>
+                        <div>
+                          <p className="font-semibold text-foreground">Other wallets</p>
+                          <p>
+                            Look for a <span className="text-foreground">Memo</span> or
+                            <span className="text-foreground"> Note</span> field on the send screen.
+                            It&apos;s often hidden under an &quot;Advanced&quot; or &quot;Optional&quot; toggle.
+                          </p>
+                        </div>
+                      </div>
+                    </details>
                   </div>
                 )}
-
-                <div>
-                  <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
-                    Deposit Memo
-                  </label>
-                  <div className="flex items-center gap-2 rounded-lg border border-secondary bg-[#111113] px-4 py-3">
-                    <code className="flex-1 break-all font-mono text-sm text-brand">
-                      {status.depositMemo}
-                    </code>
-                    <button
-                      type="button"
-                      onClick={() => handleCopy(status.depositMemo, 'Deposit memo')}
-                      className="shrink-0 rounded-md border border-secondary px-3 py-1.5 text-xs text-muted transition-colors hover:text-foreground"
-                    >
-                      Copy
-                    </button>
-                  </div>
-                </div>
-
-                <p className="rounded-lg bg-brand/10 px-4 py-3 text-xs text-brand">
-                  Important: Always include the deposit memo when sending tokens.
-                  Transfers without the correct memo cannot be automatically credited.
-                </p>
-
-                {/* Wallet-specific instructions */}
-                <details className="rounded-lg bg-secondary/30 px-4 py-3 text-xs text-muted">
-                  <summary className="cursor-pointer text-foreground">
-                    How do I add the memo in my wallet?
-                  </summary>
-                  <div className="mt-3 space-y-3">
-                    <div>
-                      <p className="font-semibold text-foreground">HashPack</p>
-                      <p>
-                        On the Send screen, tap <span className="text-foreground">Advanced</span> →
-                        paste the memo into the <span className="text-foreground">Memo</span> field
-                        before confirming.
-                      </p>
-                    </div>
-                    <div>
-                      <p className="font-semibold text-foreground">Blade</p>
-                      <p>
-                        On the Send screen, expand <span className="text-foreground">Optional Fields</span> and
-                        paste the memo into the <span className="text-foreground">Memo</span> field
-                        before confirming.
-                      </p>
-                    </div>
-                    <div>
-                      <p className="font-semibold text-foreground">Other wallets</p>
-                      <p>
-                        Look for a <span className="text-foreground">Memo</span> or
-                        <span className="text-foreground"> Note</span> field on the send screen.
-                        It&apos;s often hidden under an &quot;Advanced&quot; or &quot;Optional&quot; toggle.
-                      </p>
-                    </div>
-                  </div>
-                </details>
               </div>
-            )}
-          </div>
+            </div>
+          </section>
 
           {/* ---- Stuck deposits (dead letters) ---- */}
           {deadLetters.length > 0 && (
@@ -1594,70 +1777,57 @@ export default function DashboardPage() {
                 )}
               </>
             ) : (
-              <div className="rounded-lg bg-secondary/30 px-5 py-6 text-center">
-                <p className="text-sm text-muted">
-                  No sessions yet. Hit <span className="font-semibold text-foreground">Play Now</span> above when you&apos;re ready,
-                  or deposit funds to get started.
+              <div className="border border-dashed border-secondary px-5 py-8 text-center">
+                {/* Copy adapts to the actual state — referencing Play Now
+                    when it's available, pointing at funding when it's not,
+                    acknowledging the pause when the kill switch is on. */}
+                <p className="font-pixel text-[10px] uppercase tracking-wider text-muted">
+                  No sessions yet
+                </p>
+                <p className="mt-2 text-sm text-muted">
+                  {agentClosed ? (
+                    <>
+                      The agent is <span className="text-destructive">temporarily closed</span> —
+                      check back once the operator resumes plays.
+                    </>
+                  ) : hasPlayableBalance ? (
+                    <>
+                      Hit <span className="font-semibold text-brand">Play</span> above when
+                      you&apos;re ready.
+                    </>
+                  ) : (
+                    <>
+                      Fund your agent above to start playing.
+                    </>
+                  )}
                 </p>
               </div>
             )}
           </div>
         </div>
 
-        {/* ── About this agent — trust panel ─────────────────── */}
+        {/* ── Proof of operation — compact footer bar ───────────
+            Dropped the operator stats (TVL, active user count, rake
+            rate — the last is already in the hero metadata strip).
+            Users only care about the three links: they can verify
+            the agent wallet on HashScan, read the HCS-20 audit trail,
+            and browse our on-chain audit page. Styled as a single
+            pixel-font imprint row — reads like the credits line on
+            the back cover of a comic book. */}
         {publicStats && (
-          <div className="mt-8 rounded-xl border border-secondary p-6 shadow">
-            <h2 className="mb-4 font-heading text-sm uppercase tracking-wider text-muted">
-              About This Agent
-            </h2>
-            <div className="grid grid-cols-2 gap-4 text-sm md:grid-cols-4">
-              <div>
-                <p className="text-xs text-muted">Network</p>
-                <p className="font-semibold text-foreground capitalize">
-                  {publicStats.network}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-muted">Active Users</p>
-                <p className="font-semibold text-foreground">
-                  {publicStats.users.active}
-                  <span className="ml-1 text-xs text-muted">
-                    of {publicStats.users.total}
-                  </span>
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-muted">Rake Rate</p>
-                <p className="font-semibold text-foreground">
-                  {publicStats.rake.defaultPercent}%
-                </p>
-                <p className="mt-0.5 text-[10px] italic text-muted">
-                  Covers gas &amp; infra
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-muted">Total Held</p>
-                <p className="font-semibold text-foreground">
-                  {Object.entries(publicStats.tvl)
-                    .slice(0, 2)
-                    .map(
-                      ([k, v]) =>
-                        `${formatAmount(v)} ${tokenSymbol(k)}`,
-                    )
-                    .join(' + ') || '—'}
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-4 flex flex-wrap gap-x-4 gap-y-1 border-t border-secondary pt-4 text-xs text-muted">
+          <div className="mt-10 border-t-2 border-brand/20 pt-5">
+            <p className="mb-3 font-pixel text-[9px] uppercase tracking-wider text-brand">
+              Proof of operation
+            </p>
+            <div className="flex flex-wrap gap-3">
               {publicStats.agentWallet && (
                 <a
                   href={`https://hashscan.io/${publicStats.network === 'mainnet' ? 'mainnet' : publicStats.network}/account/${publicStats.agentWallet}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-brand hover:underline"
+                  className="inline-flex items-center gap-2 border border-secondary bg-[var(--color-panel)] px-3 py-2 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
                 >
-                  Agent wallet on HashScan ↗
+                  Agent wallet <span aria-hidden="true">↗</span>
                 </a>
               )}
               {publicStats.hcs20TopicId && (
@@ -1665,16 +1835,16 @@ export default function DashboardPage() {
                   href={`https://hashscan.io/${publicStats.network === 'mainnet' ? 'mainnet' : publicStats.network}/topic/${publicStats.hcs20TopicId}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-brand hover:underline"
+                  className="inline-flex items-center gap-2 border border-secondary bg-[var(--color-panel)] px-3 py-2 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
                 >
-                  HCS-20 audit trail ↗
+                  HCS-20 trail <span aria-hidden="true">↗</span>
                 </a>
               )}
               <a
                 href="/audit"
-                className="text-brand hover:underline"
+                className="inline-flex items-center gap-2 border border-secondary bg-[var(--color-panel)] px-3 py-2 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
               >
-                On-chain audit page →
+                On-chain log <span aria-hidden="true">→</span>
               </a>
             </div>
           </div>

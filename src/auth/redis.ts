@@ -91,25 +91,53 @@ interface RedisLike {
   ): Promise<T>;
 }
 
-let redisClient: RedisLike | null = null;
+// ── Singleton pinned to globalThis ──────────────────────────
+//
+// Next.js dev mode (webpack HMR) invalidates and re-evaluates modules
+// when files change. A plain module-level `let redisClient` gets reset
+// to null on every HMR tick, wiping the in-memory fallback store and
+// taking all live sessions, challenges, rate-limit counters, locks,
+// and kill-switch flags with it. The session from /api/auth/verify
+// then can't be found by /api/user/register because they're talking
+// to different Map instances.
+//
+// Pinning to `globalThis` makes the singleton survive HMR because the
+// global object persists across module re-evaluation. This is the
+// exact pattern Prisma and the Upstash SDK use for the same reason.
+// In production (Upstash Redis configured), this has no effect — the
+// Redis client is stateless and the global pin just caches a handle.
+// In CLI mode (node --import tsx) there's no HMR so the global pin
+// is also a no-op improvement.
 
-/** Get or create the Redis client. Returns null if not configured. */
+type RedisGlobals = {
+  __lazylottoRedisClient__?: RedisLike | null;
+};
+
+const globalForRedis = globalThis as unknown as RedisGlobals;
+
+/** Get or create the Redis client. Survives Next.js dev HMR. */
 export async function getRedis(): Promise<RedisLike> {
-  if (redisClient) return redisClient;
+  if (globalForRedis.__lazylottoRedisClient__) {
+    return globalForRedis.__lazylottoRedisClient__;
+  }
 
   const url = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
 
   if (url && token) {
     const { Redis } = await import('@upstash/redis');
-    redisClient = new Redis({ url, token }) as unknown as RedisLike;
-    return redisClient;
+    const client = new Redis({ url, token }) as unknown as RedisLike;
+    globalForRedis.__lazylottoRedisClient__ = client;
+    return client;
   }
 
-  // Fallback: in-memory store for local dev
+  // Fallback: in-memory store for local dev. Pinned to globalThis so
+  // sessions persist across Next.js HMR — otherwise every file save
+  // would wipe the in-memory auth state and 401 every request after.
   console.warn('[Auth] No Upstash Redis configured — using in-memory store (not for production)');
-  redisClient = createInMemoryStore();
-  return redisClient;
+  const client = createInMemoryStore();
+  globalForRedis.__lazylottoRedisClient__ = client;
+  return client;
 }
 
 // ── In-memory fallback ───────────────────────────────────────

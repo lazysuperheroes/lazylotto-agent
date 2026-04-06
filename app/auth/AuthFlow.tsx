@@ -241,11 +241,24 @@ export function AuthFlow() {
   useEffect(() => {
     void initWalletConnect();
     return () => {
-      try {
-        void dappConnector.current?.disconnectAll?.();
-      } catch {
-        /* ignore */
-      }
+      // disconnectAll() rejects with "no active session/pairing" when
+      // the user is unmounting AuthFlow without ever having paired
+      // (e.g. navigating /auth → /dashboard after an existing session
+      // was picked up from localStorage without re-pairing). The `void`
+      // operator only discards the return value — it does NOT catch
+      // promise rejections — so the rejected promise becomes an
+      // unhandled rejection and Next.js dev overlay screams.
+      //
+      // Wrap in an IIFE with `await` inside a try/catch so the
+      // rejection is caught properly. No action needed on failure —
+      // this cleanup is best-effort.
+      void (async () => {
+        try {
+          await dappConnector.current?.disconnectAll?.();
+        } catch {
+          /* no active pairing on unmount — expected */
+        }
+      })();
     };
   }, [initWalletConnect]);
 
