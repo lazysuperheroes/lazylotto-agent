@@ -5,6 +5,9 @@ import { useRouter } from 'next/navigation';
 import { useToast } from '../components/Toast';
 import { Modal } from '../components/Modal';
 import { ComicPanel } from '../components/ComicPanel';
+import { SpeechBubble } from '../components/SpeechBubble';
+import { ActionBurst } from '../components/ActionBurst';
+import { GoldConfetti } from '../components/GoldConfetti';
 import {
   PrizeNftCard,
   type PrizeNftRef,
@@ -221,6 +224,11 @@ export default function DashboardPage() {
   // Persistent character mascot — shared with /auth via localStorage.
   // Starts at 0 for SSR determinism, rehydrated on mount.
   const [characterIdx, setCharacterIdx] = useState(0);
+  // Win celebration overlay — populated when handlePlay returns wins,
+  // auto-clears after 3.5s. The label is the action-burst text
+  // ("WIN!", "BIG WIN!", etc.). Pointer-events-none so it never
+  // blocks interaction.
+  const [winCelebration, setWinCelebration] = useState<string | null>(null);
   // Per-section loading states so balance/deposit and history render independently
   const [statusLoading, setStatusLoading] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -753,12 +761,40 @@ export default function DashboardPage() {
         );
       }
       const { session, balances } = body as {
-        session: { totalWins: number; totalSpent: number; poolsPlayed: number };
+        session: {
+          totalWins: number;
+          totalSpent: number;
+          totalPrizeValue: number;
+          poolsPlayed: number;
+        };
         balances?: StatusResponse['balances'];
       };
-      toast(
-        `Played ${session.poolsPlayed} pool(s), ${session.totalWins} win(s)`,
-      );
+
+      // Win celebration — fire the comic burst overlay when the session
+      // returned actual wins. The label scales with the prize value
+      // so a 10× spent prize gets "BIG WIN!" and a tiny one just gets
+      // "WIN!". The overlay auto-clears after 3.5s via the setTimeout.
+      if (session.totalWins > 0) {
+        const ratio =
+          session.totalSpent > 0
+            ? session.totalPrizeValue / session.totalSpent
+            : 0;
+        const label =
+          ratio >= 5
+            ? 'JACKPOT!'
+            : ratio >= 2
+              ? 'BIG WIN!'
+              : 'WIN!';
+        setWinCelebration(label);
+        window.setTimeout(() => setWinCelebration(null), 3500);
+        toast(`${label} ${session.totalWins} win(s) across ${session.poolsPlayed} pool(s)`);
+      } else {
+        toast(
+          `Played ${session.poolsPlayed} pool(s), no wins this round`,
+          { variant: 'info' },
+        );
+      }
+
       // Update balance in place so the user sees the effect immediately
       if (balances) {
         setStatus((prev) => (prev ? { ...prev, balances } : prev));
@@ -1006,7 +1042,30 @@ export default function DashboardPage() {
 
   // --- Dashboard ---
   return (
-    <div className="w-full px-4 py-10 sm:px-6 lg:px-10">
+    <div className="relative w-full px-4 py-10 sm:px-6 lg:px-10">
+      {/* ─── Win celebration overlay ─────────────────────────
+          Fixed-positioned, pointer-events:none, full-viewport.
+          Renders the GoldConfetti rain plus a centred ActionBurst
+          stamped with the win label ("WIN!", "BIG WIN!", "JACKPOT!").
+          Auto-clears after 3.5s via the timeout in handlePlay.
+          Sits at z-30 so it floats over the hero panel but below
+          the toast container (z-50).  */}
+      {winCelebration && (
+        <div
+          className="pointer-events-none fixed inset-0 z-30 flex items-center justify-center"
+          role="status"
+          aria-live="polite"
+        >
+          <GoldConfetti count={42} />
+          <div className="burst-stamp">
+            <ActionBurst size={280} tone="brand">
+              {winCelebration}
+            </ActionBurst>
+          </div>
+          <span className="sr-only">{winCelebration}</span>
+        </div>
+      )}
+
       <div className="mx-auto max-w-6xl">
         {/* ---- Top Bar ──────────────────────────────────────
             Thin pixel-font header. Dropped the redundant network
@@ -1099,16 +1158,38 @@ export default function DashboardPage() {
         {status && (
           <ComicPanel label="ISSUE #001" halftone="dense" className="mb-12">
             <div className="grid gap-6 p-6 sm:p-8 md:grid-cols-[auto_1fr] md:items-center md:gap-10">
-              {/* Mascot slot */}
+              {/* Mascot slot — comic-panel frame matching the sidebar
+                  for visual continuity. Border tone reflects state:
+                  brand gold normally, destructive when the agent is
+                  paused. Idle float animation breathes the mascot;
+                  hover wake responds to gesture. When the kill switch
+                  is engaged, an animated "Zzz" overlay floats up from
+                  the top-right corner. */}
               <div className="mx-auto w-32 shrink-0 sm:w-40 md:mx-0 md:w-44">
-                <img
-                  src={character.imgLarge}
-                  alt={character.name}
-                  width={176}
-                  height={176}
-                  className="h-auto w-full select-none"
-                  draggable={false}
-                />
+                <div
+                  className={`relative border-2 ${
+                    agentClosed ? 'border-destructive' : 'border-brand'
+                  } bg-[var(--color-panel)] p-2 panel-shadow-sm mascot-wake`}
+                >
+                  <img
+                    src={character.imgLarge}
+                    alt={character.name}
+                    width={176}
+                    height={176}
+                    className="block h-auto w-full select-none mascot-idle"
+                    draggable={false}
+                  />
+                  {/* Sleep "Zzz" indicator overlay — only shown when
+                      the operator has paused the agent. */}
+                  {agentClosed && (
+                    <span
+                      className="absolute -right-2 -top-3 font-heading text-xl font-extrabold text-destructive sleep-z"
+                      aria-hidden="true"
+                    >
+                      Z
+                    </span>
+                  )}
+                </div>
                 <p className="mt-2 text-center font-pixel text-[9px] uppercase tracking-wider text-brand">
                   {character.name}
                 </p>
@@ -1194,25 +1275,20 @@ export default function DashboardPage() {
                   </div>
                 )}
 
-                {/* Character quip — editorial italic pull-quote with
-                    hanging oversized open-quote glyph. Gives the mascot
-                    a real voice on the page rather than a tiny footnote. */}
+                {/* Character quip — comic-book speech bubble with a
+                    left-pointing tail directed at the mascot. The
+                    bubble has a brand-gold border, panel-toned
+                    interior, and a hard offset shadow matching the
+                    rest of the comic vocabulary. */}
                 {characterLine && (
-                  <blockquote className="prose-width mt-6 relative pl-6">
-                    <span
-                      className="absolute left-0 top-0 font-heading text-3xl font-extrabold leading-none text-brand"
-                      aria-hidden="true"
-                    >
-                      “
-                    </span>
-                    <p className="type-body-lg italic text-muted">
+                  <SpeechBubble tailPosition="left" className="prose-width mt-6 ml-2">
+                    <p className="type-body-lg italic text-foreground">
                       {characterLine}
-                      <span className="not-italic text-brand">”</span>
                     </p>
-                    <cite className="label-caps-brand mt-2 block not-italic">
+                    <p className="label-caps-brand mt-3">
                       — {character.name}
-                    </cite>
-                  </blockquote>
+                    </p>
+                  </SpeechBubble>
                 )}
 
                 {/* ── Primary action: PLAY ─────────────────────────── */}

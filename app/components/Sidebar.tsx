@@ -151,16 +151,21 @@ function UserContext() {
           reroll die sits in the top-right corner of the panel
           frame (same affordance as /auth) so users who don't
           love their randomly-picked character can swap without
-          signing out and back in. */}
+          signing out and back in.
+
+          Mascot has a subtle idle float so it feels alive, plus
+          a hover-wake transform on the frame. Both wrapped in
+          prefers-reduced-motion guards via the .mascot-idle and
+          .mascot-wake utilities in globals.css. */}
       {hasSession && (
         <div className="flex flex-col items-center gap-1 px-3 pt-4 pb-3">
-          <div className="relative border-2 border-brand bg-[var(--color-panel)] p-1 panel-shadow-sm">
+          <div className="relative border-2 border-brand bg-[var(--color-panel)] p-1 panel-shadow-sm mascot-wake">
             <img
               src={character.img}
               alt={character.name}
               width={56}
               height={56}
-              className="block h-14 w-14 select-none"
+              className="block h-14 w-14 select-none mascot-idle"
               draggable={false}
             />
             <button

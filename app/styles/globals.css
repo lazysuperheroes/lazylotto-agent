@@ -351,6 +351,133 @@ body {
   max-width: 65ch;
 }
 
+/* ─────────────────────────────────────────────────────────────
+   Mascot motion utilities
+   ─────────────────────────────────────────────────────────────
+   The dashboard hero mascot needs to feel alive without being
+   distracting. A gentle vertical idle float gives a sense of
+   "breathing"; a hover wake responds when the user gestures
+   toward the character. Both wrapped in a prefers-reduced-
+   motion guard so users with vestibular sensitivity get a
+   completely static mascot.
+   ───────────────────────────────────────────────────────────── */
+
+@keyframes mascotIdleFloat {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.mascot-idle {
+  /* No animation by default — only kicks in if the user is OK
+     with motion. Wrapped in @media so reduced-motion users get
+     a perfectly static mascot, no opacity or transform shifts. */
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .mascot-idle {
+    animation: mascotIdleFloat 5s ease-in-out infinite;
+  }
+}
+
+.mascot-wake {
+  transition: transform 0.25s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .mascot-wake:hover {
+    transform: scale(1.03) rotate(-1deg);
+  }
+}
+
+/* Sleep "Z" indicator — small animated stack of letters that
+   floats up and fades out, used to mark the mascot as napping
+   when the operator engages the kill switch. */
+@keyframes sleepZRise {
+  0% {
+    transform: translate(0, 0) rotate(-12deg);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(8px, -28px) rotate(12deg);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .sleep-z {
+    animation: sleepZRise 2.4s ease-out infinite;
+  }
+}
+
+/* For reduced-motion users, the Z just sits visible without
+   animating — still communicates the napping state. */
+@media (prefers-reduced-motion: reduce) {
+  .sleep-z {
+    opacity: 0.85;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Win celebration overlay
+   ─────────────────────────────────────────────────────────────
+   When a play session returns wins, we render a 3-second pointer-
+   events:none overlay containing GoldConfetti + ActionBurst over
+   the hero. The burst animates in with a brief scale-up "stamp"
+   gesture, holds, then fades out.
+   ───────────────────────────────────────────────────────────── */
+
+@keyframes burstStamp {
+  0% {
+    transform: scale(0.4) rotate(-12deg);
+    opacity: 0;
+  }
+  35% {
+    transform: scale(1.15) rotate(4deg);
+    opacity: 1;
+  }
+  55% {
+    transform: scale(0.95) rotate(-2deg);
+    opacity: 1;
+  }
+  70% {
+    transform: scale(1) rotate(0deg);
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+    opacity: 0;
+  }
+}
+
+.burst-stamp {
+  animation: burstStamp 3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .burst-stamp {
+    /* Reduced motion: skip the bouncy stamp; just fade the
+       celebration in and out so the user still sees that
+       something happened, without vestibular strain. */
+    animation: burstFade 3s ease-out forwards;
+  }
+  @keyframes burstFade {
+    0% { opacity: 0; }
+    20% { opacity: 1; }
+    80% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+}
+
 /* Pixel-font utility — used for issue-number stickers and comic SFX
    text. Intentionally crunchy; restricted to small sizes where the
    pixel shapes read as styling rather than illegibility. */

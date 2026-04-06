@@ -10,6 +10,7 @@ import {
   HederaChainId,
 } from '@hashgraph/hedera-wallet-connect/dist/lib/shared';
 import { useToast } from '../components/Toast';
+import { GoldConfetti } from '../components/GoldConfetti';
 import {
   LSH_CHARACTERS,
   loadOrPickCharacterIdx,
@@ -60,42 +61,6 @@ function networkLabel(n: Network): string {
 
 function pickRandom(arr: string[]): string {
   return arr[Math.floor(Math.random() * arr.length)];
-}
-
-// ---------------------------------------------------------------------------
-// Confetti celebration (gold particles on auth success)
-// ---------------------------------------------------------------------------
-
-function GoldConfetti() {
-  const particles = Array.from({ length: 24 }, (_, i) => ({
-    id: i,
-    left: `${Math.random() * 100}%`,
-    delay: `${Math.random() * 0.6}s`,
-    duration: `${1.2 + Math.random() * 1.0}s`,
-    color: Math.random() > 0.3 ? '#e5a800' : Math.random() > 0.5 ? '#fafafa' : '#3b82f6',
-    size: `${4 + Math.random() * 4}px`,
-    rotation: `${Math.random() * 360}deg`,
-  }));
-
-  return (
-    <div className="confetti-container">
-      {particles.map((p) => (
-        <div
-          key={p.id}
-          className="confetti-particle"
-          style={{
-            left: p.left,
-            animationDelay: p.delay,
-            animationDuration: p.duration,
-            backgroundColor: p.color,
-            width: p.size,
-            height: p.size,
-            transform: `rotate(${p.rotation})`,
-          }}
-        />
-      ))}
-    </div>
-  );
 }
 
 // ---------------------------------------------------------------------------
