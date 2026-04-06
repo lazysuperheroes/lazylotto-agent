@@ -17,7 +17,24 @@ const config = {
       { protocol: 'https', hostname: 'lazysuperheroes.myfilebase.com' },
     ],
   },
-  // Empty turbopack config to silence the migration warning
+  // KNOWN LIMITATION — Turbopack (Next.js 16 default bundler for
+  // `next dev`) does NOT support webpack's `extensionAlias` for
+  // rewriting `.js` imports to `.ts` files. The src/ tree uses the
+  // standard Node.js ESM convention where TypeScript files are
+  // imported with `.js` suffixes (e.g. `import './session.js'` that
+  // actually resolves to `session.ts`). This works in the CLI
+  // (Node + tsx) and in webpack (via the extensionAlias below) but
+  // fails in Turbopack.
+  //
+  // Workaround: the `dev:web` package.json script forces `--webpack`
+  // so dev mode uses the same bundler as the production build and
+  // honors the extensionAlias. Slightly slower than Turbopack but
+  // guaranteed to match production resolution.
+  //
+  // Revisit: when Turbopack ships extension-rewriting (tracked in
+  // vercel/next.js issues) or when we migrate src/ imports to
+  // extensionless paths (would require changing the Node/tsx side
+  // of the build to match).
   turbopack: {},
   webpack: (config, { isServer }) => {
     // Resolve .js imports to .ts files (ESM Node.js convention → bundler)

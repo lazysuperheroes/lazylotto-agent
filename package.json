@@ -1,6 +1,6 @@
 {
   "name": "@lazysuperheroes/lazylotto-agent",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Autonomous AI agent that plays the LazyLotto lottery on Hedera",
   "type": "module",
   "main": "dist/index.js",
@@ -17,7 +17,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.cli.json && node -e \"const fs=require('fs'),f='dist/index.js',c=fs.readFileSync(f,'utf8');if(!c.startsWith('#!'))fs.writeFileSync(f,'#!/usr/bin/env node\\n'+c)\"",
     "build:web": "next build --webpack",
-    "dev:web": "next dev --port 3000",
+    "dev:web": "next dev --webpack --port 3000",
     "dev": "node --import tsx src/index.ts",
     "dev:scheduled": "node --import tsx src/index.ts --scheduled",
     "dev:mcp": "node --import tsx src/index.ts --mcp-server",

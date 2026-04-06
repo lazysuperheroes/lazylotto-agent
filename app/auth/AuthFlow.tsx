@@ -10,6 +10,12 @@ import {
   HederaChainId,
 } from '@hashgraph/hedera-wallet-connect/dist/lib/shared';
 import { useToast } from '../components/Toast';
+import {
+  LSH_CHARACTERS,
+  loadOrPickCharacterIdx,
+  persistCharacterIdx,
+  randomCharacterIdx,
+} from '../lib/characters';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,116 +41,6 @@ const CHAIN_IDS: Record<Network, string> = {
   testnet: HederaChainId.Testnet,
   mainnet: HederaChainId.Mainnet,
 };
-
-// ---------------------------------------------------------------------------
-// Character mascots — each with taglines (landing) and success lines
-// ---------------------------------------------------------------------------
-
-const IPFS_BASE = 'https://lazysuperheroes.myfilebase.com/ipfs/QmXsG47eDFSwCA4Kpii3XGidHScbsApdAvPnF4aMTpi7KD';
-// Filebase image optimization: resize to 256px, contain aspect ratio, auto format, sharpen
-const IMG_OPTS = '?img-width=256&img-height=256&img-fit=contain&img-format=auto&img-sharpen=1';
-
-const LSH_CHARACTERS = [
-  // Gen 1 — Lazy Superheroes (Male)
-  {
-    name: 'Aadan',
-    img: `${IPFS_BASE}/Aadan.png${IMG_OPTS}`,
-    taglines: ['Aadan is ready. Are you?', 'Aadan says: fortune favours the bold.', 'Aadan has a good feeling about this.'],
-    successLines: ["Aadan says: you're in! Let's roll.", 'Aadan approves. Welcome aboard.', 'Nice one. Aadan knew you had it in you.'],
-  },
-  {
-    name: 'Jazz',
-    img: `${IPFS_BASE}/Jazz.png${IMG_OPTS}`,
-    taglines: ['Jazz says: let the good times roll.', 'Jazz is tuned in and ready.', 'Jazz has the rhythm of luck.'],
-    successLines: ["Jazz says: you're in! Let's roll.", 'Jazz approves. Time to play.', 'Welcome to the LazyVerse, courtesy of Jazz.'],
-  },
-  {
-    name: 'Gordo',
-    img: `${IPFS_BASE}/Gordo.png${IMG_OPTS}`,
-    taglines: ["Gordo's got a feeling about this one.", 'Gordo never backs down from a bet.', 'Gordo says: go big or go home.'],
-    successLines: ["Gordo says: you're in! Let's roll.", 'Gordo approves. Time to play.', "Welcome to the big leagues, courtesy of Gordo."],
-  },
-  {
-    name: 'Korgg',
-    img: `${IPFS_BASE}/Korgg.png${IMG_OPTS}`,
-    taglines: ['Korgg smash... those lottery odds.', 'Korgg is ready to rumble.', 'Korgg sees victory on the horizon.'],
-    successLines: ["Korgg says: you're in! Let's roll.", 'Korgg approves. Time to smash.', 'Welcome to the LazyVerse, courtesy of Korgg.'],
-  },
-  {
-    name: 'Nobody',
-    img: `${IPFS_BASE}/Nobody.png${IMG_OPTS}`,
-    taglines: ['Nobody does it better.', 'Nobody sees all. Nobody knows all.', 'Nobody is watching your back.'],
-    successLines: ["Nobody says: you're in! Let's roll.", 'Nobody approves. Silently.', 'Welcome aboard. Nobody saw a thing.'],
-  },
-  {
-    name: 'Kjell',
-    img: `${IPFS_BASE}/Kjell.png${IMG_OPTS}`,
-    taglines: ['The HBARBarian is feeling lucky.', 'Kjell sharpens his axe for fortune.', 'Kjell charges into the fray.'],
-    successLines: ["Kjell says: you're in! Let's roll.", 'The HBARBarian approves. Onward.', 'Welcome to Valhalla, courtesy of Kjell.'],
-  },
-  {
-    name: 'Crawford',
-    img: `${IPFS_BASE}/Crawford.png${IMG_OPTS}`,
-    taglines: ['Crawford always plays it cool.', 'Crawford has the odds figured out.', 'Crawford says: trust the process.'],
-    successLines: ["Crawford says: you're in! Let's roll.", 'Crawford approves. Smooth move.', 'Welcome to the LazyVerse, courtesy of Crawford.'],
-  },
-  // Gen 1 — Lazy Superheroes (Female)
-  {
-    name: 'Ginnie Delice',
-    img: `${IPFS_BASE}/Ginnie-Delice.png${IMG_OPTS}`,
-    taglines: ['Ginnie says: fortune favours the bold.', 'Ginnie has a trick up her sleeve.', 'Ginnie Delice is feeling generous.'],
-    successLines: ["Ginnie says: you're in! Let's roll.", 'Ginnie approves. Deliciously.', 'Welcome to the LazyVerse, courtesy of Ginnie.'],
-  },
-  {
-    name: 'Tina Ingvild',
-    img: `${IPFS_BASE}/Tina-Ingvild.png${IMG_OPTS}`,
-    taglines: ['The Red Queen demands a win.', 'Tina Ingvild has spoken.', 'Tina commands fortune to her side.'],
-    successLines: ["Tina says: you're in! Let's roll.", 'The Red Queen approves. Bow.', 'Welcome to the court, courtesy of Tina.'],
-  },
-  {
-    name: 'Virginia Lor',
-    img: `${IPFS_BASE}/Virginia-Lor.png${IMG_OPTS}`,
-    taglines: ['Virginia feels the odds shifting.', 'Virginia Lor knows the way.', 'Virginia whispers: the stars align.'],
-    successLines: ["Virginia says: you're in! Let's roll.", 'Virginia approves. Gracefully.', 'Welcome to the LazyVerse, courtesy of Virginia.'],
-  },
-  {
-    name: 'Kanna Setsuko',
-    img: `${IPFS_BASE}/Kanna-Setsuko.png${IMG_OPTS}`,
-    taglines: ["Kanna's psychic sense says: play now.", 'Kanna sees a jackpot in your future.', 'Kanna Setsuko reads fortune in your favour.'],
-    successLines: ["Kanna says: you're in! Let's roll.", 'Kanna approves. It was foreseen.', 'Welcome to the LazyVerse, courtesy of Kanna.'],
-  },
-  // Gen 2 — Lazy Super Villains
-  {
-    name: 'Mala',
-    img: `${IPFS_BASE}/Mala.jpg${IMG_OPTS}`,
-    taglines: ['Even villains need a lucky break.', 'Mala plots a winning streak.', 'Mala says: chaos breeds opportunity.'],
-    successLines: ["Mala says: you're in! Let's roll.", 'Mala approves. Wickedly.', 'Welcome to the dark side, courtesy of Mala.'],
-  },
-  {
-    name: 'Soul',
-    img: `${IPFS_BASE}/Soul.jpg${IMG_OPTS}`,
-    taglines: ["Soul's roar echoes: it's game time.", 'Soul demands a worthy opponent.', 'Soul hungers for victory.'],
-    successLines: ["Soul says: you're in! Let's roll.", 'Soul approves. With a roar.', 'Welcome to the hunt, courtesy of Soul.'],
-  },
-  {
-    name: 'Blood',
-    img: `${IPFS_BASE}/Blood.jpg${IMG_OPTS}`,
-    taglines: ['Blood thirsts for a jackpot.', 'Blood says: the night is young.', 'Blood senses fortune in the air.'],
-    successLines: ["Blood says: you're in! Let's roll.", 'Blood approves. Darkly.', 'Welcome to the shadows, courtesy of Blood.'],
-  },
-  {
-    name: 'E-Xterm',
-    img: `${IPFS_BASE}/E-Xterm.jpg${IMG_OPTS}`,
-    taglines: ['E-Xterm has calculated the optimal play.', 'E-Xterm says: probability is on our side.', 'E-Xterm runs the numbers. Looking good.'],
-    successLines: ["E-Xterm says: you're in! Let's roll.", 'E-Xterm approves. Statistically sound.', 'Welcome to the matrix, courtesy of E-Xterm.'],
-  },
-  {
-    name: 'Gabriel',
-    img: `${IPFS_BASE}/Gabriel.jpg${IMG_OPTS}`,
-    taglines: ['The Cobrastra strikes at fortune.', 'Gabriel coils, ready to strike.', 'Gabriel says: the serpent sees all.'],
-    successLines: ["Gabriel says: you're in! Let's roll.", 'The Cobrastra approves. Ssslick.', 'Welcome to the nest, courtesy of Gabriel.'],
-  },
-];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -233,24 +129,21 @@ export function AuthFlow() {
   const [tier, setTier] = useState<string>('');
 
   // ----- Persistent character mascot -----
-  const [characterIdx, setCharacterIdx] = useState<number>(() => {
-    if (typeof window === 'undefined') return 0;
-    const stored = localStorage.getItem('lazylotto:characterIdx');
-    if (stored !== null) {
-      const parsed = parseInt(stored, 10);
-      if (!isNaN(parsed) && parsed >= 0 && parsed < LSH_CHARACTERS.length) return parsed;
-    }
-    const idx = Math.floor(Math.random() * LSH_CHARACTERS.length);
-    localStorage.setItem('lazylotto:characterIdx', String(idx));
-    return idx;
-  });
+  // Start with a deterministic 0 during SSR so the rendered HTML
+  // matches the client's first paint, then rehydrate from localStorage
+  // in the mount useEffect below.
+  const [characterIdx, setCharacterIdx] = useState<number>(0);
 
-  const character = LSH_CHARACTERS[characterIdx];
+  useEffect(() => {
+    setCharacterIdx(loadOrPickCharacterIdx());
+  }, []);
+
+  const character = LSH_CHARACTERS[characterIdx]!;
 
   const rerollCharacter = useCallback(() => {
-    const newIdx = Math.floor(Math.random() * LSH_CHARACTERS.length);
+    const newIdx = randomCharacterIdx();
     setCharacterIdx(newIdx);
-    localStorage.setItem('lazylotto:characterIdx', String(newIdx));
+    persistCharacterIdx(newIdx);
   }, []);
 
   const dappConnector = useRef<DAppConnector | null>(null);

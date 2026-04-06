@@ -1,12 +1,19 @@
 import './styles/globals.css';
 import type { Metadata } from 'next';
-import { Heebo, Unbounded } from 'next/font/google';
+import { Heebo, Unbounded, Press_Start_2P } from 'next/font/google';
 import { Sidebar } from './components/Sidebar';
 import { ToastProvider } from './components/Toast';
 
 // ---------------------------------------------------------------------------
 // Fonts — loaded via next/font (no CSS @import needed)
 // ---------------------------------------------------------------------------
+//
+// - Heebo: body (refined sans for all reading)
+// - Unbounded: headings + display (confident, on-brand)
+// - Press Start 2P: contextual comic-book labels and callouts
+//   (ISSUE #001 stickers, small-caps tags, SFX text). Used sparingly —
+//   the brand brief calls for it as a "contextual character/game" font,
+//   not a body choice.
 
 const heebo = Heebo({
   subsets: ['latin'],
@@ -17,8 +24,15 @@ const heebo = Heebo({
 
 const unbounded = Unbounded({
   subsets: ['latin'],
-  weight: ['400', '600', '700'],
+  weight: ['400', '600', '700', '800'],
   variable: '--font-unbounded',
+  display: 'swap',
+});
+
+const pressStart = Press_Start_2P({
+  subsets: ['latin'],
+  weight: ['400'],
+  variable: '--font-pixel',
   display: 'swap',
 });
 
@@ -75,7 +89,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`dark ${heebo.variable} ${unbounded.variable}`}>
+    <html
+      lang="en"
+      className={`dark ${heebo.variable} ${unbounded.variable} ${pressStart.variable}`}
+    >
       <body className="min-h-screen bg-background font-sans">
         <ToastProvider>
           <div className="flex min-h-screen">

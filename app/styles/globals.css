@@ -6,6 +6,9 @@
   --color-foreground: #fafafa;
   --color-primary: #3b82f6;
   --color-brand: #e5a800;
+  --color-brand-deep: #b37e00;
+  --color-panel: #0a0a0c;
+  --color-ink: #050506;
   --color-secondary: #27272a;
   --color-muted: #a1a1aa;
   --color-destructive: #dc2626;
@@ -13,6 +16,7 @@
   --color-info: #0ea5e9;
   --font-sans: var(--font-heebo), 'Heebo', sans-serif;
   --font-heading: var(--font-unbounded), 'Unbounded', sans-serif;
+  --font-pixel: var(--font-pixel), 'Courier New', monospace;
   --radius-xl: 0.75rem;
 }
 
@@ -133,4 +137,94 @@ body {
   height: 6px;
   border-radius: 1px;
   animation: confettiFall 1.8s ease-out forwards;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Comic-book vocabulary
+   ─────────────────────────────────────────────────────────────
+   The LazyLotto dashboard leans into a "night-shift comic book"
+   aesthetic: thick brand borders on nearly-black panels, halftone
+   dot textures inside each panel, and pixel-font labels that stick
+   out of panel corners like issue numbers. Keeps dark mode committed
+   while communicating the LazyVerse IP origin.
+   ───────────────────────────────────────────────────────────── */
+
+/* Halftone dot texture — subtle gold dots inside a panel interior.
+   Uses two offset radial gradients so the pattern doesn't read as a
+   clean grid; real printed halftones have slight irregularity. */
+.halftone {
+  background-color: var(--color-panel);
+  background-image:
+    radial-gradient(
+      circle at 1px 1px,
+      rgba(229, 168, 0, 0.09) 1px,
+      transparent 0
+    ),
+    radial-gradient(
+      circle at 7px 7px,
+      rgba(229, 168, 0, 0.05) 1px,
+      transparent 0
+    );
+  background-size: 14px 14px, 14px 14px;
+}
+
+/* Heavier halftone for hero panels — more dot density, slightly
+   more visible. Pairs with a darker base. */
+.halftone-dense {
+  background-color: var(--color-panel);
+  background-image:
+    radial-gradient(
+      circle at 1px 1px,
+      rgba(229, 168, 0, 0.14) 1.2px,
+      transparent 0
+    ),
+    radial-gradient(
+      circle at 6px 6px,
+      rgba(229, 168, 0, 0.07) 1px,
+      transparent 0
+    );
+  background-size: 12px 12px, 12px 12px;
+}
+
+/* Neo-brutalist panel shadow — hard offset, no blur. Default uses
+   pure ink for max contrast against the page background. */
+.panel-shadow {
+  box-shadow: 6px 6px 0 0 var(--color-ink);
+}
+.panel-shadow-sm {
+  box-shadow: 4px 4px 0 0 var(--color-ink);
+}
+
+/* Small-caps label — the uppercase track-tight typography that
+   replaces generic "muted small text" as section labels, metadata
+   rows, and microcopy throughout the dashboard. */
+.label-caps {
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+.label-caps-brand {
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-brand);
+}
+
+/* Pixel-font utility — used for issue-number stickers and comic SFX
+   text. Intentionally crunchy; restricted to small sizes where the
+   pixel shapes read as styling rather than illegibility. */
+.font-pixel {
+  font-family: var(--font-pixel);
+}
+
+/* Tabular numerals — locks number widths so displaying changing
+   balances doesn't cause the hero number to jitter pixel by pixel. */
+.num-tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
 }

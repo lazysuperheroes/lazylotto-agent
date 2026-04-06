@@ -4,12 +4,18 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useToast } from '../components/Toast';
 import { Modal } from '../components/Modal';
+import { ComicPanel } from '../components/ComicPanel';
 import {
   PrizeNftCard,
   type PrizeNftRef,
   type EnrichedPrizeNft,
 } from '../components/PrizeNftCard';
 import { useNftEnrichment } from '../components/useNftEnrichment';
+import {
+  LSH_CHARACTERS,
+  loadOrPickCharacterIdx,
+  pickLine,
+} from '../lib/characters';
 
 // ---------------------------------------------------------------------------
 // Types -- mapped to real API response shapes
@@ -106,12 +112,6 @@ function maskToken(token: string): string {
 function tokenSymbol(tokenKey: string): string {
   if (tokenKey.toLowerCase() === 'hbar') return 'HBAR';
   return tokenKey;
-}
-
-function tokenAbbrev(tokenKey: string): string {
-  if (tokenKey.toLowerCase() === 'hbar') return 'HB';
-  const sym = tokenSymbol(tokenKey);
-  return sym.slice(0, 2).toUpperCase();
 }
 
 function formatAmount(amount: number): string {
@@ -220,6 +220,9 @@ export default function DashboardPage() {
   // the user doesn't see it again after closing it once. Hydrated in the
   // mount useEffect (avoid SSR hydration mismatch).
   const [onboardingDismissed, setOnboardingDismissed] = useState(true);
+  // Persistent character mascot — shared with /auth via localStorage.
+  // Starts at 0 for SSR determinism, rehydrated on mount.
+  const [characterIdx, setCharacterIdx] = useState(0);
   // Per-section loading states so balance/deposit and history render independently
   const [statusLoading, setStatusLoading] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -406,6 +409,7 @@ export default function DashboardPage() {
     setOnboardingDismissed(
       localStorage.getItem('lazylotto:hideOnboarding') === '1',
     );
+    setCharacterIdx(loadOrPickCharacterIdx());
 
     if (!token) {
       setStatusLoading(false);
@@ -772,16 +776,10 @@ export default function DashboardPage() {
     return { totalWinSessions, totalSpentAll, totalWonAll, net, primaryToken };
   }, [sessions, status]);
 
-  // --- Last session trend ---
-  const lastSessionTrend = useMemo(() => {
-    if (sessions.length === 0 || !status?.lastPlayedAt) return null;
-    const last = sessions[0]; // sessions are assumed newest-first
-    if (!last) return null;
-    const lastNet = last.totalPrizeValue - last.totalSpent;
-    if (lastNet > 0) return 'up' as const;
-    if (lastNet < 0) return 'down' as const;
-    return 'flat' as const;
-  }, [sessions, status]);
+  // Note: the old lastSessionTrend sparkline arrow was removed in the
+  // /bolder pass — it was decorative and only reachable via a `title`
+  // tooltip. Last-session feedback now belongs in a proper delta on
+  // the play history row, not as an icon next to the hero balance.
 
   // --- Loading state ---
   // Show full-page skeleton while the critical section (status/balance) is
@@ -863,6 +861,37 @@ export default function DashboardPage() {
     .join(', ') || '--';
 
   const agentWallet = status?.agentWallet ?? '';
+
+  // ── Hero derivations ─────────────────────────────────────────
+  // The hero panel shows ONE huge balance number. We pick the token
+  // with the highest `available` balance as the primary; any other
+  // non-zero tokens are surfaced as secondary pills below. Multi-
+  // token users still see everything, single-token users (the common
+  // case) see one confident pot.
+  const character = LSH_CHARACTERS[characterIdx] ?? LSH_CHARACTERS[0]!;
+  const primaryBalanceEntry = balanceEntries.reduce<
+    [string, typeof balanceEntries[number][1]] | null
+  >((best, current) => {
+    if (!best) return current;
+    return current[1].available > best[1].available ? current : best;
+  }, null);
+  const secondaryBalanceEntries = primaryBalanceEntry
+    ? balanceEntries.filter(
+        ([k, e]) => k !== primaryBalanceEntry[0] && (e.available > 0 || e.reserved > 0),
+      )
+    : [];
+  const hasPlayableBalance = balanceEntries.some(([, e]) => e.available > 0);
+  const agentClosed =
+    publicStats?.acceptingOperations === false;
+  // Pick a character line deterministically per session so the same
+  // page refresh shows the same quip (but different sessions rotate).
+  const characterLine = status
+    ? agentClosed
+      ? pickLine(character.nappingLines, status.userId)
+      : hasPlayableBalance
+        ? pickLine(character.lazyLines, status.userId)
+        : pickLine(character.taglines, status.userId)
+    : '';
 
   // Sessions to display (capped at 10 unless expanded)
   const displayedSessions = showAll ? sessions : sessions.slice(0, 10);
@@ -1012,174 +1041,198 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* ---- Cards Grid ---- */}
-        <div className="grid gap-6 lg:grid-cols-2">
+        {/* ══════════════════════════════════════════════════════════
+            HERO PANEL — the one confident moment on the dashboard.
+            ═══════════════════════════════════════════════════════════
+            Mascot + pot number + PLAY + withdraw link + metadata strip,
+            all inside a single comic-book panel with halftone texture,
+            brand-gold border, and an ISSUE #001 corner sticker.
 
-          {/* ---- Balance Card ---- */}
-          <div className="rounded-xl bg-gradient-to-br from-secondary/30 to-transparent p-6 shadow">
-            <div className="mb-1 flex items-center gap-2">
-              <h2 className="font-heading text-lg text-foreground">
-                Available Balance
-              </h2>
-              {lastSessionTrend && (
-                <span
-                  className={`text-sm ${
-                    lastSessionTrend === 'up'
-                      ? 'text-success'
-                      : lastSessionTrend === 'down'
-                        ? 'text-destructive'
-                        : 'text-muted'
-                  }`}
-                  title={
-                    lastSessionTrend === 'up'
-                      ? 'Last session was profitable'
-                      : lastSessionTrend === 'down'
-                        ? 'Last session was a loss'
-                        : 'Last session broke even'
-                  }
-                >
-                  {lastSessionTrend === 'up' ? '\u2191' : lastSessionTrend === 'down' ? '\u2193' : '\u2014'}
-                </span>
-              )}
-            </div>
-            <p className="mb-4 text-xs text-muted">
-              Your current token balances held by the agent. Available funds can be used for lottery entries.
-              {depositsChecking && (
-                <span className="ml-2 inline-flex items-center gap-1 text-brand">
-                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
-                  Checking for new deposits…
-                </span>
-              )}
-            </p>
+            This block intentionally lives OUTSIDE the 2-col grid below,
+            so it spans the full width of the page and becomes the
+            unambiguous primary moment. Everything else (deposit card,
+            stuck deposits, history, trust panel) demotes beneath it.
+            ══════════════════════════════════════════════════════════ */}
+        {status && (
+          <ComicPanel label="ISSUE #001" halftone="dense" className="mb-8">
+            <div className="grid gap-6 p-6 sm:p-8 md:grid-cols-[auto_1fr] md:items-center md:gap-10">
+              {/* Mascot slot */}
+              <div className="mx-auto w-32 shrink-0 sm:w-40 md:mx-0 md:w-44">
+                <img
+                  src={character.imgLarge}
+                  alt={character.name}
+                  width={176}
+                  height={176}
+                  className="h-auto w-full select-none"
+                  draggable={false}
+                />
+                <p className="mt-2 text-center font-pixel text-[9px] uppercase tracking-wider text-brand">
+                  {character.name}
+                </p>
+              </div>
 
-            {status && (
-              <div className="space-y-4">
-                <div className="space-y-3">
-                  {balanceEntries.length > 0 ? (
-                    balanceEntries.map(([tokenKey, entry]) => (
-                      <div
-                        key={tokenKey}
-                        className="flex items-center justify-between rounded-lg bg-secondary/50 px-4 py-3"
-                      >
-                        <div className="flex items-center gap-3">
-                          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-brand/20 text-xs font-semibold text-brand">
-                            {tokenAbbrev(tokenKey)}
-                          </span>
-                          <div>
-                            <p className="text-sm font-medium text-foreground">
-                              {tokenSymbol(tokenKey)}
-                            </p>
-                            <p className="text-xs text-muted">{tokenKey}</p>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <p className="font-heading text-2xl text-brand">
-                            {formatAmount(entry.available)}
-                          </p>
-                          {entry.reserved > 0 && (
-                            <p className="text-xs text-muted">
-                              {formatAmount(entry.reserved)} reserved
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                    ))
-                  ) : (
-                    <p className="text-sm text-muted">
-                      No token balances yet. Deposit tokens to get started.
-                    </p>
+              {/* Hero content */}
+              <div className="min-w-0">
+                {/* Metadata row — small caps, tight tracking */}
+                <div className="mb-5 flex flex-wrap items-center gap-x-5 gap-y-2">
+                  <span className="label-caps">Your agent</span>
+                  <span className="label-caps-brand">
+                    Strategy · {status.strategyName}
+                  </span>
+                  <span className="label-caps">Rake {status.rakePercent}%</span>
+                  {depositsChecking && (
+                    <span className="label-caps-brand inline-flex items-center gap-1.5">
+                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
+                      Checking deposits
+                    </span>
                   )}
                 </div>
 
-                <div className="border-t border-secondary pt-4">
-                  <div className="flex justify-between text-sm">
-                    <span className="text-muted">Total Deposited</span>
-                    <span className="text-foreground">{totalDeposited}</span>
+                {/* Display number — the hero moment */}
+                {primaryBalanceEntry ? (
+                  <div className="mb-2">
+                    <p className="label-caps mb-1">Pot</p>
+                    <p
+                      className="num-tabular font-heading text-[clamp(3.5rem,10vw,6.5rem)] font-extrabold leading-[0.95] text-brand"
+                      aria-label={`Primary balance ${formatAmount(primaryBalanceEntry[1].available)} ${tokenSymbol(primaryBalanceEntry[0])}`}
+                    >
+                      {formatAmount(primaryBalanceEntry[1].available)}
+                    </p>
+                    <p className="mt-1 font-heading text-lg font-semibold text-foreground">
+                      {tokenSymbol(primaryBalanceEntry[0])}
+                      {primaryBalanceEntry[1].reserved > 0 && (
+                        <span className="ml-3 text-xs font-normal text-muted">
+                          {formatAmount(primaryBalanceEntry[1].reserved)} reserved
+                        </span>
+                      )}
+                    </p>
                   </div>
-                  <div className="mt-2 flex justify-between text-sm">
-                    <span className="text-muted">Total Rake Paid</span>
-                    <span className="text-foreground">{totalRakePaid}</span>
-                  </div>
-                  <div className="mt-2 flex justify-between text-sm">
-                    <span className="text-muted">Rake Rate</span>
-                    <span className="text-foreground">{status.rakePercent}%</span>
-                  </div>
-                  <p className="mt-2 text-[11px] italic text-muted">
-                    We take a rake to cover all gas and infrastructure costs.
+                ) : (
+                  <p className="mb-2 font-heading text-2xl font-semibold text-muted">
+                    Loading balance…
                   </p>
-                </div>
+                )}
 
-                {/* Action buttons — Play and Withdraw */}
-                {balanceEntries.some(([, e]) => e.available > 0) && (
-                  <div className="grid grid-cols-2 gap-3">
+                {/* Secondary token pills — only shown when multi-token */}
+                {secondaryBalanceEntries.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {secondaryBalanceEntries.map(([tokenKey, entry]) => (
+                      <span
+                        key={tokenKey}
+                        className="label-caps border border-brand/30 px-2.5 py-1.5 text-muted"
+                      >
+                        <span className="text-foreground num-tabular">
+                          {formatAmount(entry.available)}
+                        </span>{' '}
+                        {tokenSymbol(tokenKey)}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {/* Character quip — speech bubble feel */}
+                {characterLine && (
+                  <p className="mt-5 max-w-md text-sm italic text-muted">
+                    &ldquo;{characterLine}&rdquo;
+                  </p>
+                )}
+
+                {/* ── Primary action: PLAY ─────────────────────────── */}
+                {hasPlayableBalance ? (
+                  <div className="mt-6">
                     <button
                       type="button"
                       onClick={handlePlay}
-                      disabled={
-                        playLoading ||
-                        Boolean(publicStats && publicStats.acceptingOperations === false)
-                      }
-                      // When the agent is closed, point screen readers at
-                      // the status banner so they hear WHY the button is
-                      // disabled instead of just "dimmed".
-                      aria-disabled={
-                        playLoading ||
-                        (publicStats && publicStats.acceptingOperations === false)
-                          ? 'true'
-                          : undefined
-                      }
-                      aria-describedby={
-                        publicStats && publicStats.acceptingOperations === false
-                          ? 'agent-status-banner'
-                          : undefined
-                      }
-                      className="rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={playLoading || agentClosed}
+                      aria-disabled={playLoading || agentClosed ? 'true' : undefined}
+                      aria-describedby={agentClosed ? 'agent-status-banner' : undefined}
+                      className="group relative w-full bg-brand px-6 py-5 font-heading text-2xl font-extrabold uppercase tracking-[0.15em] text-background panel-shadow-sm transition-all duration-150 hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-[6px_6px_0_0_var(--color-ink)] active:translate-x-0 active:translate-y-0 active:shadow-[2px_2px_0_0_var(--color-ink)] disabled:cursor-not-allowed disabled:bg-brand/50 disabled:text-background/70 disabled:panel-shadow-sm disabled:hover:translate-x-0 disabled:hover:translate-y-0 sm:text-3xl"
                       title={
-                        publicStats && publicStats.acceptingOperations === false
+                        agentClosed
                           ? 'Agent is temporarily closed to new plays'
                           : 'Run a play session now'
                       }
                     >
-                      {playLoading ? 'Playing…' : 'Play Now'}
+                      {playLoading ? 'Playing…' : 'Play'}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setWithdrawOpen(true)}
-                      className="rounded-lg border border-brand bg-brand/10 px-4 py-2.5 text-sm font-semibold text-brand transition-colors hover:bg-brand/20"
-                    >
-                      Withdraw
-                    </button>
+                    <p className="mt-3 text-center font-pixel text-[9px] uppercase tracking-wider text-muted">
+                      Let the agent work. You can go back to doing nothing.
+                    </p>
+                    <div className="mt-4 flex justify-center">
+                      <button
+                        type="button"
+                        onClick={() => setWithdrawOpen(true)}
+                        className="label-caps transition-colors hover:text-brand"
+                      >
+                        ← Or withdraw funds
+                      </button>
+                    </div>
                   </div>
-                )}
-                {/* Empty-state hint when balance is zero */}
-                {balanceEntries.every(([, e]) => e.available <= 0) && (
-                  <div className="rounded-lg border border-dashed border-secondary bg-secondary/20 px-4 py-3 text-xs text-muted">
-                    Fund your account below, then come back to play.
+                ) : (
+                  // Empty-state CTA — points down at the deposit card.
+                  <div className="mt-6 border-2 border-dashed border-brand/40 p-5 text-center">
+                    <p className="label-caps-brand mb-2">Step 1</p>
+                    <p className="text-sm text-foreground">
+                      Fund your agent to play.
+                    </p>
+                    <p className="mt-1 text-xs text-muted">
+                      Send HBAR or LAZY to the address below with your deposit memo.
+                    </p>
                   </div>
                 )}
               </div>
-            )}
-            {/* Inline error state — only when status failed AND no stale
-                data is available. Other sections (history, trust panel,
-                dead letters) keep rendering normally so the whole page
-                doesn't fall over on a transient Redis blip. */}
-            {!status && !statusLoading && error && (
-              <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3">
-                <p className="mb-2 text-sm font-medium text-destructive">
-                  Balance temporarily unavailable
-                </p>
-                <p className="mb-3 text-xs text-muted">{error}</p>
-                <button
-                  type="button"
-                  onClick={retryStatus}
-                  disabled={statusLoading}
-                  className="rounded-md border border-destructive/40 px-3 py-1.5 text-xs font-semibold text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
-                >
-                  Retry
-                </button>
+            </div>
+
+            {/* Metadata strip — runs across the bottom of the panel.
+                Thin divider in brand gold to tie it to the panel border. */}
+            {status && hasPlayableBalance && (
+              <div className="border-t-2 border-brand/30 px-6 py-4 sm:px-8">
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                  <div>
+                    <p className="label-caps mb-0.5">Deposited</p>
+                    <p className="text-sm text-foreground num-tabular">
+                      {totalDeposited}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="label-caps mb-0.5">Rake paid</p>
+                    <p className="text-sm text-foreground num-tabular">
+                      {totalRakePaid}
+                    </p>
+                  </div>
+                  <p className="ml-auto max-w-xs text-[11px] italic text-muted">
+                    We take a rake to cover all gas and infrastructure costs.
+                  </p>
+                </div>
               </div>
             )}
-          </div>
+          </ComicPanel>
+        )}
+
+        {/* Inline hero error — shown only when /api/user/status failed
+            AND we have no stale hero data to render. History/trust/etc
+            below continue to render independently. */}
+        {!status && !statusLoading && error && (
+          <ComicPanel label="ERROR" tone="destructive" halftone="none" className="mb-8">
+            <div className="p-6">
+              <p className="mb-2 font-heading text-base text-destructive">
+                Balance temporarily unavailable
+              </p>
+              <p className="mb-4 text-xs text-muted">{error}</p>
+              <button
+                type="button"
+                onClick={retryStatus}
+                disabled={statusLoading}
+                className="border-2 border-destructive px-4 py-2 font-pixel text-[10px] uppercase tracking-wider text-destructive transition-colors hover:bg-destructive hover:text-white disabled:opacity-50"
+              >
+                Retry
+              </button>
+            </div>
+          </ComicPanel>
+        )}
+
+        {/* ---- Secondary Cards Grid ---- */}
+        <div className="grid gap-6 lg:grid-cols-2">
 
           {/* ---- Deposit Info Card ---- */}
           <div className="rounded-xl border border-secondary p-6 shadow">
