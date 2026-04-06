@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
 import { useToast } from '../components/Toast';
 import {
   PrizeNftCard,
@@ -201,9 +202,11 @@ function DashboardSkeleton() {
 // ---------------------------------------------------------------------------
 
 export default function DashboardPage() {
+  const router = useRouter();
   const { toast } = useToast();
 
   const [sessionToken, setSessionToken] = useState<string | null>(null);
+  const [storedAccountId, setStoredAccountId] = useState<string | null>(null);
   // Per-section loading states so balance/deposit and history render independently
   const [statusLoading, setStatusLoading] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -212,6 +215,7 @@ export default function DashboardPage() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [sessions, setSessions] = useState<PlaySession[]>([]);
   const [lockLoading, setLockLoading] = useState(false);
+  const [lockConfirming, setLockConfirming] = useState(false);
   const [revokeLoading, setRevokeLoading] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const [depositsChecking, setDepositsChecking] = useState(false);
@@ -278,6 +282,7 @@ export default function DashboardPage() {
   useEffect(() => {
     const token = localStorage.getItem('lazylotto:sessionToken');
     setSessionToken(token);
+    setStoredAccountId(localStorage.getItem('lazylotto:accountId'));
 
     if (!token) {
       setStatusLoading(false);
@@ -296,7 +301,8 @@ export default function DashboardPage() {
         if (res.status === 401) {
           localStorage.removeItem('lazylotto:sessionToken');
           localStorage.removeItem('lazylotto:accountId');
-          window.location.href = '/auth';
+          localStorage.removeItem('lazylotto:tier');
+          router.replace('/auth?expired=1');
           return;
         }
         if (res.status === 404) {
@@ -327,7 +333,8 @@ export default function DashboardPage() {
         if (res.status === 401) {
           localStorage.removeItem('lazylotto:sessionToken');
           localStorage.removeItem('lazylotto:accountId');
-          window.location.href = '/auth';
+          localStorage.removeItem('lazylotto:tier');
+          router.replace('/auth?expired=1');
           return;
         }
         if (res.status === 404) {
@@ -434,7 +441,8 @@ export default function DashboardPage() {
       if (res.status === 401) {
         localStorage.removeItem('lazylotto:sessionToken');
         localStorage.removeItem('lazylotto:accountId');
-        window.location.href = '/auth';
+        localStorage.removeItem('lazylotto:tier');
+        router.replace('/auth?expired=1');
         return;
       }
       if (!res.ok) {
@@ -443,19 +451,24 @@ export default function DashboardPage() {
           (body as { error?: string }).error ?? `Lock failed (${res.status})`,
         );
       }
+      // Mark locked in localStorage so the AuthFlow already-auth state shows it
+      localStorage.setItem('lazylotto:locked', 'true');
+      localStorage.removeItem('lazylotto:expiresAt');
+      toast('API key locked — now permanent');
+      setLockConfirming(false);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      setError(message);
+      toast(`Lock failed: ${message}`, { variant: 'error' });
     } finally {
       setLockLoading(false);
     }
-  }, [sessionToken]);
+  }, [router, sessionToken, toast]);
 
   // Self-serve registration from the not-registered empty state
   const handleRegister = useCallback(async () => {
     const token = localStorage.getItem('lazylotto:sessionToken');
     if (!token) {
-      window.location.href = '/auth';
+      router.replace('/auth');
       return;
     }
     setRegisterLoading(true);
@@ -479,23 +492,23 @@ export default function DashboardPage() {
       window.location.reload();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      toast(`Registration failed: ${message}`);
+      toast(`Registration failed: ${message}`, { variant: 'error' });
       setError(message);
     } finally {
       setRegisterLoading(false);
     }
-  }, [toast]);
+  }, [router, toast]);
 
   // Self-serve withdrawal
   const handleWithdraw = useCallback(async () => {
     const amount = Number(withdrawAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
-      toast('Enter a valid amount greater than 0');
+      toast('Enter a valid amount greater than 0', { variant: 'error' });
       return;
     }
     const token = localStorage.getItem('lazylotto:sessionToken');
     if (!token) {
-      window.location.href = '/auth';
+      router.replace('/auth');
       return;
     }
     setWithdrawLoading(true);
@@ -527,11 +540,11 @@ export default function DashboardPage() {
       setWithdrawAmount('');
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      toast(`Withdrawal failed: ${message}`);
+      toast(`Withdrawal failed: ${message}`, { variant: 'error' });
     } finally {
       setWithdrawLoading(false);
     }
-  }, [withdrawAmount, withdrawToken, toast]);
+  }, [router, withdrawAmount, withdrawToken, toast]);
 
   const handleRevoke = useCallback(async () => {
     if (!sessionToken) return;
@@ -550,6 +563,10 @@ export default function DashboardPage() {
     } finally {
       localStorage.removeItem('lazylotto:sessionToken');
       localStorage.removeItem('lazylotto:accountId');
+      localStorage.removeItem('lazylotto:tier');
+      localStorage.removeItem('lazylotto:expiresAt');
+      localStorage.removeItem('lazylotto:locked');
+      // Full reload intentional — clears all React state after revoke
       window.location.href = '/auth';
     }
   }, [sessionToken]);
@@ -636,12 +653,11 @@ export default function DashboardPage() {
 
   // --- Not registered state ---
   if (notRegistered) {
-    const accountId = typeof window !== 'undefined' ? localStorage.getItem('lazylotto:accountId') : null;
     return (
       <div className="flex flex-1 items-center justify-center px-4">
         <div className="w-full max-w-md rounded-xl border border-secondary p-8 text-center shadow-lg">
           <h1 className="mb-3 font-heading text-xl text-foreground">
-            Welcome, {accountId ?? 'Explorer'}
+            Welcome, {storedAccountId ?? 'Explorer'}
           </h1>
           <p className="mb-6 text-sm text-muted">
             You&apos;re signed in but haven&apos;t registered as a player yet.
@@ -1287,23 +1303,49 @@ export default function DashboardPage() {
               Copy
             </button>
 
-            <button
-              type="button"
-              onClick={() => void handleLock()}
-              disabled={lockLoading}
-              className="rounded-md bg-brand px-4 py-1.5 text-xs font-semibold text-background transition-opacity hover:opacity-90 disabled:opacity-50"
-            >
-              {lockLoading ? 'Locking...' : 'Lock API Key'}
-            </button>
+            {lockConfirming ? (
+              <>
+                <span className="text-xs text-muted">
+                  Make this token permanent (never expires, can&apos;t be auto-revoked)?
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void handleLock()}
+                  disabled={lockLoading}
+                  className="rounded-md bg-brand px-4 py-1.5 text-xs font-semibold text-background transition-opacity hover:opacity-90 disabled:opacity-50"
+                >
+                  {lockLoading ? 'Locking…' : 'Confirm — Make Permanent'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLockConfirming(false)}
+                  disabled={lockLoading}
+                  className="text-xs text-muted underline transition-colors hover:text-foreground"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setLockConfirming(true)}
+                  className="rounded-md bg-brand px-4 py-1.5 text-xs font-semibold text-background transition-opacity hover:opacity-90"
+                  title="Make this token permanent — never expires, can't be revoked"
+                >
+                  Lock API Key
+                </button>
 
-            <button
-              type="button"
-              onClick={() => void handleRevoke()}
-              disabled={revokeLoading}
-              className="rounded-md border border-destructive/50 px-4 py-1.5 text-xs font-medium text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
-            >
-              {revokeLoading ? 'Revoking...' : 'Revoke & Re-authenticate'}
-            </button>
+                <button
+                  type="button"
+                  onClick={() => void handleRevoke()}
+                  disabled={revokeLoading}
+                  className="rounded-md border border-destructive/50 px-4 py-1.5 text-xs font-medium text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
+                >
+                  {revokeLoading ? 'Revoking…' : 'Revoke & Re-authenticate'}
+                </button>
+              </>
+            )}
           </div>
 
           {status && (

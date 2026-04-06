@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { useToast } from '../components/Toast';
 
 // ---------------------------------------------------------------------------
@@ -81,6 +82,21 @@ function fmt(value: number, decimals = 1): string {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   });
+}
+
+function formatTimestamp(iso: string | null | undefined): string {
+  if (!iso) return 'Never';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return iso;
+  }
 }
 
 function summariseTokenMap(map: Record<string, number>): string {
@@ -169,6 +185,7 @@ function AdminSkeleton() {
 // ---------------------------------------------------------------------------
 
 export default function AdminPage() {
+  const router = useRouter();
   const { toast } = useToast();
 
   const [loading, setLoading] = useState(true);
@@ -223,7 +240,7 @@ export default function AdminPage() {
     async (url: string, options?: RequestInit): Promise<Response> => {
       const token = localStorage.getItem('lazylotto:sessionToken');
       if (!token) {
-        window.location.href = '/auth';
+        router.replace('/auth');
         return new Promise(() => {});
       }
 
@@ -238,7 +255,7 @@ export default function AdminPage() {
       if (res.status === 401) {
         localStorage.removeItem('lazylotto:sessionToken');
         localStorage.removeItem('lazylotto:accountId');
-        window.location.href = '/auth';
+        router.replace('/auth?expired=1');
         return new Promise(() => {});
       }
 
@@ -250,7 +267,7 @@ export default function AdminPage() {
 
       return res;
     },
-    [],
+    [router],
   );
 
   // ------------------------------------------------------------------
@@ -259,7 +276,7 @@ export default function AdminPage() {
   useEffect(() => {
     const token = localStorage.getItem('lazylotto:sessionToken');
     if (!token) {
-      window.location.href = '/auth';
+      router.replace('/auth');
       return;
     }
 
@@ -321,7 +338,7 @@ export default function AdminPage() {
     return () => {
       cancelled = true;
     };
-  }, [authFetch]);
+  }, [authFetch, router]);
 
   // --- Sort users ---
   const handleSort = useCallback(
@@ -460,7 +477,7 @@ export default function AdminPage() {
   const submitWithdrawFees = useCallback(async () => {
     const amount = Number(withdrawFeesAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
-      toast('Enter a valid amount greater than 0');
+      toast('Enter a valid amount greater than 0', { variant: 'error' });
       return;
     }
     setWithdrawFeesLoading(true);
@@ -500,7 +517,7 @@ export default function AdminPage() {
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      toast(`Fee withdrawal failed: ${message}`);
+      toast(`Fee withdrawal failed: ${message}`, { variant: 'error' });
     } finally {
       setWithdrawFeesLoading(false);
     }
@@ -533,6 +550,10 @@ export default function AdminPage() {
             onClick={() => {
               localStorage.removeItem('lazylotto:sessionToken');
               localStorage.removeItem('lazylotto:accountId');
+              localStorage.removeItem('lazylotto:tier');
+              localStorage.removeItem('lazylotto:expiresAt');
+              localStorage.removeItem('lazylotto:locked');
+              // Full reload intentional — clears all React state from forbidden admin
               window.location.href = '/auth';
             }}
             className="mt-4 rounded-md bg-primary px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
@@ -599,7 +620,7 @@ export default function AdminPage() {
 
           {sortedUsers.length > 0 ? (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full min-w-[960px] text-sm">
                 <thead>
                   <tr className="border-b border-secondary bg-secondary/50 text-left">
                     <th
@@ -674,7 +695,7 @@ export default function AdminPage() {
                         {getUserReserved(u)}
                       </td>
                       <td className="whitespace-nowrap px-3 py-3 text-muted">
-                        {u.lastPlayedAt ?? 'Never'}
+                        {formatTimestamp(u.lastPlayedAt)}
                       </td>
                       <td className="px-3 py-3 text-center">
                         <span
@@ -719,7 +740,7 @@ export default function AdminPage() {
 
             {deadLetters.length > 0 ? (
               <div className="space-y-0 overflow-x-auto">
-                <table className="w-full text-sm">
+                <table className="w-full min-w-[720px] text-sm">
                   <thead>
                     <tr className="border-b border-secondary bg-secondary/50 text-left">
                       <th className="px-3 py-3 font-medium text-muted">Transaction ID</th>
@@ -735,7 +756,7 @@ export default function AdminPage() {
                           {dl.transactionId}
                         </td>
                         <td className="whitespace-nowrap px-3 py-3 text-muted">
-                          {dl.timestamp}
+                          {formatTimestamp(dl.timestamp)}
                         </td>
                         <td className="px-3 py-3 text-destructive">
                           {dl.error}

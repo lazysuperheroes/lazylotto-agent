@@ -1,20 +1,29 @@
 'use client';
 
-import { createContext, useContext, useState, useCallback, useRef } from 'react';
+import { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
 import type { ReactNode } from 'react';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
+export type ToastVariant = 'success' | 'error' | 'info';
+
 interface ToastItem {
   id: number;
   message: string;
+  variant: ToastVariant;
   exiting: boolean;
 }
 
+interface ToastOptions {
+  variant?: ToastVariant;
+  /** Milliseconds before auto-dismiss. Default 2500 (success/info) / 5000 (error). */
+  duration?: number;
+}
+
 interface ToastContextValue {
-  toast: (message: string) => void;
+  toast: (message: string, options?: ToastOptions) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -28,42 +37,76 @@ export function useToast(): ToastContextValue {
 }
 
 // ---------------------------------------------------------------------------
+// Variant styling
+// ---------------------------------------------------------------------------
+
+const VARIANT_CLASSES: Record<ToastVariant, string> = {
+  success: 'bg-success text-white',
+  error: 'bg-destructive text-white',
+  info: 'bg-secondary text-foreground border border-brand/40',
+};
+
+// ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
   const idCounter = useRef(0);
+  // Track active timeouts so we can clean them up on unmount
+  const timeouts = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
 
-  const toast = useCallback((message: string) => {
+  const toast = useCallback((message: string, options?: ToastOptions) => {
+    const variant = options?.variant ?? 'success';
+    const duration = options?.duration ?? (variant === 'error' ? 5000 : 2500);
+
     const id = ++idCounter.current;
-    setItems((prev) => [...prev, { id, message, exiting: false }]);
+    setItems((prev) => [...prev, { id, message, variant, exiting: false }]);
 
-    // Start exit animation after 2.5s
-    setTimeout(() => {
+    // Start exit animation after duration
+    const exitTimer = setTimeout(() => {
       setItems((prev) =>
         prev.map((t) => (t.id === id ? { ...t, exiting: true } : t)),
       );
-    }, 2500);
+      timeouts.current.delete(exitTimer);
+    }, duration);
+    timeouts.current.add(exitTimer);
 
     // Remove from DOM after exit animation completes
-    setTimeout(() => {
+    const removeTimer = setTimeout(() => {
       setItems((prev) => prev.filter((t) => t.id !== id));
-    }, 2700);
+      timeouts.current.delete(removeTimer);
+    }, duration + 200);
+    timeouts.current.add(removeTimer);
+  }, []);
+
+  // Clear all pending timers on unmount
+  useEffect(() => {
+    const timers = timeouts.current;
+    return () => {
+      for (const t of timers) clearTimeout(t);
+      timers.clear();
+    };
   }, []);
 
   return (
     <ToastContext.Provider value={{ toast }}>
       {children}
 
-      {/* Toast container — fixed bottom-right */}
-      <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex flex-col items-end gap-2">
+      {/* Toast container — fixed bottom-right.
+          role=status + aria-live=polite so screen readers announce new items. */}
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="false"
+        className="pointer-events-none fixed bottom-4 right-4 z-50 flex flex-col items-end gap-2"
+      >
         {items.map((item) => (
           <div
             key={item.id}
-            className={`pointer-events-auto rounded-lg bg-success px-4 py-2.5 text-sm font-medium text-white shadow-lg ${
-              item.exiting ? 'toast-exit' : 'toast-enter'
-            }`}
+            className={`pointer-events-auto rounded-lg px-4 py-2.5 text-sm font-medium shadow-lg ${
+              VARIANT_CLASSES[item.variant]
+            } ${item.exiting ? 'toast-exit' : 'toast-enter'}`}
           >
             {item.message}
           </div>

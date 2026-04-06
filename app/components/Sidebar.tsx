@@ -116,6 +116,9 @@ function UserContext() {
     localStorage.removeItem('lazylotto:sessionToken');
     localStorage.removeItem('lazylotto:accountId');
     localStorage.removeItem('lazylotto:tier');
+    localStorage.removeItem('lazylotto:expiresAt');
+    localStorage.removeItem('lazylotto:locked');
+    // Full reload intentional — clears React state across the whole app
     window.location.href = '/auth';
   }, []);
 
@@ -247,7 +250,9 @@ export function Sidebar() {
             <img
               src="https://docs.lazysuperheroes.com/logo.svg"
               alt="LazyLotto"
-              className="h-10"
+              width={120}
+              height={40}
+              className="h-10 w-auto"
             />
           </Link>
         </div>

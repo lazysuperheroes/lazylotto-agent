@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   PrizeNftCard,
   type PrizeNftRef,
@@ -217,6 +218,7 @@ function AuditSkeleton() {
 // ---------------------------------------------------------------------------
 
 export default function AuditPage() {
+  const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notRegistered, setNotRegistered] = useState(false);
@@ -260,7 +262,7 @@ export default function AuditPage() {
   const fetchAudit = useCallback(async (adminMode: boolean, userFilter?: string) => {
     const token = localStorage.getItem('lazylotto:sessionToken');
     if (!token) {
-      window.location.href = '/auth';
+      router.replace('/auth');
       return null;
     }
 
@@ -278,7 +280,7 @@ export default function AuditPage() {
       if (res.status === 401) {
         localStorage.removeItem('lazylotto:sessionToken');
         localStorage.removeItem('lazylotto:accountId');
-        window.location.href = '/auth';
+        router.replace('/auth?expired=1');
         return null;
       }
 
@@ -298,7 +300,7 @@ export default function AuditPage() {
     if (res.status === 401) {
       localStorage.removeItem('lazylotto:sessionToken');
       localStorage.removeItem('lazylotto:accountId');
-      window.location.href = '/auth';
+      router.replace('/auth?expired=1');
       return null;
     }
 
@@ -315,7 +317,7 @@ export default function AuditPage() {
     }
 
     return (await res.json()) as AuditResponse;
-  }, []);
+  }, [router]);
 
   // Initial load: try admin first, then fall back to user
   useEffect(() => {

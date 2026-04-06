@@ -211,13 +211,17 @@ export function AuthFlow() {
   const { toast } = useToast();
 
   // ----- state -----
+  // All localStorage-derived values are kept in state and populated in
+  // useEffects so SSR-rendered HTML matches client hydration.
   const [status, setStatus] = useState<AuthStatus>('loading');
   const [accountId, setAccountId] = useState<string>('');
   const [storedAccountId, setStoredAccountId] = useState<string>('');
   const [sessionToken, setSessionToken] = useState<string>('');
   const [error, setError] = useState<string>('');
   const [mcpUrl, setMcpUrl] = useState<string>('');
+  const [savedMcpUrl, setSavedMcpUrl] = useState<string>('');
   const [expiresAt, setExpiresAt] = useState<string>('');
+  const [savedExpiry, setSavedExpiry] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
   const [locking, setLocking] = useState(false);
   const [lockConfirming, setLockConfirming] = useState(false);
@@ -226,6 +230,7 @@ export function AuthFlow() {
   const [isReturning, setIsReturning] = useState(false);
   const [showUrl, setShowUrl] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [tier, setTier] = useState<string>('');
 
   // ----- Persistent character mascot -----
   const [characterIdx, setCharacterIdx] = useState<number>(() => {
@@ -256,14 +261,49 @@ export function AuthFlow() {
     const token = localStorage.getItem('lazylotto:sessionToken');
     const acctId = localStorage.getItem('lazylotto:accountId');
     if (token && acctId) {
+      // Check if the stored expiry has already passed — if so, treat as
+      // logged out so the user re-authenticates instead of seeing a stale
+      // "Welcome back" with an unusable token.
+      const expiry = localStorage.getItem('lazylotto:expiresAt');
+      const isLockedSession = localStorage.getItem('lazylotto:locked') === 'true';
+      if (!isLockedSession && expiry) {
+        const expiresAtMs = new Date(expiry).getTime();
+        if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) {
+          // Expired — purge and show landing with a hint
+          localStorage.removeItem('lazylotto:sessionToken');
+          localStorage.removeItem('lazylotto:accountId');
+          localStorage.removeItem('lazylotto:tier');
+          localStorage.removeItem('lazylotto:mcpUrl');
+          localStorage.removeItem('lazylotto:expiresAt');
+          toast('Your session expired — please re-authenticate');
+          setStatus('landing');
+          return;
+        }
+      }
+
       setStoredAccountId(acctId);
       setSessionToken(token);
       setMcpUrl(localStorage.getItem('lazylotto:mcpUrl')?.split('?')[0] ?? '');
+      setSavedMcpUrl(localStorage.getItem('lazylotto:mcpUrl') ?? '');
+      setSavedExpiry(expiry);
+      setLocked(isLockedSession);
+      setTier(localStorage.getItem('lazylotto:tier') ?? '');
       setStatus('already-auth');
     } else {
+      // Check for expired hint from a redirect
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('expired') === '1') {
+        toast('Your session expired — please re-authenticate');
+      }
       setStatus('landing');
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Derived values for the CTA — read from state, not localStorage
+  const isAdminTier = tier === 'admin' || tier === 'operator';
+  const ctaTarget = isAdminTier ? '/admin' : '/dashboard';
+  const ctaLabel = isAdminTier ? 'Go to Admin' : 'Go to Dashboard';
 
   // ----- WalletConnect init -----
   const initWalletConnect = useCallback(async () => {
@@ -421,10 +461,12 @@ export function AuthFlow() {
       localStorage.setItem('lazylotto:mcpUrl', fullUrl);
       if (verified.expiresAt) localStorage.setItem('lazylotto:expiresAt', verified.expiresAt);
 
-      // 6. Complete
+      // 6. Complete — also update tier state so the post-verify CTA renders
+      // the correct destination without reading localStorage during render.
       setSessionToken(verified.sessionToken);
       setMcpUrl(verified.mcpUrl);
       setExpiresAt(verified.expiresAt);
+      setTier(verified.tier);
       setStatus('complete');
     } catch (err) {
       const message =
@@ -552,6 +594,7 @@ export function AuthFlow() {
   const CharacterMascot = useCallback(
     ({ size = 'lg', line }: { size?: 'sm' | 'lg'; line?: string }) => {
       const dim = size === 'lg' ? 'h-32 w-32' : 'h-20 w-20';
+      const dimPx = size === 'lg' ? 128 : 80;
       return (
         <div className="animate-fade-scale-in flex flex-col items-center gap-2">
           <div className="relative">
@@ -559,6 +602,8 @@ export function AuthFlow() {
               <img
                 src={character.img}
                 alt={character.name}
+                width={dimPx}
+                height={dimPx}
                 className="h-full w-full object-contain"
                 onLoad={(e) => {
                   (e.target as HTMLImageElement).parentElement?.classList.remove('animate-pulse', 'bg-secondary');
@@ -603,11 +648,9 @@ export function AuthFlow() {
 
           {/* ---- ALREADY AUTHENTICATED ---- */}
           {status === 'already-auth' && (() => {
-            const savedUrl = typeof window !== 'undefined'
-              ? localStorage.getItem('lazylotto:mcpUrl') ?? ''
-              : '';
-            const isLocked = typeof window !== 'undefined' && localStorage.getItem('lazylotto:locked') === 'true';
-            const savedExpiry = typeof window !== 'undefined' ? localStorage.getItem('lazylotto:expiresAt') : null;
+            // All values from state — no localStorage reads in render
+            const savedUrl = savedMcpUrl;
+            const isLocked = locked;
             const expiryLabel = isLocked
               ? 'permanent'
               : savedExpiry
@@ -744,10 +787,10 @@ export function AuthFlow() {
                 {/* Primary CTA */}
                 <button
                   type="button"
-                  onClick={() => router.push(localStorage.getItem('lazylotto:tier') === 'admin' || localStorage.getItem('lazylotto:tier') === 'operator' ? '/admin' : '/dashboard')}
+                  onClick={() => router.push(ctaTarget)}
                   className="w-full rounded-lg bg-primary px-6 py-3 font-semibold text-white transition-colors hover:bg-primary/90"
                 >
-                  {localStorage.getItem('lazylotto:tier') === 'admin' || localStorage.getItem('lazylotto:tier') === 'operator' ? 'Go to Admin' : 'Go to Dashboard'}
+                  {ctaLabel}
                 </button>
 
                 {/* Secondary actions */}
@@ -778,7 +821,9 @@ export function AuthFlow() {
               <img
                 src="https://docs.lazysuperheroes.com/logo.svg"
                 alt="LazyLotto"
-                className="h-20"
+                width={240}
+                height={80}
+                className="h-20 w-auto"
               />
 
               <div className="flex items-center gap-2">
@@ -820,7 +865,9 @@ export function AuthFlow() {
               <img
                 src="https://docs.lazysuperheroes.com/logo.svg"
                 alt="LazyLotto"
-                className="h-20"
+                width={240}
+                height={80}
+                className="h-20 w-auto"
               />
 
               {accountId && (
@@ -1005,10 +1052,10 @@ export function AuthFlow() {
                   {/* Go to Dashboard */}
                   <button
                     type="button"
-                    onClick={() => router.push(localStorage.getItem('lazylotto:tier') === 'admin' || localStorage.getItem('lazylotto:tier') === 'operator' ? '/admin' : '/dashboard')}
+                    onClick={() => router.push(ctaTarget)}
                     className="w-full rounded-lg bg-primary py-3 font-semibold text-white transition-colors hover:bg-primary/90"
                   >
-                    {localStorage.getItem('lazylotto:tier') === 'admin' || localStorage.getItem('lazylotto:tier') === 'operator' ? 'Go to Admin' : 'Go to Dashboard'}
+                    {ctaLabel}
                   </button>
                 </div>
               );
@@ -1243,10 +1290,10 @@ export function AuthFlow() {
               {/* SECTION 4: Go to Dashboard */}
               <button
                 type="button"
-                onClick={() => router.push(localStorage.getItem('lazylotto:tier') === 'admin' || localStorage.getItem('lazylotto:tier') === 'operator' ? '/admin' : '/dashboard')}
+                onClick={() => router.push(ctaTarget)}
                 className="w-full rounded-lg bg-primary py-3 font-semibold text-white transition-colors hover:bg-primary/90"
               >
-                Go to Dashboard
+                {ctaLabel}
               </button>
             </div>
             );
@@ -1258,7 +1305,9 @@ export function AuthFlow() {
               <img
                 src="https://docs.lazysuperheroes.com/logo.svg"
                 alt="LazyLotto"
-                className="h-20"
+                width={240}
+                height={80}
+                className="h-20 w-auto"
               />
 
               <p className="text-sm text-destructive">{error}</p>

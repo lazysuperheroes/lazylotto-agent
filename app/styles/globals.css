@@ -24,6 +24,21 @@ body {
   color: #fafafa;
 }
 
+/* Global keyboard focus ring — brand accent with offset so it never
+   blends into adjacent dark surfaces. Only applies to keyboard focus
+   (not mouse clicks) via :focus-visible. */
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Suppress the default focus outline when :focus-visible applies so we
+   don't double-paint on Firefox. */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
 /* Custom scrollbar (LSH style) */
 ::-webkit-scrollbar { width: 8px; }
 ::-webkit-scrollbar-track { background: #09090b; }

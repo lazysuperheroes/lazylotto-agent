@@ -126,6 +126,7 @@ export function PrizeNftCard({ raw, enriched, loading, size = 'regular' }: Prize
   const image = enriched?.image ?? '';
 
   const imageDim = size === 'compact' ? 'h-10 w-10' : 'h-14 w-14';
+  const imagePx = size === 'compact' ? 40 : 56;
   const nameTextClass = size === 'compact' ? 'text-xs font-semibold' : 'text-sm font-semibold';
   const collectionTextClass = size === 'compact' ? 'text-[10px]' : 'text-[11px]';
   const containerClass =
@@ -148,6 +149,8 @@ export function PrizeNftCard({ raw, enriched, loading, size = 'regular' }: Prize
           <img
             src={image}
             alt={nftName}
+            width={imagePx}
+            height={imagePx}
             className="h-full w-full object-cover"
             onError={(e) => {
               (e.target as HTMLImageElement).style.display = 'none';
