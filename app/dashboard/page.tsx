@@ -110,6 +110,36 @@ interface HistoryResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Prize claim status — pulled from /api/user/prize-status which queries the
+// LazyLotto dApp for prizes currently sitting in the contract waiting for the
+// user's EOA to claim them. "Claimed" is derived (totalWon - pending). The
+// agent's internal HBAR/LAZY balance is a SEPARATE concept — that tracks
+// deposits the user made for the agent to spend, and is never incremented
+// by prizes. See the "Pending claim" panel below for the user-facing
+// explanation.
+// ---------------------------------------------------------------------------
+
+type PrizeStatusResponse =
+  | {
+      available: true;
+      pending: {
+        count: number;
+        byToken: Record<string, number>;
+        nftCount: number;
+        nfts: { token: string; hederaId: string; serials: number[] }[];
+      };
+      totalWon: {
+        byToken: Record<string, number>;
+        nftCount: number;
+      };
+      claimed: {
+        byToken: Record<string, number>;
+        nftCount: number;
+      };
+    }
+  | { available: false; reason: string };
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -117,6 +147,16 @@ function tokenSymbol(tokenKey: string): string {
   if (tokenKey.toLowerCase() === 'hbar') return 'HBAR';
   return tokenKey;
 }
+
+/**
+ * Public dApp URL for the user's claim flow. Mainnet vs testnet is
+ * decided at build time from NEXT_PUBLIC_HEDERA_NETWORK (set in
+ * next.config.mjs from the same env var the agent uses).
+ */
+const DAPP_URL =
+  process.env.NEXT_PUBLIC_HEDERA_NETWORK === 'mainnet'
+    ? 'https://dapp.lazysuperheroes.com'
+    : 'https://testnet-dapp.lazysuperheroes.com';
 
 function formatAmount(amount: number): string {
   return amount.toLocaleString(undefined, {
@@ -248,6 +288,12 @@ export default function DashboardPage() {
   // (when funded) or the empty-state ribbon's Step 01 (when not).
   const [topUpOpen, setTopUpOpen] = useState(false);
 
+  // Prize claim state — populated from /api/user/prize-status. Null
+  // until first fetch resolves; { available: false } if the dApp MCP
+  // query failed (we still render the dashboard, just without the
+  // pending-claim panel). Refetched on mount and after every play.
+  const [prizeStatus, setPrizeStatus] = useState<PrizeStatusResponse | null>(null);
+
   // Public agent stats (for trust panel + operational status banner)
   interface PublicStats {
     agentName: string;
@@ -359,6 +405,26 @@ export default function DashboardPage() {
     void loadStatus({ Authorization: `Bearer ${token}` });
   }, [loadStatus, router]);
 
+  // Prize claim fetch — extracted as its own callback so we can call it
+  // on mount AND after every play (a winning play creates new pending
+  // prizes that get reassigned to the user's EOA in phase 5). Soft-
+  // fails: a dApp MCP timeout just leaves prizeStatus null, which the
+  // panel reads as "claim status unavailable" without breaking the
+  // rest of the dashboard.
+  const loadPrizeStatus = useCallback(
+    async (headers: { Authorization: string }) => {
+      try {
+        const res = await fetch('/api/user/prize-status', { headers });
+        if (!res.ok) return;
+        const data = (await res.json()) as PrizeStatusResponse;
+        setPrizeStatus(data);
+      } catch {
+        /* silent — non-critical enrichment */
+      }
+    },
+    [],
+  );
+
   // Check for auth token on mount, then fetch data independently.
   //
   // Mount-once guard: this effect should only run on first mount, not
@@ -393,6 +459,11 @@ export default function DashboardPage() {
     void (async () => {
       await loadStatus(headers);
     })();
+
+    // Prize claim status — independent of status/history. Calls the
+    // dApp MCP, so it's potentially slower, but the result lands in
+    // its own state slot and only affects the Pending Claim panel.
+    void loadPrizeStatus(headers);
 
     void (async () => {
       try {
@@ -737,6 +808,12 @@ export default function DashboardPage() {
           /* silent */
         }
       })();
+
+      // Refetch pending prize status so a fresh win shows up in the
+      // panel immediately. The contract reassigned the prize to the
+      // user's EOA in phase 5, so the dApp MCP query will already
+      // see it.
+      void loadPrizeStatus({ Authorization: `Bearer ${token}` });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       toast(`Play failed: ${message}`, { variant: 'error' });
@@ -745,7 +822,7 @@ export default function DashboardPage() {
       setPlayElapsedMs(0);
       setPlayLoading(false);
     }
-  }, [router, toast]);
+  }, [router, toast, loadPrizeStatus]);
 
 
   // --- Derived performance data ---
@@ -1515,6 +1592,126 @@ export default function DashboardPage() {
             play it. --- */}
         <div className="space-y-10">
 
+          {/* ---- Pending Claim panel ───────────────────────────
+               Shows prizes the user has won via the agent that are
+               currently sitting in the LazyLotto contract waiting
+               for them to claim from their EOA. Sourced from
+               /api/user/prize-status which queries the dApp MCP.
+
+               IMPORTANT user-education: prizes are NOT held in the
+               agent's internal balance. The agent's hero pot is for
+               funds the user has deposited for the agent to spend.
+               When the user wins, the dApp contract reassigns the
+               prize to their EOA, but no HBAR/tokens/NFTs actually
+               move on Hedera until the user clicks Claim on the
+               dApp themselves. This panel is the dashboard's
+               primary place to make that distinction visible.
+
+               Render rules:
+                 - Hide entirely until prizeStatus is non-null
+                 - If available=false, hide (soft failure)
+                 - If pending count = 0 AND total claimed = 0, hide
+                   (clean slate, no need to confuse with empty data)
+                 - Otherwise render with pending front and centre,
+                   claimed as a smaller historical readout
+               --- */}
+          {prizeStatus &&
+            prizeStatus.available &&
+            (prizeStatus.pending.count > 0 ||
+              Object.keys(prizeStatus.claimed.byToken).length > 0 ||
+              prizeStatus.claimed.nftCount > 0) && (
+            <ComicPanel label="PRIZE CLAIM" halftone="none">
+              <div className="px-5 pt-6 pb-5">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <p className="label-caps-brand-lg mb-2">
+                      Pending claim
+                    </p>
+                    <h2 className="heading-1 text-foreground">
+                      {prizeStatus.pending.count > 0
+                        ? 'Waiting for you on the dApp'
+                        : 'Nothing to claim right now'}
+                    </h2>
+                    <p className="mt-2 max-w-prose text-sm text-muted">
+                      Prizes from the agent are held by the LazyLotto
+                      contract. Your agent pot above is your{' '}
+                      <em>play money</em> — prizes never go into it.
+                      To collect what you&apos;ve won, claim them on
+                      the dApp with the same wallet you signed in
+                      with.
+                    </p>
+                  </div>
+                  {prizeStatus.pending.count > 0 && (
+                    <a
+                      href={`${DAPP_URL}/profile`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="btn-primary-sm shrink-0"
+                    >
+                      Claim on dApp →
+                    </a>
+                  )}
+                </div>
+
+                {/* Pending breakdown — only when there's actually
+                    something pending. Tokens listed first, NFT
+                    count after. */}
+                {prizeStatus.pending.count > 0 && (
+                  <div className="mt-5 flex flex-wrap gap-x-6 gap-y-2 border-t border-brand/20 pt-4">
+                    {Object.entries(prizeStatus.pending.byToken).map(
+                      ([token, amount]) => (
+                        <div key={token}>
+                          <p className="label-caps mb-1">
+                            {tokenSymbol(token)}
+                          </p>
+                          <p className="num-tabular type-body text-brand">
+                            {formatAmount(amount)}
+                          </p>
+                        </div>
+                      ),
+                    )}
+                    {prizeStatus.pending.nftCount > 0 && (
+                      <div>
+                        <p className="label-caps mb-1">NFTs</p>
+                        <p className="num-tabular type-body text-brand">
+                          {prizeStatus.pending.nftCount}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Claimed historical totals — derived from
+                    (totalWon - pending), shown as a smaller second
+                    row so users can see lifetime context. Only
+                    rendered if there's anything claimed at all. */}
+                {(Object.keys(prizeStatus.claimed.byToken).length > 0 ||
+                  prizeStatus.claimed.nftCount > 0) && (
+                  <div className="mt-4 border-t border-secondary/40 pt-3">
+                    <p className="label-caps mb-1.5 text-muted">
+                      Already claimed
+                    </p>
+                    <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted">
+                      {Object.entries(prizeStatus.claimed.byToken).map(
+                        ([token, amount]) => (
+                          <span key={token} className="num-tabular">
+                            {formatAmount(amount)} {tokenSymbol(token)}
+                          </span>
+                        ),
+                      )}
+                      {prizeStatus.claimed.nftCount > 0 && (
+                        <span className="num-tabular">
+                          {prizeStatus.claimed.nftCount} NFT
+                          {prizeStatus.claimed.nftCount === 1 ? '' : 's'}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </ComicPanel>
+          )}
+
           {/* ---- Play History — wrapped as a ComicPanel so the
                vocabulary carries from the hero to the rest of the
                page. Halftone "none" because it's data-dense and a
@@ -1613,20 +1810,32 @@ export default function DashboardPage() {
                               : 'border-transparent hover:border-brand/30 hover:bg-brand/5'
                           }`}
                         >
-                          {/* Header row: timestamp in pixel font + win/spent readout */}
+                          {/* Header row: timestamp in pixel font + win/spent readout.
+                              The "+X won" headline used to read like a balance credit,
+                              which confused users into thinking the agent had received
+                              the prize for them. Reframed: "X won" with no sign + a
+                              "claim on dApp" subtitle so the user knows the prize is
+                              waiting for them in the contract, not in their pot. */}
                           <div className="mb-2 flex items-start justify-between gap-3">
                             <span className="font-pixel text-[9px] uppercase tracking-wider text-muted">
                               {formatTimestamp(s.timestamp)}
                             </span>
-                            <span
-                              className={`num-tabular heading-2 ${
-                                isWin ? 'text-brand' : 'text-muted'
-                              }`}
-                            >
-                              {isWin
-                                ? `+${formatAmount(s.totalPrizeValue)} won`
-                                : `${formatAmount(s.totalSpent)} spent`}
-                            </span>
+                            <div className="flex flex-col items-end">
+                              <span
+                                className={`num-tabular heading-2 ${
+                                  isWin ? 'text-brand' : 'text-muted'
+                                }`}
+                              >
+                                {isWin
+                                  ? `${formatAmount(s.totalPrizeValue)} won`
+                                  : `${formatAmount(s.totalSpent)} spent`}
+                              </span>
+                              {isWin && (
+                                <span className="font-pixel text-[8px] uppercase tracking-wider text-muted">
+                                  claim on dApp
+                                </span>
+                              )}
+                            </div>
                           </div>
 
                           {/* Pool badges — sharp corners, pixel-font */}

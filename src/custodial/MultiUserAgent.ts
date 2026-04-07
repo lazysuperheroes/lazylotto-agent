@@ -785,6 +785,64 @@ export class MultiUserAgent {
     return this.store.getPlaySessionsForUser(userId);
   }
 
+  /**
+   * Query the dApp for prizes currently sitting in the LazyLotto contract
+   * waiting for the user's EOA to claim them.
+   *
+   * Background: when a user wins a prize via the agent, LottoAgent's
+   * phase 5 (`transferPendingPrizes`) reassigns the contract's internal
+   * `pendingPrizes` mapping from the agent's wallet to the user's EOA.
+   * No HBAR/tokens/NFTs actually move on Hedera at that point — they
+   * stay in the contract's escrow until the user calls `claimAllPrizes`
+   * from the dApp themselves.
+   *
+   * That means the dApp MCP's `getUserState(eoaAddress)` returns exactly
+   * what we want for "show the user what's waiting for them": prizes
+   * that have been reassigned to their EOA but haven't been claimed.
+   *
+   * The agent's internal HBAR/LAZY balance is a separate concept — that
+   * tracks deposits the user has made to the agent for it to spend on
+   * their behalf. It is NEVER incremented by prizes; that's a common
+   * point of confusion. See docs/testnet-user-guide.md and the Recent
+   * Plays panel relabel for the user-facing explanation.
+   *
+   * Returns null if the dApp MCP query fails (network, dApp down, etc.)
+   * — callers should treat this as "claim status unavailable" and not
+   * cascade the failure to the rest of the dashboard.
+   */
+  async getPendingPrizesForUser(userId: string): Promise<{
+    pendingPrizesCount: number;
+    pendingPrizes: Array<{
+      poolId: number;
+      asNFT: boolean;
+      fungiblePrize: { token: string; amount: number };
+      nfts: Array<{ token: string; hederaId: string; serials: number[] }>;
+    }>;
+  } | null> {
+    const user = this.store.getUser(userId);
+    if (!user) throw new UserNotFoundError(userId);
+
+    try {
+      // Lazy import to keep MCP client out of the agent's hot path —
+      // it pulls in the @modelcontextprotocol/sdk client transport
+      // which is non-trivial.
+      const { getUserState } = await import('../mcp/client.js');
+      const state = await getUserState(user.eoaAddress);
+      return {
+        pendingPrizesCount: state.pendingPrizesCount,
+        pendingPrizes: state.pendingPrizes,
+      };
+    } catch (err) {
+      logger.warn('getPendingPrizesForUser dApp query failed', {
+        component: 'MultiUserAgent',
+        event: 'pending_prizes_query_failed',
+        userId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
   // ── Per-user Mutex ─────────────────────────────────────────────
   //
   // Simple promise-based mutex keyed by userId. Ensures that play
