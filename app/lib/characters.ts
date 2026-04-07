@@ -52,6 +52,15 @@ export interface LshCharacter {
   lazyLines: string[];
   /** Quips when the operator has paused the agent (kill switch). */
   nappingLines: string[];
+  /**
+   * In-character lines shown in the speech bubble while a play session
+   * is in flight. The play flow takes 5-15 seconds (deposit poll +
+   * Hedera consensus + prize transfer) and the user previously had no
+   * feedback during that wait. These keep the character "talking" so
+   * the dashboard feels alive instead of frozen. Picked once at play
+   * start and held for the duration.
+   */
+  playingLines: string[];
 }
 
 // Build a character with both image sizes from a single asset name.
@@ -64,6 +73,7 @@ function make(
   readyLines: string[],
   lazyLines: string[],
   nappingLines: string[],
+  playingLines: string[],
 ): LshCharacter {
   return {
     name,
@@ -75,6 +85,7 @@ function make(
     readyLines,
     lazyLines,
     nappingLines,
+    playingLines,
   };
 }
 
@@ -89,6 +100,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["Alright — I'm loaded. Hit Play whenever you're feeling lucky.", 'Ready when you are. Say the word and I roll.'],
     ['Aadan has this under control. Go grab a coffee.', 'Aadan will handle it. That\u2019s what he\u2019s here for.', 'Aadan says: sit back. Relax. Let the pro work.'],
     ['Aadan is taking five. Back soon.', 'Aadan is resting. Orders from the boss.'],
+    ['Aadan is on it. Smooth and steady.', 'Aadan says: this is the fun part. Let me work.'],
   ),
   make(
     'Jazz',
@@ -99,6 +111,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["The horns are warmed up. Hit Play and let's make some noise.", "Ready to jam. Tap Play when you feel the beat."],
     ['Jazz is freestyling. Don\u2019t interrupt the groove.', 'Jazz has you covered. Go put your feet up.', 'Jazz is in the zone. You can nap.'],
     ['Jazz is on break. The band rests between sets.', 'Jazz is paused. Tune back in soon.'],
+    ['Jazz is in the groove. Let the music play out.', 'Jazz is riffing on the pools. Don\u2019t break the rhythm.'],
   ),
   make(
     'Gordo',
@@ -109,6 +122,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["Pot's loaded. Hit Play and let's make some noise.", "Chips are up. Ring the bell when you're ready, boss."],
     ['Gordo\u2019s got this. Seriously, go do nothing.', 'Gordo says: \u201Cyou rest, I play.\u201D That\u2019s the deal.', 'Gordo is on it. Doing things is overrated anyway.'],
     ['Gordo is snoozing. The boss said so.', 'Gordo is off the clock. Back in a bit.'],
+    ['Gordo\u2019s at the table. Eyes on the prize.', 'Gordo\u2019s swinging big. Hold on tight.'],
   ),
   make(
     'Korgg',
@@ -119,6 +133,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["Korgg ready. Korgg big. Hit button. Korgg smash.", "Korgg stretched. Korgg waiting. Say go, Korgg go."],
     ['Korgg handle lottery. You handle nap.', 'Korgg strong. Korgg play. You rest.', 'Korgg is working. Korgg is also napping. Korgg does both.'],
     ['Korgg sleep now. Korgg play later.', 'Korgg on break. Do not poke Korgg.'],
+    ['Korgg play now. Korgg focused. You wait.', 'Korgg smash odds. Korgg need quiet.'],
   ),
   make(
     'Nobody',
@@ -129,6 +144,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["Nobody is ready. Hit Play and nobody will complain.", "The vault is stocked. Nobody is waiting for your signal."],
     ['Nobody is working on it. You wouldn\u2019t notice anyway.', 'Nobody has it covered. As usual.', 'Nobody suggests you go do nothing. It\u2019s what Nobody does best.'],
     ['Nobody is off. Nobody is watching. Nobody will be back.', 'Nobody rests. Nobody waits.'],
+    ['Nobody is doing the thing. As expected.', 'Nobody handles the rolls. Discreet as always.'],
   ),
   make(
     'Kjell',
@@ -139,6 +155,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["War chest filled. The HBARBarian is itching. Hit Play and let me fight.", "The axe is sharpened. Say the word, raider."],
     ['Kjell battles for you. Rest in the mead hall.', 'The HBARBarian fights while you feast.', 'Kjell says: warriors also need naps.'],
     ['Kjell is in the longhouse. Back to battle later.', 'The HBARBarian rests his axe. For now.'],
+    ['The HBARBarian raids. Hold the line.', 'Kjell swings the axe. The pools tremble.'],
   ),
   make(
     'Crawford',
@@ -149,6 +166,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["All gassed up. Hit Play when you're feeling it, friend.", "Crawford is ready. Smooth call away."],
     ['Crawford\u2019s got this. Trust the process.', 'Crawford is cool. You be cool. Go do nothing.', 'Crawford says: effort is for amateurs.'],
     ['Crawford is off the clock. Catch him later.', 'Crawford is resting. Cool guys need cool downs.'],
+    ['Crawford is working it. Keep cool.', 'Crawford is in the zone. Smooth as ever.'],
   ),
   // ── Gen 1 — Lazy Superheroes (Female) ─────────────────────────
   make(
@@ -160,6 +178,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["The oven's hot. Hit Play and let Ginnie bake.", "Ingredients ready. Ginnie is waiting on the order."],
     ['Ginnie has it all figured out. Have a pastry.', 'Ginnie is on the case. You earned a break.', 'Ginnie says: the treat is you not having to try.'],
     ['Ginnie is on break. Bakery closed for now.', 'Ginnie is resting. Back when the oven\u2019s hot.'],
+    ['Ginnie is baking up something good. Patience, darling.', 'The oven\u2019s hot. Ginnie watches the timer.'],
   ),
   make(
     'Tina Ingvild',
@@ -170,6 +189,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["The treasury is stocked. Give the order and the Red Queen plays.", "The court awaits your command. Hit Play, and it is done."],
     ['The Red Queen works. The subject rests. That\u2019s the arrangement.', 'Tina commands the odds. You command the couch.', 'Tina says: a queen\u2019s work is never done \u2014 but yours is.'],
     ['The Red Queen is sleeping. Do not wake the queen.', 'Tina is taking counsel. Back soon.'],
+    ['The Red Queen plays. The court waits in silence.', 'Tina commands the wheels. Bow.'],
   ),
   make(
     'Virginia Lor',
@@ -180,6 +200,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["The stars are aligned. Say the word and Virginia begins.", "Virginia is ready. Tap Play to turn the wheel."],
     ['Virginia sees the path. You can stop looking.', 'Virginia has the map. Wander freely.', 'Virginia says: destiny is handled. Go rest.'],
     ['Virginia is meditating. The stars are quiet.', 'Virginia rests between omens.'],
+    ['Virginia walks the path. The stars are turning.', 'Virginia reads the pools. The vision unfolds.'],
   ),
   make(
     'Kanna Setsuko',
@@ -190,6 +211,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["Kanna has seen the outcome. It begins when you hit Play.", "The vision is ready. Kanna awaits your will."],
     ['Kanna saw this coming. Including your nap.', 'Kanna is reading the tea leaves. Go make more tea.', 'Kanna says: the vision shows you doing nothing. Honour it.'],
     ['Kanna is dreaming. Dreams are work too.', 'Kanna is offline. The aura rests.'],
+    ['Kanna foresaw this moment. The cards are turning.', 'Kanna is in the trance. The vision arrives soon.'],
   ),
   // ── Gen 2 — Lazy Super Villains ───────────────────────────────
   make(
@@ -201,6 +223,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["The scheme is set. Hit Play and let the chaos begin.", "Mala is ready. Give the signal, partner in crime."],
     ['Mala is scheming. Scheming takes time. Rest.', 'Mala handles the chaos. You handle the snacks.', 'Mala says: villainy is 99% waiting. Get good at it.'],
     ['Mala is plotting. Quietly. Do not interrupt.', 'Mala rests in the shadows. Back soon.'],
+    ['Mala is scheming. Beautiful, terrible scheming.', 'Mala spins the chaos. The rewards follow.'],
   ),
   make(
     'Soul',
@@ -211,6 +234,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["Soul is hungry and ready. Unleash me.", "The hunt is prepared. Sound the horn when you will."],
     ['Soul hunts for you. You hunt for the couch.', 'Soul roars. You yawn. Balance.', 'Soul says: even the fiercest beasts nap most of the day. You\u2019ve earned yours.'],
     ['Soul is in the den. Do not wake the beast.', 'Soul sleeps. The hunt waits.'],
+    ['Soul stalks the pools. The hunt is on.', 'Soul roars at the odds. The kill is close.'],
   ),
   make(
     'Blood',
@@ -221,6 +245,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["The night calls. Blood is thirsty. Hit Play.", "The vessel brims. Blood awaits the signal."],
     ['Blood works at night. You rest by day. A fair trade.', 'Blood is patient. So should you be. Nap.', 'Blood says: immortality grants excellent work-life balance.'],
     ['Blood rests in the crypt. Back by moonlight.', 'Blood is dormant. The hunger waits.'],
+    ['Blood moves through the night. Quietly.', 'Blood drinks deep from the pools. Wait.'],
   ),
   make(
     'E-Xterm',
@@ -231,6 +256,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["State: ready. Input buffer full. Call Play() to execute.", "All checks passed. E-Xterm is ready to run on trigger."],
     ['E-Xterm is running calculations. Human rest cycle recommended.', 'E-Xterm optimized your leisure time. Use it.', 'E-Xterm says: /* human, sleep. I got this. */'],
     ['E-Xterm is in standby. CPU idle.', 'E-Xterm rests. Cooling cycle engaged.'],
+    ['/* play() running... await results */', 'E-Xterm computing optimal outcomes. CPU at 99%.'],
   ),
   make(
     'Gabriel',
@@ -241,6 +267,7 @@ export const LSH_CHARACTERS: LshCharacter[] = [
     ["The Cobrastra is coiled. Give the ssstrike order.", "Venom ready. Hit Play and the ssserpent moves."],
     ['Gabriel coils in patience. The serpent waits. So can you.', 'The Cobrastra strikes when ready. Until then, sssssleep.', 'Gabriel says: patient predators are the successful ones.'],
     ['Gabriel is shedding. It takes time.', 'The Cobrastra rests in the nest. Back soon.'],
+    ['The Cobrastra ssstrikes. Patience, friend.', 'Gabriel coils, then ssstrikes. The venom works.'],
   ),
 ];
 

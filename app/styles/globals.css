@@ -716,6 +716,92 @@ body {
   opacity: 0.5;
 }
 
+/* ─────────────────────────────────────────────────────────────
+   Play progress shimmer
+   ─────────────────────────────────────────────────────────────
+   While a play session is in flight (5-15s of MCP calls + Hedera
+   consensus + prize transfer), the PLAY button gets a shimmer
+   sweep across its surface so the user has a constant motion cue
+   that the agent is working. Pure CSS animation — no JS timer
+   for the animation itself, only for the phase message rotation.
+
+   Plus a thin progress bar that fills up over an estimated
+   duration, then loops. Width-based animation rather than
+   transform because we want the bar to actually feel like it's
+   filling rather than sliding.
+
+   Both wrapped in prefers-reduced-motion guards so vestibular
+   sensitivity users get a static "working" state instead.
+   ───────────────────────────────────────────────────────────── */
+
+@keyframes playShimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes playProgress {
+  0% {
+    width: 5%;
+  }
+  100% {
+    width: 100%;
+  }
+}
+
+.play-shimmer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.play-shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.15) 50%,
+    transparent 100%
+  );
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .play-shimmer::after {
+    animation: playShimmer 1.6s ease-in-out infinite;
+  }
+}
+
+.play-progress-bar {
+  position: relative;
+  height: 4px;
+  width: 100%;
+  background-color: rgba(229, 168, 0, 0.15);
+  overflow: hidden;
+  border: 2px solid var(--color-brand);
+  border-top: none;
+}
+
+.play-progress-bar > .play-progress-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background-color: var(--color-brand);
+  width: 5%;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .play-progress-bar > .play-progress-fill {
+    animation: playProgress 12s cubic-bezier(0.15, 0.9, 0.25, 1) forwards;
+  }
+}
+
 /* Tabular numerals — locks number widths so displaying changing
    balances doesn't cause the hero number to jitter pixel by pixel. */
 .num-tabular {

@@ -236,6 +236,13 @@ export default function DashboardPage() {
   const [withdrawToken, setWithdrawToken] = useState('hbar');
   const [withdrawLoading, setWithdrawLoading] = useState(false);
   const [playLoading, setPlayLoading] = useState(false);
+  // Play session progress — milliseconds since handlePlay started.
+  // Updated every 250ms while a play is in flight so the button can
+  // show "elapsed" time and rotate through phase messages. Reset to
+  // 0 when the play resolves. The user previously stared at a static
+  // "Playing…" button for 5-15s with no signal that work was happening;
+  // this gives them concrete time-based feedback. */
+  const [playElapsedMs, setPlayElapsedMs] = useState(0);
   // Top-up modal — replaces the old in-page Fund Your Account
   // collapsible. Triggered from the hero metadata "Top up" link
   // (when funded) or the empty-state ribbon's Step 01 (when not).
@@ -642,6 +649,15 @@ export default function DashboardPage() {
       return;
     }
     setPlayLoading(true);
+    // Start the elapsed-time ticker. 250ms granularity is fine — the
+    // user just needs to see the seconds counter increment so they
+    // know time is moving. The interval is cleaned up in the finally
+    // block (and a safety useEffect cleanup below in case unmount).
+    setPlayElapsedMs(0);
+    const playStartedAt = Date.now();
+    const elapsedTicker = window.setInterval(() => {
+      setPlayElapsedMs(Date.now() - playStartedAt);
+    }, 250);
     try {
       const res = await fetch('/api/user/play', {
         method: 'POST',
@@ -725,6 +741,8 @@ export default function DashboardPage() {
       const message = err instanceof Error ? err.message : String(err);
       toast(`Play failed: ${message}`, { variant: 'error' });
     } finally {
+      window.clearInterval(elapsedTicker);
+      setPlayElapsedMs(0);
       setPlayLoading(false);
     }
   }, [router, toast]);
@@ -896,17 +914,56 @@ export default function DashboardPage() {
     !!status && sessions.length === 0 && !hasPlayableBalance;
   // Pick a character line deterministically per session so the same
   // page refresh shows the same quip (but different sessions rotate).
+  // While a play is in flight, override with a playing line so the
+  // character keeps "talking" during the wait — the user previously
+  // had a static speech bubble while the backend churned for 5-15s.
   const characterLine = status
-    ? agentClosed
-      ? pickLine(character.nappingLines, status.userId)
-      : isFirstRun
-        ? pickLine(character.introLines, status.userId)
-        : hasPlayableBalance && sessions.length === 0
-          ? pickLine(character.readyLines, status.userId)
-          : hasPlayableBalance
-            ? pickLine(character.lazyLines, status.userId)
-            : pickLine(character.taglines, status.userId)
+    ? playLoading
+      ? pickLine(character.playingLines, status.userId + '-play')
+      : agentClosed
+        ? pickLine(character.nappingLines, status.userId)
+        : isFirstRun
+          ? pickLine(character.introLines, status.userId)
+          : hasPlayableBalance && sessions.length === 0
+            ? pickLine(character.readyLines, status.userId)
+            : hasPlayableBalance
+              ? pickLine(character.lazyLines, status.userId)
+              : pickLine(character.taglines, status.userId)
     : '';
+
+  // ── Play progress phase derivation ─────────────────────────
+  // The /api/user/play POST takes 5-15s typically (deposit poll +
+  // Hedera consensus + prize transfer). We can't get progress events
+  // from a single POST, so we fake it with a time-based phase rotation
+  // — the user gets a sense of "what's happening now" instead of a
+  // static "Playing…" label that may not move for 10 seconds.
+  //
+  // Each phase has a button label. Time bands tuned from observation
+  // of the actual play flow:
+  //   0-2s   "Waking up the agent…"
+  //   2-5s   "Picking pools…"
+  //   5-10s  "Pulling the lever…"
+  //   10-15s "Watching the wheels…"
+  //   15s+   "Hedera consensus is happening…"
+  // After 15s the last phase sticks. Worst case the user waits longer
+  // than expected but at least they know it's a blockchain timing
+  // issue, not a frozen UI.
+  const PLAY_PHASES: { atMs: number; label: string }[] = [
+    { atMs: 0, label: 'Waking up the agent…' },
+    { atMs: 2000, label: 'Picking pools…' },
+    { atMs: 5000, label: 'Pulling the lever…' },
+    { atMs: 10000, label: 'Watching the wheels…' },
+    { atMs: 15000, label: 'Hedera consensus is happening…' },
+  ];
+  const currentPlayPhase = (() => {
+    if (!playLoading) return null;
+    let phase = PLAY_PHASES[0]!;
+    for (const p of PLAY_PHASES) {
+      if (playElapsedMs >= p.atMs) phase = p;
+    }
+    return phase;
+  })();
+  const playElapsedSec = Math.floor(playElapsedMs / 1000);
 
   // Sessions to display (capped at 10 unless expanded)
   const displayedSessions = showAll ? sessions : sessions.slice(0, 10);
@@ -1228,29 +1285,73 @@ export default function DashboardPage() {
                 {/* ── Primary action: PLAY ─────────────────────────── */}
                 {hasPlayableBalance ? (
                   <div className="mt-6">
-                    <button
-                      type="button"
-                      onClick={handlePlay}
-                      disabled={playLoading || agentClosed}
-                      aria-disabled={playLoading || agentClosed ? 'true' : undefined}
-                      aria-describedby={agentClosed ? 'agent-status-banner' : undefined}
-                      className="btn-primary"
-                      title={
-                        agentClosed
-                          ? 'Agent is temporarily closed to new plays'
-                          : 'Run a play session now'
-                      }
-                    >
-                      {playLoading ? 'Playing…' : 'Play'}
-                    </button>
-                    <p className="mt-3 text-center font-pixel text-[9px] uppercase tracking-wider text-muted">
-                      Let the agent work. You can go back to doing nothing.
-                    </p>
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={handlePlay}
+                        disabled={playLoading || agentClosed}
+                        aria-disabled={playLoading || agentClosed ? 'true' : undefined}
+                        aria-describedby={
+                          agentClosed
+                            ? 'agent-status-banner'
+                            : playLoading
+                              ? 'play-progress-status'
+                              : undefined
+                        }
+                        className="btn-primary"
+                        title={
+                          agentClosed
+                            ? 'Agent is temporarily closed to new plays'
+                            : 'Run a play session now'
+                        }
+                      >
+                        {playLoading && currentPlayPhase
+                          ? currentPlayPhase.label
+                          : 'Play'}
+                        {/* Shimmer overlay — pure CSS sweep across the
+                            button surface during play. Only renders when
+                            actively playing so the static state stays calm. */}
+                        {playLoading && (
+                          <span
+                            className="play-shimmer"
+                            aria-hidden="true"
+                          />
+                        )}
+                      </button>
+                      {/* Progress bar — a thin gold fill below the button
+                          that animates from 5% to 100% over an estimated
+                          12s, then sticks at 100% if the play takes
+                          longer. Visual motion + concrete time signal. */}
+                      {playLoading && (
+                        <div className="play-progress-bar" aria-hidden="true">
+                          <span className="play-progress-fill" />
+                        </div>
+                      )}
+                    </div>
+                    {playLoading ? (
+                      <p
+                        id="play-progress-status"
+                        className="mt-3 text-center font-pixel text-[9px] uppercase tracking-wider text-brand"
+                        role="status"
+                        aria-live="polite"
+                        aria-atomic="true"
+                      >
+                        {currentPlayPhase?.label}
+                        <span className="ml-2 text-muted">
+                          · {playElapsedSec}s elapsed
+                        </span>
+                      </p>
+                    ) : (
+                      <p className="mt-3 text-center font-pixel text-[9px] uppercase tracking-wider text-muted">
+                        Let the agent work. You can go back to doing nothing.
+                      </p>
+                    )}
                     <div className="mt-4 flex justify-center">
                       <button
                         type="button"
                         onClick={() => setWithdrawOpen(true)}
-                        className="label-caps transition-colors hover:text-brand"
+                        disabled={playLoading}
+                        className="label-caps transition-colors hover:text-brand disabled:opacity-50"
                       >
                         ← Or withdraw funds
                       </button>
