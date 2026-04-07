@@ -174,10 +174,10 @@ Ask Claude: "Withdraw 1 HBAR from my account"
 ```
 
 Verify:
-- [ ] Calls `multi_user_withdraw`
-- [ ] Returns withdrawal record with transaction ID
-- [ ] Check [HashScan](https://hashscan.io/testnet) for the withdrawal transaction
-- [ ] Balance decreased by withdrawal amount
+- [X] Calls `multi_user_withdraw`
+- [X] Returns withdrawal record with transaction ID
+- [X] Check [HashScan](https://hashscan.io/testnet) for the withdrawal transaction
+- [X] Balance decreased by withdrawal amount
 
 ---
 
@@ -188,18 +188,18 @@ Switch back to your **operator wallet** token in Claude Desktop.
 ```
 Ask Claude: "Show me the operator balance"
 ```
-- [ ] Shows rake collected, gas spent, net profit
+- [X] Shows rake collected, gas spent, net profit
 
 ```
 Ask Claude: "Run a reconciliation check"
 ```
-- [ ] Returns ReconciliationResult with on-chain vs ledger comparison
-- [ ] `solvent: true` (no shortfall)
+- [X] Returns ReconciliationResult with on-chain vs ledger comparison
+- [X] `solvent: true` (no shortfall)
 
 ```
 Ask Claude: "Show dead letters"
 ```
-- [ ] Returns dead letter queue (may be empty)
+- [X] Returns dead letter queue (may be empty)
 
 ---
 
@@ -211,8 +211,8 @@ curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/admin/reconcile \
   -H "Authorization: Bearer sk_OPERATOR_TOKEN" | jq .
 ```
 
-- [ ] Returns ReconciliationResult JSON
-- [ ] `solvent: true`
+- [X] Returns ReconciliationResult JSON
+- [X] `solvent: true`
 
 ---
 
@@ -228,7 +228,7 @@ curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"operator_balance","arguments":{"auth_token":"sk_USER_TOKEN"}},"id":1}' | jq .
 ```
 
-- [ ] Returns error: "Access denied"
+- [X] Returns error: "Access denied"
 
 ```bash
 # User trying to access another user's data
@@ -238,7 +238,7 @@ curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"multi_user_play","arguments":{"userId":"some-other-user","auth_token":"sk_USER_TOKEN"}},"id":1}' | jq .
 ```
 
-- [ ] Returns error: "Access denied"
+- [X] Returns error: "Access denied"
 
 Without any token:
 
@@ -249,7 +249,7 @@ curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"multi_user_status","arguments":{}},"id":1}' | jq .
 ```
 
-- [ ] Returns error: "Authentication required"
+- [X] Returns error: "Authentication required"
 
 ---
 
@@ -275,8 +275,25 @@ for i in $(seq 1 35); do
 done
 ```
 
-- [ ] Requests 1-30 return 200
-- [ ] Requests 31+ return 429
+- [X] Requests 1-30 return 200
+- [X] Requests 31+ return 429
+
+Each response now includes diagnostic headers for debugging and client
+backoff logic:
+
+```
+X-RateLimit-Limit:         30
+X-RateLimit-Remaining:     <remaining in current window>
+X-RateLimit-Count:         <current count>
+X-RateLimit-Ttl:           <seconds until window resets>
+X-RateLimit-Expire-Called: <true on the 1st request of a fresh window>
+X-RateLimit-Mode:          upstash | memory
+X-RateLimit-Identity:      <token prefix or IP used for keying>
+```
+
+To verify Upstash is wired correctly, look for `X-RateLimit-Mode: upstash`
+in any single response. `memory` means env vars aren't set and limits
+silently degrade to per-Lambda.
 
 ---
 
@@ -284,9 +301,9 @@ done
 
 Visit /auth and inspect the character image in DevTools (Network tab).
 
-- [ ] Image loads from Filebase CDN (lazysuperheroes.myfilebase.com)
-- [ ] Image dimensions are optimized (256x256 or similar)
-- [ ] No broken image placeholders
+- [X] Image loads from Filebase CDN (lazysuperheroes.myfilebase.com)
+- [X] Image dimensions are optimized (256x256 or similar)
+- [X] No broken image placeholders
 
 ---
 
