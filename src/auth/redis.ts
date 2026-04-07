@@ -115,6 +115,22 @@ type RedisGlobals = {
 
 const globalForRedis = globalThis as unknown as RedisGlobals;
 
+/**
+ * Synchronously check if Upstash Redis is configured in the environment.
+ *
+ * Used by route handlers to surface "memory" vs "upstash" mode in
+ * response headers for diagnostics — when rate limiting silently
+ * degrades to per-Lambda counters because Upstash isn't wired up,
+ * the only signal previously was a single warning at cold-start in
+ * Vercel function logs. This lets us check from the client side via
+ * a response header instead of poking Vercel env vars.
+ */
+export function isUpstashConfigured(): boolean {
+  const url = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
+  return Boolean(url && token);
+}
+
 /** Get or create the Redis client. Survives Next.js dev HMR. */
 export async function getRedis(): Promise<RedisLike> {
   if (globalForRedis.__lazylottoRedisClient__) {

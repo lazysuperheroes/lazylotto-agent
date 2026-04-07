@@ -17,7 +17,7 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { createMcpServer } from '../_lib/mcp';
 import { withStore } from '../_lib/withStore';
 import { staticCorsHeaders } from '../_lib/cors';
-import { getRedis, KEY_PREFIX } from '~/auth/redis';
+import { getRedis, isUpstashConfigured, KEY_PREFIX } from '~/auth/redis';
 
 // Process-level safety net for unhandled rejections from inside the
 // MCP SDK's async dispatch chain. The SDK's transport.handleRequest
@@ -67,20 +67,53 @@ const CORS_HEADERS = staticCorsHeaders('GET, POST, DELETE, OPTIONS');
 const MCP_RATE_LIMIT = 30;
 const MCP_RATE_WINDOW_SEC = 60;
 
-async function checkMcpRateLimit(request: Request): Promise<boolean> {
+interface RateLimitState {
+  /** True if within the limit, false if exceeded. */
+  allowed: boolean;
+  /** Current count after the increment. */
+  count: number;
+  /** "upstash" (cluster-wide) or "memory" (per-Lambda only). */
+  mode: 'upstash' | 'memory';
+  /** The identity used for keying — first 16 chars of token, IP, or 'unknown'. */
+  identity: string;
+}
+
+async function checkMcpRateLimit(request: Request): Promise<RateLimitState> {
   // Key by auth token if present, otherwise by IP
   const authHeader = request.headers.get('authorization');
   const identity = authHeader?.startsWith('Bearer ')
     ? authHeader.slice(7, 23) // first 16 chars of token (enough to distinguish)
     : request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
 
+  const mode: 'upstash' | 'memory' = isUpstashConfigured() ? 'upstash' : 'memory';
   const redis = await getRedis();
   const key = `${KEY_PREFIX.rateLimit}mcp:${identity}`;
   const count = await redis.incr(key);
   if (count === 1) {
     await redis.expire(key, MCP_RATE_WINDOW_SEC);
   }
-  return count <= MCP_RATE_LIMIT;
+  return {
+    allowed: count <= MCP_RATE_LIMIT,
+    count,
+    mode,
+    identity,
+  };
+}
+
+/**
+ * Build standard rate-limit headers + diagnostic headers so callers can
+ * see what mode the limiter is in. The mode header is critical for
+ * verifying that Upstash is actually wired up on Vercel — without it,
+ * limits silently degrade to per-Lambda counters and the test never
+ * trips because each request hits a fresh container.
+ */
+function rateLimitHeaders(state: RateLimitState): Record<string, string> {
+  return {
+    'X-RateLimit-Limit': String(MCP_RATE_LIMIT),
+    'X-RateLimit-Remaining': String(Math.max(0, MCP_RATE_LIMIT - state.count)),
+    'X-RateLimit-Mode': state.mode,
+    'X-RateLimit-Identity': state.identity,
+  };
 }
 
 export async function OPTIONS() {
@@ -97,15 +130,18 @@ export const POST = withStore(async (request: Request) => {
   // Each step is wrapped so we can attribute the failure to the right
   // layer if anything goes wrong. The withStore wrapper has its own
   // top-level catch as a safety net for anything we miss here.
+  let rateLimitState: RateLimitState | undefined;
   try {
     // Rate limit before doing any heavy work
-    if (!await checkMcpRateLimit(request)) {
+    rateLimitState = await checkMcpRateLimit(request);
+    if (!rateLimitState.allowed) {
       return new Response(
         JSON.stringify({ error: 'Rate limit exceeded. Try again shortly.' }),
         {
           status: 429,
           headers: {
             ...CORS_HEADERS,
+            ...rateLimitHeaders(rateLimitState),
             'Content-Type': 'application/json',
             'Retry-After': String(MCP_RATE_WINDOW_SEC),
           },
@@ -161,8 +197,24 @@ export const POST = withStore(async (request: Request) => {
       console.warn('[mcp] transport.close failed (non-fatal):', closeErr);
     }
 
+    // Attach rate limit diagnostic headers to the success response.
+    // The SDK builds the Response object so we have to clone it (or
+    // create a new one with the same body + status + merged headers).
+    // Headers are immutable on the original Response — clone is the
+    // safest path.
+    const headersWithRateLimit = new Headers(response.headers);
+    if (rateLimitState) {
+      const rl = rateLimitHeaders(rateLimitState);
+      for (const [k, v] of Object.entries(rl)) headersWithRateLimit.set(k, v);
+    }
+    const finalResponse = new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: headersWithRateLimit,
+    });
+
     // withStore wrapper guarantees store.flush() after this returns.
-    return response;
+    return finalResponse;
   } catch (err) {
     // Last in-route catch — log + return JSON. The withStore wrapper
     // has another safety net for anything that escapes even this.
