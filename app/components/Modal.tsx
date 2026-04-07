@@ -225,6 +225,12 @@ export function Modal({
         if (!locked) onClose();
       }}
     >
+      {/* The dialog itself wears the comic-book panel vocabulary —
+          sharp corners, brand-gold border, neo-brutalist offset
+          shadow. The previous incarnation used rounded-xl + soft
+          shadow-xl which contradicted everything inside it; now
+          the wrapper IS a ComicPanel-shaped surface so any modal
+          content inherits the right frame for free. */}
       <div
         ref={dialogRef}
         role="dialog"
@@ -234,13 +240,13 @@ export function Modal({
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
-        className={`w-full ${SIZE_CLASS[size]} rounded-xl border border-secondary bg-background p-6 shadow-xl outline-none`}
+        className={`w-full ${SIZE_CLASS[size]} border-2 border-brand bg-[var(--color-panel)] p-6 panel-shadow outline-none`}
       >
-        <h3 id={titleId} className="mb-2 font-heading text-lg text-foreground">
+        <h3 id={titleId} className="heading-1 mb-2 text-foreground">
           {title}
         </h3>
         {description && (
-          <p id={descId} className="mb-5 text-xs text-muted">
+          <p id={descId} className="type-caption mb-5">
             {description}
           </p>
         )}

@@ -38,7 +38,7 @@ const TONE_FILL: Record<NonNullable<ActionBurstProps['tone']>, string> = {
 
 const TONE_TEXT: Record<NonNullable<ActionBurstProps['tone']>, string> = {
   brand: 'text-background',
-  destructive: 'text-white',
+  destructive: 'text-foreground',
   success: 'text-background',
   foreground: 'text-background',
 };

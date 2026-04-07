@@ -1,5 +1,8 @@
 'use client';
 
+import { useState } from 'react';
+import Image from 'next/image';
+
 /**
  * PrizeNftCard — progressive-enhancement NFT card.
  *
@@ -113,6 +116,11 @@ export interface PrizeNftCardProps {
 export function PrizeNftCard({ raw, enriched, loading, size = 'regular' }: PrizeNftCardProps) {
   const isEnriched = Boolean(enriched);
   const badge = isEnriched ? VERIFICATION_BADGE[enriched!.verificationLevel] : null;
+  // Track image load failures so we can fall back to the "?" placeholder
+  // instead of leaving an empty box (the previous onError did
+  // `style.display = 'none'`, which silently dropped the image and left
+  // the bordered frame empty).
+  const [imageError, setImageError] = useState(false);
 
   // Display fields — enriched wins, falls back to raw values
   const nftName = enriched?.nftName ?? `${raw.token || 'NFT'} #${raw.serial}`;
@@ -131,8 +139,13 @@ export function PrizeNftCard({ raw, enriched, loading, size = 'regular' }: Prize
   const collectionTextClass = size === 'compact' ? 'text-[10px]' : 'text-[11px]';
   const containerClass =
     size === 'compact'
-      ? 'flex items-center gap-2 rounded border border-secondary bg-[#111113] p-1.5 pr-2'
-      : 'flex items-center gap-3 rounded-lg border border-secondary bg-[#111113] p-2 pr-3';
+      ? 'flex items-center gap-2 border border-secondary bg-[var(--color-panel)] p-1.5 pr-2'
+      : 'flex items-center gap-3 border border-secondary bg-[var(--color-panel)] p-2 pr-3';
+
+  // If we have an image URL AND it hasn't errored, render the image.
+  // Otherwise fall through to the "?" placeholder so the box never
+  // looks empty.
+  const showImage = Boolean(image) && !imageError;
 
   return (
     <div className={containerClass}>
@@ -141,26 +154,25 @@ export function PrizeNftCard({ raw, enriched, loading, size = 'regular' }: Prize
         href={serialUrl}
         target="_blank"
         rel="noopener noreferrer"
-        className={`relative block ${imageDim} shrink-0 overflow-hidden rounded bg-secondary`}
+        className={`relative block ${imageDim} shrink-0 overflow-hidden bg-[var(--color-panel)]`}
         title={`View #${raw.serial} on HashScan`}
       >
-        {image ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
+        {showImage ? (
+          <Image
             src={image}
             alt={nftName}
             width={imagePx}
             height={imagePx}
             className="h-full w-full object-cover"
-            onError={(e) => {
-              (e.target as HTMLImageElement).style.display = 'none';
-            }}
+            onError={() => setImageError(true)}
+            unoptimized
           />
         ) : (
           <div
-            className={`flex h-full w-full items-center justify-center ${
+            className={`flex h-full w-full items-center justify-center border border-secondary/40 ${
               loading ? 'animate-pulse' : ''
             } ${size === 'compact' ? 'text-sm' : 'text-lg'} text-muted`}
+            aria-label={imageError ? 'Image failed to load' : undefined}
           >
             ?
           </div>

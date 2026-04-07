@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import Image from 'next/image';
 import { useToast } from '../components/Toast';
 import { Modal } from '../components/Modal';
 import { ComicPanel } from '../components/ComicPanel';
@@ -10,6 +11,7 @@ import { SpeechBubble } from '../components/SpeechBubble';
 import { ActionBurst } from '../components/ActionBurst';
 import { GoldConfetti } from '../components/GoldConfetti';
 import { TopUpModal } from '../components/TopUpModal';
+import { SkeletonBox } from '../components/SkeletonBox';
 import {
   PrizeNftCard,
   type PrizeNftRef,
@@ -140,11 +142,9 @@ function formatTimestamp(iso: string): string {
 // ---------------------------------------------------------------------------
 // Skeleton — structural placeholder shown while the first payload loads.
 // Mirrors the real dashboard layout so the page doesn't reflow on arrival.
+// SkeletonBox itself lives in components/SkeletonBox.tsx so /account can
+// share the same placeholder treatment.
 // ---------------------------------------------------------------------------
-
-function SkeletonBox({ className = '' }: { className?: string }) {
-  return <div className={`animate-pulse rounded bg-secondary/50 ${className}`} />;
-}
 
 function DashboardSkeleton() {
   return (
@@ -155,53 +155,42 @@ function DashboardSkeleton() {
         <SkeletonBox className="h-4 w-64" />
       </div>
 
-      {/* Two-column row: balance + deposit */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* Balance card skeleton */}
-        <div className="rounded-xl border border-secondary p-6 shadow">
-          <SkeletonBox className="mb-4 h-5 w-32" />
-          <SkeletonBox className="mb-2 h-8 w-40" />
-          <div className="mt-4 space-y-2">
-            <SkeletonBox className="h-4 w-full" />
-            <SkeletonBox className="h-4 w-3/4" />
-            <SkeletonBox className="h-4 w-2/3" />
+      {/* Hero panel skeleton — mirrors the brave-version layout
+          (mascot + balance + speech bubble + PLAY) so the page
+          doesn't reflow when status arrives. Sharp-corner panel
+          with brand-gold border to match the real ComicPanel. */}
+      <div className="mb-12 border-2 border-brand bg-[var(--color-panel)] panel-shadow">
+        <div className="grid gap-6 p-6 sm:p-8 md:grid-cols-[auto_1fr] md:items-center md:gap-10">
+          <SkeletonBox className="mx-auto h-44 w-44 shrink-0 md:mx-0" />
+          <div>
+            <SkeletonBox className="mb-3 h-3 w-32" />
+            <SkeletonBox className="mb-2 h-20 w-64" />
+            <SkeletonBox className="mb-6 h-5 w-40" />
+            <SkeletonBox className="h-16 w-full" />
           </div>
         </div>
+      </div>
 
-        {/* Deposit card skeleton */}
-        <div className="rounded-xl border border-secondary p-6 shadow">
-          <SkeletonBox className="mb-4 h-5 w-32" />
-          <SkeletonBox className="mb-3 h-3 w-full" />
-          <div className="space-y-4">
-            <div>
-              <SkeletonBox className="mb-1.5 h-3 w-24" />
-              <SkeletonBox className="h-10 w-full" />
-            </div>
-            <div>
-              <SkeletonBox className="mb-1.5 h-3 w-24" />
-              <SkeletonBox className="h-10 w-full" />
-            </div>
-          </div>
+      {/* Recent Plays skeleton */}
+      <div className="border-2 border-brand bg-[var(--color-panel)] panel-shadow">
+        <div className="px-5 pt-6 pb-4">
+          <SkeletonBox className="mb-2 h-3 w-24" />
+          <SkeletonBox className="h-6 w-56" />
         </div>
-
-        {/* Play history skeleton (full width) */}
-        <div className="rounded-xl border border-secondary p-6 shadow lg:col-span-2">
-          <SkeletonBox className="mb-4 h-5 w-32" />
-          <div className="space-y-3">
-            {[0, 1, 2].map((i) => (
-              <div key={i} className="rounded-lg border border-secondary p-3">
-                <div className="mb-2 flex items-center justify-between">
-                  <SkeletonBox className="h-4 w-32" />
-                  <SkeletonBox className="h-4 w-16" />
-                </div>
-                <div className="flex gap-2">
-                  <SkeletonBox className="h-6 w-20" />
-                  <SkeletonBox className="h-6 w-20" />
-                  <SkeletonBox className="h-6 w-20" />
-                </div>
+        <div className="border-t border-brand/20">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="border-b border-secondary/50 px-5 py-4">
+              <div className="mb-2 flex items-center justify-between">
+                <SkeletonBox className="h-4 w-32" />
+                <SkeletonBox className="h-4 w-20" />
               </div>
-            ))}
-          </div>
+              <div className="flex gap-2">
+                <SkeletonBox className="h-5 w-20" />
+                <SkeletonBox className="h-5 w-20" />
+                <SkeletonBox className="h-5 w-20" />
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </div>
@@ -363,8 +352,21 @@ export default function DashboardPage() {
     void loadStatus({ Authorization: `Bearer ${token}` });
   }, [loadStatus, router]);
 
-  // Check for auth token on mount, then fetch data independently
+  // Check for auth token on mount, then fetch data independently.
+  //
+  // Mount-once guard: this effect should only run on first mount, not
+  // when loadStatus / router references shift (which they do during
+  // dev HMR or in tests). The previous incarnation had `[]` deps,
+  // which silenced eslint-plugin-react-hooks but introduced a stale-
+  // closure bug where the effect captured the initial loadStatus
+  // forever. The fix: include the real deps so closures stay fresh,
+  // and gate the body on a hasMounted ref so the work only happens
+  // once even if the deps shift.
+  const hasMounted = useRef(false);
   useEffect(() => {
+    if (hasMounted.current) return;
+    hasMounted.current = true;
+
     const token = localStorage.getItem('lazylotto:sessionToken');
     setSessionToken(token);
     setStoredAccountId(localStorage.getItem('lazylotto:accountId'));
@@ -480,7 +482,7 @@ export default function DashboardPage() {
         setDepositsChecking(false);
       }
     })();
-  }, []);
+  }, [loadStatus, router]);
 
   const handleCopy = useCallback(
     (text: string, label?: string) => {
@@ -834,7 +836,7 @@ export default function DashboardPage() {
               <p className="type-caption mt-4">
                 You&apos;ll be using the{' '}
                 <span className="font-semibold text-foreground">balanced</span>{' '}
-                strategy by default. You can change it later.
+                strategy — a sensible default for new players.
               </p>
             </div>
           </ComicPanel>
@@ -956,7 +958,7 @@ export default function DashboardPage() {
           {stuckCount > 0 && (
             <Link
               href="/account"
-              className="group inline-flex items-center gap-2 border-2 border-destructive bg-destructive/10 px-3 py-2 text-xs text-destructive transition-colors hover:bg-destructive/20"
+              className="group inline-flex min-h-[44px] items-center gap-2 border-2 border-destructive bg-destructive/10 px-3 py-2 text-xs text-destructive transition-colors hover:bg-destructive/20"
             >
               <span
                 className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-destructive"
@@ -986,11 +988,12 @@ export default function DashboardPage() {
                 localStorage.removeItem('lazylotto:tier');
                 localStorage.removeItem('lazylotto:expiresAt');
                 localStorage.removeItem('lazylotto:locked');
-                // Full reload to clear React state across the app
-                window.location.href = '/auth';
+                // router.replace (not push) so /dashboard isn't in the
+                // back history — accidental disconnect can't be backed out.
+                router.replace('/auth');
               }}
-              title="Click to disconnect"
-              className="group hidden items-center gap-2 border border-secondary bg-[var(--color-panel)] px-3 py-2 transition-colors hover:border-destructive sm:inline-flex"
+              aria-label={`Disconnect ${status.hederaAccountId}`}
+              className="group hidden min-h-[44px] items-center gap-2 border-2 border-secondary bg-[var(--color-panel)] px-3 py-2 transition-colors hover:border-destructive sm:inline-flex"
             >
               <span
                 className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-success transition-colors group-hover:bg-destructive"
@@ -1007,7 +1010,6 @@ export default function DashboardPage() {
               >
                 ↗
               </span>
-              <span className="sr-only">Disconnect from this dashboard</span>
             </button>
           )}
         </header>
@@ -1086,13 +1088,14 @@ export default function DashboardPage() {
                     agentClosed ? 'border-destructive' : 'border-brand'
                   } bg-[var(--color-panel)] p-2 panel-shadow-sm mascot-wake`}
                 >
-                  <img
+                  <Image
                     src={character.imgLarge}
                     alt={character.name}
                     width={176}
                     height={176}
                     className="block h-auto w-full select-none mascot-idle"
                     draggable={false}
+                    priority
                   />
                   {/* Sleep "Zzz" indicator overlay — only shown when
                       the operator has paused the agent. Muted brand
@@ -1120,11 +1123,18 @@ export default function DashboardPage() {
                     the bottom metadata strip; they're reference info,
                     not hero-row context. The fewer chips above the
                     display number, the faster the eye reaches the pot. */}
-                <div className="mb-5 flex flex-wrap items-center gap-x-5 gap-y-2">
+                <div
+                  className="mb-5 flex flex-wrap items-center gap-x-5 gap-y-2"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
                   <span className="label-caps-lg">Your agent</span>
                   {depositsChecking && (
                     <span className="label-caps-brand inline-flex items-center gap-1.5">
-                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
+                      <span
+                        className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-brand"
+                        aria-hidden="true"
+                      />
                       Checking deposits
                     </span>
                   )}
@@ -1150,7 +1160,7 @@ export default function DashboardPage() {
                       <p className="label-caps-lg mb-2">Pot</p>
                       <p
                         className={`display-xl ${
-                          isEmpty ? 'text-muted/40' : 'text-brand'
+                          isEmpty ? 'text-muted/70' : 'text-brand'
                         }`}
                         aria-label={
                           isEmpty
@@ -1277,8 +1287,9 @@ export default function DashboardPage() {
                             <button
                               type="button"
                               onClick={step.onClick}
-                              className="group flex min-w-0 flex-1 items-baseline gap-2 border-2 border-brand bg-brand/10 px-3 py-2 panel-shadow-sm transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:bg-brand/20 hover:shadow-[6px_6px_0_0_var(--color-ink)]"
-                              title="Open the top-up panel"
+                              aria-current="step"
+                              aria-label={`Step ${step.n}: ${step.label} — open the top-up panel`}
+                              className="group flex min-h-[44px] min-w-0 flex-1 items-center gap-2 border-2 border-brand bg-brand/10 px-3 py-2 panel-shadow-sm transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:bg-brand/20 hover:shadow-[6px_6px_0_0_var(--color-ink)]"
                             >
                               <span className="font-pixel text-[9px] text-brand">
                                 {step.n}
@@ -1294,7 +1305,10 @@ export default function DashboardPage() {
                               </span>
                             </button>
                           ) : (
-                            <div className="flex min-w-0 flex-1 items-baseline gap-2 border-2 border-secondary bg-[var(--color-panel)] px-3 py-2">
+                            <div
+                              aria-disabled="true"
+                              className="flex min-h-[44px] min-w-0 flex-1 items-center gap-2 border-2 border-dashed border-secondary bg-[var(--color-panel)] px-3 py-2"
+                            >
                               <span className="font-pixel text-[9px] text-muted/60">
                                 {step.n}
                               </span>
@@ -1706,7 +1720,7 @@ export default function DashboardPage() {
         open={withdrawOpen}
         onClose={() => setWithdrawOpen(false)}
         locked={withdrawLoading}
-        title="Withdraw Funds"
+        title="Cash out"
         description="Funds will be sent to your registered Hedera account."
       >
         {(() => {
@@ -1721,8 +1735,8 @@ export default function DashboardPage() {
             amountNum > velocity.remaining;
           return (
             <>
-              <div className="mb-4">
-                <label htmlFor="withdraw-token" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+              <div className="mb-5">
+                <label htmlFor="withdraw-token" className="label-caps mb-2 block">
                   Token
                 </label>
                 <select
@@ -1730,7 +1744,7 @@ export default function DashboardPage() {
                   value={withdrawToken}
                   onChange={(e) => setWithdrawToken(e.target.value)}
                   disabled={withdrawLoading}
-                  className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-brand focus:outline-none disabled:opacity-50"
+                  className="w-full border-2 border-secondary bg-[var(--color-panel)] px-4 py-3 text-sm text-foreground transition-colors focus:border-brand disabled:opacity-50"
                 >
                   {balanceEntries.map(([key, entry]) => (
                     <option key={key} value={key}>
@@ -1740,25 +1754,50 @@ export default function DashboardPage() {
                 </select>
               </div>
 
-              <div className="mb-2">
-                <label htmlFor="withdraw-amount" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
-                  Amount
-                </label>
+              <div className="mb-3">
+                <div className="mb-2 flex items-baseline justify-between gap-3">
+                  <label htmlFor="withdraw-amount" className="label-caps">
+                    Amount
+                  </label>
+                  {/* Max button — fills in the full available balance,
+                      respecting the daily velocity cap if one is set.
+                      Standard dApp convention; reduces fat-finger
+                      precision errors when withdrawing the full pot. */}
+                  {(() => {
+                    const entry = balanceEntries.find(([k]) => k === withdrawToken);
+                    const available = entry?.[1].available ?? 0;
+                    const cap = velocity?.remaining;
+                    const maxAmount = cap != null ? Math.min(available, cap) : available;
+                    if (maxAmount <= 0) return null;
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => setWithdrawAmount(String(maxAmount))}
+                        disabled={withdrawLoading}
+                        className="font-pixel text-[9px] uppercase tracking-wider text-brand transition-colors hover:text-foreground disabled:opacity-50"
+                      >
+                        Max ({formatAmount(maxAmount)})
+                      </button>
+                    );
+                  })()}
+                </div>
                 <input
                   id="withdraw-amount"
                   type="number"
                   min="0"
                   step="any"
+                  inputMode="decimal"
+                  autoComplete="off"
                   value={withdrawAmount}
                   onChange={(e) => setWithdrawAmount(e.target.value)}
                   disabled={withdrawLoading}
                   placeholder="0.00"
                   aria-invalid={overCap || undefined}
                   aria-describedby={velocity?.cap != null ? 'withdraw-velocity' : undefined}
-                  className={`w-full rounded-lg border px-4 py-2.5 text-sm text-foreground placeholder:text-muted focus:outline-none disabled:opacity-50 ${
+                  className={`w-full border-2 px-4 py-3 font-mono text-sm text-foreground placeholder:text-muted transition-colors disabled:opacity-50 ${
                     overCap
                       ? 'border-destructive bg-destructive/10 focus:border-destructive'
-                      : 'border-secondary bg-secondary/30 focus:border-brand'
+                      : 'border-secondary bg-[var(--color-panel)] focus:border-brand'
                   }`}
                 />
               </div>
@@ -1767,32 +1806,32 @@ export default function DashboardPage() {
               {velocity?.cap != null && (
                 <p
                   id="withdraw-velocity"
-                  className={`mb-5 text-xs ${overCap ? 'text-destructive' : 'text-muted'}`}
+                  className={`mb-5 type-caption ${overCap ? 'text-destructive' : ''}`}
                 >
                   Daily limit: {formatAmount(velocity.usedToday)} /{' '}
                   {formatAmount(velocity.cap)} {tokenSymbol(withdrawToken)} used
                   {velocity.remaining != null && (
                     <>
                       {' '}
-                      — <span className="text-foreground">{formatAmount(velocity.remaining)}</span> remaining today
+                      — <span className="text-foreground num-tabular">{formatAmount(velocity.remaining)}</span> remaining today
                     </>
                   )}
                 </p>
               )}
 
               {overCap && (
-                <p className="mb-4 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                  Amount exceeds your remaining daily limit. Try a smaller amount
-                  or wait for the 24-hour rolling window to refresh.
+                <p className="mb-5 border-l-2 border-destructive bg-destructive/10 px-4 py-3 text-xs text-destructive">
+                  Amount exceeds your remaining daily limit. Try a smaller
+                  amount or wait for the 24-hour rolling window to refresh.
                 </p>
               )}
 
-              <div className="flex gap-3">
+              <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
                 <button
                   type="button"
                   onClick={() => setWithdrawOpen(false)}
                   disabled={withdrawLoading}
-                  className="flex-1 rounded-lg border border-secondary px-4 py-2.5 text-sm font-medium text-muted transition-colors hover:text-foreground disabled:opacity-50"
+                  className="btn-ghost-sm"
                 >
                   Cancel
                 </button>
@@ -1800,9 +1839,9 @@ export default function DashboardPage() {
                   type="button"
                   onClick={handleWithdraw}
                   disabled={withdrawLoading || !withdrawAmount || overCap}
-                  className="flex-1 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-primary/90 disabled:opacity-50"
+                  className="btn-primary-sm"
                 >
-                  {withdrawLoading ? 'Withdrawing…' : 'Confirm Withdraw'}
+                  {withdrawLoading ? 'Withdrawing…' : 'Confirm withdraw'}
                 </button>
               </div>
             </>

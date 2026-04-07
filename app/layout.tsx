@@ -94,10 +94,24 @@ export default function RootLayout({
       className={`dark ${heebo.variable} ${unbounded.variable} ${pressStart.variable}`}
     >
       <body className="min-h-screen bg-background font-sans">
+        {/* Skip link — first focusable element on every page so keyboard
+            and screen reader users can bypass the sidebar nav and jump
+            straight to the main content. Visually hidden until focused
+            (sr-only → focus:not-sr-only), then renders as a brand-gold
+            chip in the top-left so it's unmissable when active.
+            WCAG 2.4.1 (Bypass Blocks, Level A). */}
+        <a
+          href="#main-content"
+          className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[100] focus:border-2 focus:border-brand focus:bg-background focus:px-4 focus:py-2 focus:font-pixel focus:text-[10px] focus:uppercase focus:tracking-wider focus:text-brand"
+        >
+          Skip to main content
+        </a>
         <ToastProvider>
           <div className="flex min-h-screen">
             <Sidebar />
-            <main className="flex flex-1 flex-col">{children}</main>
+            <main id="main-content" className="flex flex-1 flex-col">
+              {children}
+            </main>
           </div>
         </ToastProvider>
       </body>

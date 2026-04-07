@@ -1,8 +1,9 @@
 'use client';
 
 import { useState, useCallback, useEffect } from 'react';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import Link from 'next/link';
+import Image from 'next/image';
 import {
   LSH_CHARACTERS,
   loadOrPickCharacterIdx,
@@ -138,6 +139,7 @@ const NAV_ITEMS = [
 // ---------------------------------------------------------------------------
 
 function UserContext() {
+  const router = useRouter();
   const [accountId, setAccountId] = useState<string | null>(null);
   const [hasSession, setHasSession] = useState(false);
   const [characterIdx, setCharacterIdx] = useState(0);
@@ -154,9 +156,10 @@ function UserContext() {
     localStorage.removeItem('lazylotto:tier');
     localStorage.removeItem('lazylotto:expiresAt');
     localStorage.removeItem('lazylotto:locked');
-    // Full reload intentional — clears React state across the whole app
-    window.location.href = '/auth';
-  }, []);
+    // router.replace removes /dashboard from the back history so an
+    // accidental disconnect can't be backed out into a stale page.
+    router.replace('/auth');
+  }, [router]);
 
   const networkName =
     (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_HEDERA_NETWORK) ||
@@ -188,7 +191,7 @@ function UserContext() {
       {hasSession && (
         <div className="flex flex-col items-center gap-1 px-3 pt-4 pb-3">
           <div className="relative border-2 border-brand bg-[var(--color-panel)] p-1 mascot-wake">
-            <img
+            <Image
               src={character.img}
               alt={character.name}
               width={56}
@@ -349,19 +352,22 @@ export function Sidebar() {
 
       {/* ---- Sidebar ---- */}
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-52 flex-col border-r-2 border-brand/20 bg-[#09090b] transition-transform duration-200 md:static md:translate-x-0 ${
+        aria-label="Sidebar"
+        className={`fixed inset-y-0 left-0 z-40 flex w-52 flex-col border-r-2 border-brand/20 bg-background transition-transform duration-200 md:static md:translate-x-0 ${
           open ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
         {/* Logo */}
         <div className="flex h-16 items-center px-4">
           <Link href="/" className="flex items-center gap-3">
-            <img
+            <Image
               src="https://docs.lazysuperheroes.com/logo.svg"
               alt="LazyLotto"
               width={120}
               height={40}
               className="h-10 w-auto"
+              priority
+              unoptimized
             />
           </Link>
         </div>
@@ -375,7 +381,7 @@ export function Sidebar() {
               layout doesn't shift when switching tabs
             - Label is Heebo at 14px (readable) with pixel font reserved
               for the active item marker */}
-        <nav className="flex flex-1 flex-col gap-0.5 px-0 py-3">
+        <nav aria-label="Main navigation" className="flex flex-1 flex-col gap-0.5 px-0 py-3">
           {NAV_ITEMS.filter((item) => {
             if (item.adminOnly && !isAdmin) return false;
             if (item.authOnly && !isAuthenticated) return false;

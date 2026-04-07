@@ -7,6 +7,8 @@ import {
   type PrizeNftRef,
 } from '../components/PrizeNftCard';
 import { useNftEnrichment } from '../components/useNftEnrichment';
+import { ComicPanel } from '../components/ComicPanel';
+import { SkeletonBox } from '../components/SkeletonBox';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -106,7 +108,7 @@ function accentColor(type: AuditEntry['type']): string {
     case 'rake':
       return 'border-l-brand';
     case 'play':
-      return 'border-l-primary';
+      return 'border-l-info';
     case 'withdrawal':
       return 'border-l-muted';
     case 'operator_withdrawal':
@@ -126,7 +128,7 @@ function badgeClasses(type: AuditEntry['type']): string {
     case 'rake':
       return 'bg-brand/15 text-brand';
     case 'play':
-      return 'bg-primary/15 text-primary';
+      return 'bg-info/15 text-info';
     case 'withdrawal':
       return 'bg-muted/15 text-muted';
     case 'operator_withdrawal':
@@ -163,10 +165,6 @@ function typeLabel(type: AuditEntry['type']): string {
 // user a structured view sooner is especially worthwhile here.
 // ---------------------------------------------------------------------------
 
-function SkeletonBox({ className = '' }: { className?: string }) {
-  return <div className={`animate-pulse rounded bg-secondary/50 ${className}`} />;
-}
-
 function AuditSkeleton() {
   return (
     <div className="mx-auto w-full max-w-4xl px-4 py-8 lg:px-8">
@@ -193,7 +191,7 @@ function AuditSkeleton() {
         {[0, 1, 2, 3].map((i) => (
           <div
             key={i}
-            className="rounded-lg border border-l-4 border-secondary p-4 pl-6"
+            className="border border-l-4 border-secondary p-4 pl-6"
           >
             <div className="mb-3 flex items-center justify-between">
               <div className="flex items-center gap-3">
@@ -378,20 +376,23 @@ export default function AuditPage() {
   // --- Not registered ---
   if (notRegistered) {
     return (
-      <div className="flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-md rounded-xl border border-secondary p-8 text-center shadow-lg">
-          <h1 className="mb-3 font-heading text-xl text-foreground">
-            Not Registered
-          </h1>
-          <p className="mb-6 text-sm text-muted">
-            You need to be registered as a player before you can view your audit trail.
-          </p>
-          <a
-            href="/auth"
-            className="inline-block rounded-lg bg-primary px-6 py-3 font-semibold text-white transition-colors hover:bg-primary/90"
-          >
-            Go to Authentication
-          </a>
+      <div className="flex flex-1 items-center justify-center px-4 py-12">
+        <div className="w-full max-w-md">
+          <ComicPanel label="WELCOME" halftone="dense">
+            <div className="p-8 text-center">
+              <p className="label-caps-brand-lg mb-3">Almost there</p>
+              <h1 className="display-md mb-3 text-foreground">
+                Not registered
+              </h1>
+              <p className="type-body prose-width mx-auto mb-6 text-muted">
+                You need to be registered as a player before you can view your
+                on-chain audit trail.
+              </p>
+              <a href="/auth" className="btn-primary-sm">
+                Sign in →
+              </a>
+            </div>
+          </ComicPanel>
         </div>
       </div>
     );
@@ -400,19 +401,26 @@ export default function AuditPage() {
   // --- Error ---
   if (error) {
     return (
-      <div className="flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-md rounded-xl border border-destructive/30 p-8 text-center shadow-lg">
-          <h1 className="mb-3 font-heading text-xl text-foreground">
-            Something went wrong
-          </h1>
-          <p className="mb-6 text-sm text-destructive">{error}</p>
-          <button
-            type="button"
-            onClick={() => window.location.reload()}
-            className="inline-block rounded-lg bg-primary px-6 py-3 font-semibold text-white transition-colors hover:bg-primary/90"
-          >
-            Retry
-          </button>
+      <div className="flex flex-1 items-center justify-center px-4 py-12">
+        <div className="w-full max-w-md">
+          <ComicPanel label="ERROR" tone="destructive" halftone="none">
+            <div className="p-8 text-center">
+              <p className="label-caps-destructive mb-3">Trouble loading</p>
+              <h1 className="display-md mb-3 text-foreground">
+                Something went wrong
+              </h1>
+              <p className="type-body prose-width mx-auto mb-6 text-destructive">
+                {error}
+              </p>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="btn-primary-sm"
+              >
+                Retry
+              </button>
+            </div>
+          </ComicPanel>
         </div>
       </div>
     );
@@ -421,14 +429,20 @@ export default function AuditPage() {
   // --- Topic not configured ---
   if (data && data.topicId === null) {
     return (
-      <div className="flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-md rounded-xl border border-secondary p-8 text-center shadow-lg">
-          <h1 className="mb-3 font-heading text-xl text-foreground">
-            Accounting Not Configured
-          </h1>
-          <p className="text-sm text-muted">
-            On-chain accounting is not configured for this agent instance. Contact the operator.
-          </p>
+      <div className="flex flex-1 items-center justify-center px-4 py-12">
+        <div className="w-full max-w-md">
+          <ComicPanel label="OFFLINE" tone="muted" halftone="none">
+            <div className="p-8 text-center">
+              <p className="label-caps mb-3">Accounting</p>
+              <h1 className="display-md mb-3 text-foreground">
+                Not configured
+              </h1>
+              <p className="type-body prose-width mx-auto text-muted">
+                On-chain accounting isn&apos;t configured for this agent
+                instance. Contact the operator to enable the audit trail.
+              </p>
+            </div>
+          </ComicPanel>
         </div>
       </div>
     );
@@ -473,10 +487,10 @@ export default function AuditPage() {
             href={explorerUrl ?? '#'}
             target="_blank"
             rel="noopener noreferrer"
-            className="mb-6 flex items-center gap-2 rounded-lg bg-secondary/30 px-4 py-3 text-sm text-muted transition-colors hover:bg-secondary/50"
+            className="mb-6 flex items-center gap-2 border border-secondary bg-[var(--color-panel)] px-4 py-3 text-sm text-muted transition-colors hover:border-brand"
           >
             <span>On-chain ledger: Topic {topicId} on HashScan</span>
-            <span className="text-primary">&#x2197;</span>
+            <span className="text-brand">&#x2197;</span>
           </a>
         )}
 
@@ -491,7 +505,7 @@ export default function AuditPage() {
               value={selectedUser}
               onChange={(e) => handleUserFilterChange(e.target.value)}
               disabled={filterLoading}
-              className="rounded-lg border border-secondary bg-secondary text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+              className="border-2 border-secondary bg-[var(--color-panel)] text-foreground text-sm px-3 py-2 transition-colors focus:border-brand disabled:opacity-50"
             >
               <option value="">All users</option>
               {users.map((user) => (
@@ -501,7 +515,7 @@ export default function AuditPage() {
               ))}
             </select>
             {filterLoading && (
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-muted border-t-primary" />
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-muted border-t-brand" />
             )}
           </div>
         )}
@@ -520,7 +534,7 @@ export default function AuditPage() {
           <span className="hidden sm:inline">|</span>
           <span>
             Played:{' '}
-            <span className="text-primary">{formatAmount(summary.totalBurned)}</span>
+            <span className="text-info">{formatAmount(summary.totalBurned)}</span>
           </span>
           <span className="hidden sm:inline">|</span>
           <span>
@@ -538,7 +552,7 @@ export default function AuditPage() {
 
         {/* NFT enrichment error banner */}
         {enrichmentError && rawNftRefs.length > 0 && (
-          <div className="mb-4 flex items-center justify-between rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm">
+          <div className="mb-4 flex items-center justify-between border-l-2 border-destructive bg-destructive/10 px-4 py-3 text-sm">
             <span className="text-destructive">
               Couldn&apos;t load NFT details. Your raw wins are shown below.
             </span>
@@ -559,7 +573,7 @@ export default function AuditPage() {
               {displayedEntries.map((entry) => (
                 <div
                   key={entry.sequence}
-                  className={`relative rounded-lg border border-secondary ${accentColor(entry.type)} border-l-4 p-4 pl-6`}
+                  className={`relative border border-secondary ${accentColor(entry.type)} border-l-4 p-4 pl-6`}
                 >
                   {/* Header row: badge + timestamp + amount */}
                   <div className="flex items-center justify-between mb-2">
@@ -615,7 +629,7 @@ export default function AuditPage() {
                       <div className="mt-2 space-y-1 rounded bg-secondary/50 px-3 py-2">
                         {entry.burns.map((burn, i) => (
                           <p key={i}>
-                            <span className="text-primary">{burn.amount}</span>
+                            <span className="text-info">{burn.amount}</span>
                             {burn.memo && (
                               <span className="ml-2 text-muted">{burn.memo}</span>
                             )}
@@ -701,7 +715,7 @@ export default function AuditPage() {
                 <button
                   type="button"
                   onClick={() => setShowAll(true)}
-                  className="text-sm text-primary transition-colors hover:text-primary/80"
+                  className="text-sm text-brand transition-colors hover:text-brand/80"
                 >
                   Show older entries ({entries.length - 20} more)
                 </button>
@@ -712,7 +726,7 @@ export default function AuditPage() {
                 <button
                   type="button"
                   onClick={() => setShowAll(false)}
-                  className="text-sm text-primary transition-colors hover:text-primary/80"
+                  className="text-sm text-brand transition-colors hover:text-brand/80"
                 >
                   Show less
                 </button>
@@ -720,7 +734,7 @@ export default function AuditPage() {
             )}
           </>
         ) : (
-          <div className="rounded-lg bg-secondary/30 px-5 py-6 text-center">
+          <div className="border border-secondary bg-[var(--color-panel)] px-5 py-6 text-center">
             <p className="text-sm text-muted">
               {isAdmin && selectedUser
                 ? `No on-chain records for ${selectedUser}.`

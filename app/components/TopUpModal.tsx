@@ -67,7 +67,7 @@ export function TopUpModal({
     >
       <div className="space-y-5">
         {framingNote && (
-          <p className="border-l-2 border-brand bg-brand/10 px-4 py-3 text-sm text-brand">
+          <p className="border-l-2 border-brand bg-brand/10 px-4 py-3 type-body text-brand">
             {framingNote}
           </p>
         )}
@@ -148,13 +148,21 @@ export function TopUpModal({
           </div>
         </details>
 
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-          {onCheckDeposits ? (
+        {/* Footer actions. Justify-end when there's no Check button so
+            the Done button doesn't strand alone in justify-between mode;
+            justify-between when both are present so Check sits on the
+            left and Done on the right. No more <span /> spacer hack. */}
+        <div
+          className={`flex flex-wrap items-center gap-3 pt-2 ${
+            onCheckDeposits ? 'justify-between' : 'justify-end'
+          }`}
+        >
+          {onCheckDeposits && (
             <button
               type="button"
               onClick={onCheckDeposits}
               disabled={checking}
-              className="inline-flex items-center gap-2 border-2 border-brand bg-brand/10 px-4 py-2 font-pixel text-[9px] uppercase tracking-wider text-brand transition-colors hover:bg-brand hover:text-background disabled:cursor-not-allowed disabled:opacity-50"
+              className="btn-ghost-sm"
             >
               <span
                 className={`inline-block h-1.5 w-1.5 rounded-full bg-brand ${
@@ -164,14 +172,8 @@ export function TopUpModal({
               />
               {checking ? 'Checking…' : 'Check for deposits'}
             </button>
-          ) : (
-            <span />
           )}
-          <button
-            type="button"
-            onClick={onClose}
-            className="border-2 border-secondary px-5 py-2 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
-          >
+          <button type="button" onClick={onClose} className="btn-ghost-sm">
             Done
           </button>
         </div>

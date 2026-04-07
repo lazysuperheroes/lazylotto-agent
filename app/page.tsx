@@ -19,7 +19,7 @@ export default function Home() {
   // Brief loading state while redirect is determined
   return (
     <div className="flex flex-1 items-center justify-center">
-      <div className="h-8 w-8 animate-spin rounded-full border-2 border-muted border-t-primary" />
+      <div className="h-8 w-8 animate-spin rounded-full border-2 border-muted border-t-brand" />
     </div>
   );
 }

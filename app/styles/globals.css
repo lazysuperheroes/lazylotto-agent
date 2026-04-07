@@ -1,10 +1,21 @@
 @import "tailwindcss";
 
-/* LSH Design Tokens — Tailwind v4 CSS config */
+/* LSH Design Tokens — Tailwind v4 CSS config
+ *
+ * Brand-gold + ink-black + halftone is the entire palette. The previous
+ * `--color-primary: #3b82f6` (Tailwind default blue) was a leftover from
+ * project bootstrap and contradicted the comic-book direction. It was
+ * removed in /normalize after every callsite migrated to bg-brand /
+ * .btn-primary-sm. Don't reintroduce it — if you find yourself wanting
+ * "primary blue", you almost certainly want bg-brand instead.
+ *
+ * `--color-info` (#0ea5e9 sky blue) is intentionally retained: it's the
+ * one place we use a non-brand color, reserved for the audit page's
+ * `play` category badge. Don't grow this surface either.
+ */
 @theme {
   --color-background: #09090b;
   --color-foreground: #fafafa;
-  --color-primary: #3b82f6;
   --color-brand: #e5a800;
   --color-brand-deep: #b37e00;
   --color-panel: #0a0a0c;
@@ -506,13 +517,19 @@ body {
 }
 
 /* ─────────────────────────────────────────────────────────────
-   Primary CTA button — the "PLAY" button on the dashboard hero,
-   the "Sign in" button on the auth-required empty state, etc.
-   This is the one place in the app that uses this exact treatment:
-   solid brand-gold fill, neo-brutalist shadow, lift-on-hover, full
-   width by default. Extracted from inline Tailwind soup so the
-   incantation lives in one place — if the design changes, change
-   it here, not at every callsite.
+   Primary CTA buttons
+   ─────────────────────────────────────────────────────────────
+   Two sizes:
+     - .btn-primary: the dashboard hero PLAY button. Big, full
+       width, hero scale (24/30px). One callsite per page max.
+     - .btn-primary-sm: in-modal and inline primary CTAs (Withdraw
+       confirm, AuthFlow Sign in, error page Retry, etc). Smaller
+       scale (12px pixel font), tighter padding, but the same
+       neo-brutalist offset shadow + lift-on-hover treatment.
+   Both use brand-gold fill against ink-black shadow. They're the
+   ONLY filled-gold buttons in the app — every other button is a
+   ghost (border + transparent or tinted bg). This separation keeps
+   the eye drawn to "the one action that matters on this surface".
    ───────────────────────────────────────────────────────────── */
 .btn-primary {
   display: block;
@@ -551,6 +568,152 @@ body {
   cursor: not-allowed;
   background-color: rgba(229, 168, 0, 0.5);
   color: rgba(9, 9, 11, 0.7);
+}
+
+/* Smaller variant — for modal confirms, inline CTAs, AuthFlow.
+   Uses pixel font for the label so it reads as a comic action
+   button rather than a body-text submit. min-height satisfies
+   WCAG 2.5.5 (AAA) 44px target size on touch devices. */
+.btn-primary-sm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0.75rem 1.25rem;
+  background-color: var(--color-brand);
+  color: var(--color-background);
+  font-family: var(--font-pixel);
+  font-size: 10px;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  line-height: 1;
+  box-shadow: 4px 4px 0 0 var(--color-ink);
+  transition:
+    transform 150ms,
+    box-shadow 150ms,
+    background-color 150ms;
+  cursor: pointer;
+  border: none;
+}
+.btn-primary-sm:hover:not(:disabled) {
+  transform: translate(-2px, -2px);
+  box-shadow: 6px 6px 0 0 var(--color-ink);
+}
+.btn-primary-sm:active:not(:disabled) {
+  transform: translate(0, 0);
+  box-shadow: 2px 2px 0 0 var(--color-ink);
+}
+.btn-primary-sm:disabled {
+  cursor: not-allowed;
+  background-color: rgba(229, 168, 0, 0.5);
+  color: rgba(9, 9, 11, 0.7);
+}
+
+/* Ghost button companion — for Cancel / secondary actions next
+   to a .btn-primary-sm. Same shape, no fill, same min-height so
+   buttons line up next to each other in modal footers.
+   Three tones via the same shape:
+     - .btn-ghost-sm (default): muted text, brand-gold hover
+     - .btn-ghost-sm-destructive: destructive text + border, slight
+       red wash on hover. Used by Revoke / sign-out style actions.
+   These are unlayered CSS rules, so combining them with Tailwind
+   text-* / border-* utilities won't work — pick a variant. Same
+   cascade-order constraint as .label-caps. */
+.btn-ghost-sm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0.75rem 1.25rem;
+  background-color: transparent;
+  color: var(--color-muted);
+  font-family: var(--font-pixel);
+  font-size: 10px;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  line-height: 1;
+  border: 2px solid var(--color-secondary);
+  transition:
+    border-color 150ms,
+    color 150ms,
+    background-color 150ms;
+  cursor: pointer;
+}
+.btn-ghost-sm:hover:not(:disabled) {
+  border-color: var(--color-brand);
+  color: var(--color-brand);
+}
+.btn-ghost-sm:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.btn-ghost-sm-destructive {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0.75rem 1.25rem;
+  background-color: transparent;
+  color: var(--color-destructive);
+  font-family: var(--font-pixel);
+  font-size: 10px;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  line-height: 1;
+  border: 2px solid var(--color-destructive);
+  transition:
+    border-color 150ms,
+    color 150ms,
+    background-color 150ms;
+  cursor: pointer;
+}
+.btn-ghost-sm-destructive:hover:not(:disabled) {
+  background-color: rgba(220, 38, 38, 0.1);
+}
+.btn-ghost-sm-destructive:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Brand-toned ghost — for actions that want to *signal* importance
+   without claiming the single-primary slot. Used by admin's "Run
+   reconciliation" button: a brand-gold-tinted ghost that flips to
+   filled-gold on hover. Same shape as .btn-ghost-sm. */
+.btn-ghost-sm-brand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0.75rem 1.25rem;
+  background-color: rgba(229, 168, 0, 0.1);
+  color: var(--color-brand);
+  font-family: var(--font-pixel);
+  font-size: 10px;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  line-height: 1;
+  border: 2px solid var(--color-brand);
+  transition:
+    background-color 150ms,
+    color 150ms;
+  cursor: pointer;
+}
+.btn-ghost-sm-brand:hover:not(:disabled) {
+  background-color: var(--color-brand);
+  color: var(--color-background);
+}
+.btn-ghost-sm-brand:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 /* Tabular numerals — locks number widths so displaying changing

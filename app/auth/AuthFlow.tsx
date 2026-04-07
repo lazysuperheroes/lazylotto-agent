@@ -9,8 +9,11 @@ import {
   HederaSessionEvent,
   HederaChainId,
 } from '@hashgraph/hedera-wallet-connect/dist/lib/shared';
+import Image from 'next/image';
 import { useToast } from '../components/Toast';
 import { GoldConfetti } from '../components/GoldConfetti';
+import { ComicPanel } from '../components/ComicPanel';
+import { CharacterMascot } from './CharacterMascot';
 import {
   LSH_CHARACTERS,
   loadOrPickCharacterIdx,
@@ -200,7 +203,6 @@ export function AuthFlow() {
     }
 
     dappConnector.current = connector;
-    console.log('[AuthFlow] DAppConnector initialized for', net);
   }, []);
 
   useEffect(() => {
@@ -458,50 +460,10 @@ export function AuthFlow() {
   const net = typeof window !== 'undefined' ? getNetworkFromUrl() : 'testnet';
   const isConnecting = status === 'connecting' || status === 'signing';
 
-  // ======================================================================
-  // Shared: Character mascot block (used in multiple states)
-  // ======================================================================
-
-  const CharacterMascot = useCallback(
-    ({ size = 'lg', line }: { size?: 'sm' | 'lg'; line?: string }) => {
-      const dim = size === 'lg' ? 'h-32 w-32' : 'h-20 w-20';
-      const dimPx = size === 'lg' ? 128 : 80;
-      return (
-        <div className="animate-fade-scale-in flex flex-col items-center gap-2">
-          <div className="relative">
-            <div className={`relative ${dim} overflow-hidden rounded-xl bg-secondary animate-pulse`}>
-              <img
-                src={character.img}
-                alt={character.name}
-                width={dimPx}
-                height={dimPx}
-                className="h-full w-full object-contain"
-                onLoad={(e) => {
-                  (e.target as HTMLImageElement).parentElement?.classList.remove('animate-pulse', 'bg-secondary');
-                }}
-                onError={(e) => {
-                  (e.target as HTMLImageElement).style.display = 'none';
-                }}
-              />
-            </div>
-            <button
-              type="button"
-              onClick={rerollCharacter}
-              aria-label="Change mascot"
-              className="absolute -right-2 -top-2 flex h-6 w-6 items-center justify-center rounded-full bg-secondary text-xs transition-colors hover:bg-brand/20"
-              title="Change mascot"
-            >
-              <span aria-hidden="true">🎲</span>
-            </button>
-          </div>
-          {line && (
-            <p className="text-sm font-medium text-brand">{line}</p>
-          )}
-        </div>
-      );
-    },
-    [character, rerollCharacter],
-  );
+  // CharacterMascot is now its own component (app/auth/CharacterMascot.tsx)
+  // with state-based loading shimmer and error fallback. We pass character
+  // through as a prop and key it on character.name so React remounts
+  // — and the loading state resets — when the user rerolls.
 
   // ======================================================================
   // RENDER
@@ -510,11 +472,16 @@ export function AuthFlow() {
   return (
     <div className="flex flex-1 items-start justify-center px-4 pt-16 lg:pt-24">
       <div className="w-full max-w-xl">
-        <div className={`rounded-xl p-8 ${status === 'already-auth' ? '' : 'border border-secondary shadow-lg'}`}>
+        <ComicPanel
+          label={status === 'already-auth' ? 'WELCOME BACK' : 'ISSUE #00'}
+          tone={status === 'error' ? 'destructive' : 'gold'}
+          halftone={status === 'already-auth' ? 'none' : 'dense'}
+        >
+          <div className="p-8">
           {/* ---- LOADING ---- */}
           {status === 'loading' && (
             <div className="flex items-center justify-center py-12">
-              <div className="h-8 w-8 animate-spin rounded-full border-2 border-muted border-t-primary" />
+              <div className="h-8 w-8 animate-spin rounded-full border-2 border-muted border-t-brand" />
             </div>
           )}
 
@@ -535,19 +502,25 @@ export function AuthFlow() {
             return (
               <div className="flex flex-col items-center gap-6 text-center">
                 {/* Character mascot (persistent) */}
-                <CharacterMascot size="sm" line={pickRandom(character.successLines)} />
+                <CharacterMascot
+                  key={character.name}
+                  character={character}
+                  size="sm"
+                  line={pickRandom(character.successLines)}
+                  onReroll={rerollCharacter}
+                />
 
                 <h1 className="font-heading text-2xl text-foreground">
                   Welcome back
                 </h1>
 
-                <span className="inline-flex items-center gap-2 rounded-full bg-secondary px-4 py-2 text-sm text-foreground">
-                  <span className="h-2 w-2 rounded-full bg-success" />
-                  {storedAccountId}
+                <span className="inline-flex items-center gap-2 border-2 border-secondary bg-[var(--color-panel)] px-4 py-2 text-sm text-foreground">
+                  <span className="h-2 w-2 rounded-full bg-success" aria-hidden="true" />
+                  <code className="font-mono">{storedAccountId}</code>
                 </span>
 
                 {/* Session status info */}
-                <div className="w-full rounded-lg bg-secondary/30 px-4 py-3 text-sm text-muted">
+                <div className="w-full border-l-2 border-brand/40 bg-brand/5 px-4 py-3 type-caption">
                   Your key is <span className={isLocked ? 'text-brand' : 'text-foreground'}>{expiryLabel}</span>.
                   {savedUrl && !showUrl && (
                     <>
@@ -567,7 +540,7 @@ export function AuthFlow() {
                 {showUrl && savedUrl && (
                   <div className="w-full flex flex-col gap-4">
                     {/* Connection URL */}
-                    <div className="rounded-lg border border-secondary bg-[#111113] px-4 py-3">
+                    <div className="border-2 border-secondary bg-[var(--color-panel)] px-4 py-3">
                       <p className="break-all font-mono text-sm text-brand">
                         {savedUrl}
                       </p>
@@ -579,7 +552,7 @@ export function AuthFlow() {
                         setCopiedUrl(true);
                         setTimeout(() => setCopiedUrl(false), 2000);
                       }}
-                      className="flex w-full items-center justify-center gap-2 rounded-lg border border-secondary py-2.5 text-sm font-semibold text-foreground transition-colors hover:bg-secondary"
+                      className="flex w-full items-center justify-center gap-2 border-2 border-secondary py-2.5 text-sm font-semibold text-foreground transition-colors hover:border-brand hover:text-brand"
                     >
                       {copiedUrl ? (
                         <>
@@ -602,7 +575,7 @@ export function AuthFlow() {
                       {showJsonConfig ? 'Hide Claude Desktop config' : 'Show Claude Desktop config (JSON)'}
                     </button>
                     {showJsonConfig && (
-                      <div className="relative rounded-lg border border-secondary bg-[#111113] p-4">
+                      <div className="relative border-2 border-secondary bg-[var(--color-panel)] p-4">
                         <pre className="break-all font-mono text-xs text-brand whitespace-pre-wrap">
                           {claudeConfig}
                         </pre>
@@ -617,22 +590,22 @@ export function AuthFlow() {
                     )}
 
                     {/* How to connect */}
-                    <div className="rounded-lg bg-secondary/30 px-4 py-3 text-sm text-muted">
+                    <div className="border-l-2 border-brand/40 bg-brand/5 px-4 py-3 type-caption">
                       <p className="mb-2 font-semibold text-foreground">How to connect</p>
                       <ul className="flex flex-col gap-1.5">
                         <li className="flex gap-2">
-                          <span className="text-muted/60">&#8226;</span>
+                          <span className="text-brand/60" aria-hidden="true">&#8226;</span>
                           <span>Claude AI: Settings &rarr; Integrations &rarr; Add custom MCP &rarr; paste URL</span>
                         </li>
                         <li className="flex gap-2">
-                          <span className="text-muted/60">&#8226;</span>
+                          <span className="text-brand/60" aria-hidden="true">&#8226;</span>
                           <span>Claude Desktop: Settings &rarr; MCP Servers &rarr; Add &rarr; paste URL or config</span>
                         </li>
                       </ul>
                     </div>
 
                     {/* Example commands */}
-                    <div className="rounded-lg bg-secondary/30 px-4 py-3 text-sm text-muted">
+                    <div className="border-l-2 border-brand/40 bg-brand/5 px-4 py-3 type-caption">
                       <p className="mb-2 font-semibold text-foreground">Try saying</p>
                       <div className="flex flex-wrap gap-2">
                         {[
@@ -645,7 +618,7 @@ export function AuthFlow() {
                             key={cmd}
                             type="button"
                             onClick={() => void handleCopy(cmd, 'Command')}
-                            className="cursor-pointer rounded bg-secondary/50 px-3 py-1.5 text-left text-sm text-foreground transition-colors hover:bg-secondary hover:text-brand"
+                            className="cursor-pointer border border-secondary bg-[var(--color-panel)] px-3 py-1.5 text-left text-sm text-foreground transition-colors hover:border-brand hover:text-brand"
                             title="Click to copy"
                           >
                             {cmd}
@@ -660,7 +633,7 @@ export function AuthFlow() {
                 <button
                   type="button"
                   onClick={() => router.push(ctaTarget)}
-                  className="w-full rounded-lg bg-primary px-6 py-3 font-semibold text-white transition-colors hover:bg-primary/90"
+                  className="btn-primary-sm w-full"
                 >
                   {ctaLabel}
                 </button>
@@ -674,7 +647,7 @@ export function AuthFlow() {
                   >
                     Re-authenticate
                   </button>
-                  <span className="text-muted/30">&middot;</span>
+                  <span className="text-brand/40" aria-hidden="true">&middot;</span>
                   <button
                     type="button"
                     onClick={handleDisconnect}
@@ -690,12 +663,14 @@ export function AuthFlow() {
           {/* ---- LANDING ---- */}
           {status === 'landing' && (
             <div className="flex flex-col items-center gap-6 text-center">
-              <img
+              <Image
                 src="https://docs.lazysuperheroes.com/logo.svg"
                 alt="LazyLotto"
                 width={240}
                 height={80}
                 className="h-20 w-auto"
+                priority
+                unoptimized
               />
 
               <div className="flex items-center gap-2">
@@ -708,7 +683,13 @@ export function AuthFlow() {
               </div>
 
               {/* Character mascot with shimmer placeholder */}
-              <CharacterMascot size="lg" line={pickRandom(character.taglines)} />
+              <CharacterMascot
+                key={character.name}
+                character={character}
+                size="lg"
+                line={pickRandom(character.taglines)}
+                onReroll={rerollCharacter}
+              />
 
               <p className="text-sm text-muted">
                 Sign a message to prove wallet ownership and receive your MCP
@@ -719,7 +700,7 @@ export function AuthFlow() {
               <button
                 type="button"
                 onClick={() => void handleAuth()}
-                className="w-full rounded-lg bg-primary px-6 py-3 font-semibold text-white transition-colors hover:bg-primary/90"
+                className="btn-primary-sm w-full"
               >
                 Connect Wallet
               </button>
@@ -734,12 +715,14 @@ export function AuthFlow() {
           {/* ---- CONNECTING / SIGNING ---- */}
           {isConnecting && (
             <div className="flex flex-col items-center gap-6 text-center">
-              <img
+              <Image
                 src="https://docs.lazysuperheroes.com/logo.svg"
                 alt="LazyLotto"
                 width={240}
                 height={80}
                 className="h-20 w-auto"
+                priority
+                unoptimized
               />
 
               {accountId && (
@@ -750,7 +733,7 @@ export function AuthFlow() {
               )}
 
               <div className="flex items-center gap-3">
-                <div className="h-5 w-5 animate-spin rounded-full border-2 border-muted border-t-primary" />
+                <div className="h-5 w-5 animate-spin rounded-full border-2 border-muted border-t-brand" />
                 <span className="text-sm text-foreground">
                   {status === 'connecting'
                     ? 'Connecting wallet...'
@@ -789,7 +772,13 @@ export function AuthFlow() {
 
                   {/* Success header */}
                   <div className="flex flex-col items-center gap-4 text-center">
-                    <CharacterMascot size="sm" line={successTagline} />
+                    <CharacterMascot
+                  key={character.name}
+                  character={character}
+                  size="sm"
+                  line={successTagline}
+                  onReroll={rerollCharacter}
+                />
 
                     <h2 className="font-heading text-xl text-success">
                       Re-authenticated
@@ -813,7 +802,7 @@ export function AuthFlow() {
 
                   {/* Connection URL */}
                   <div className="flex flex-col gap-3">
-                    <div className="rounded-lg border border-secondary bg-[#111113] px-4 py-3">
+                    <div className="border-2 border-secondary bg-[var(--color-panel)] px-4 py-3">
                       <p className="break-all font-mono text-sm text-brand">
                         {connectionUrl}
                       </p>
@@ -825,7 +814,7 @@ export function AuthFlow() {
                         setCopied(true);
                         setTimeout(() => setCopied(false), 2000);
                       }}
-                      className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-3 font-semibold text-white transition-colors hover:bg-primary/90"
+                      className="btn-primary-sm w-full"
                     >
                       {copied ? (
                         <>
@@ -847,7 +836,7 @@ export function AuthFlow() {
                     </button>
                     {showJsonConfig && (
                       <div className="flex flex-col gap-2">
-                        <div className="relative rounded-lg border border-secondary bg-[#111113] p-4">
+                        <div className="relative border-2 border-secondary bg-[var(--color-panel)] p-4">
                           <pre className="break-all font-mono text-xs text-brand whitespace-pre-wrap">
                             {claudeConfig}
                           </pre>
@@ -886,7 +875,7 @@ export function AuthFlow() {
                             type="button"
                             onClick={() => void handleLock()}
                             disabled={locking}
-                            className="rounded-lg bg-brand px-4 py-1.5 text-xs font-semibold text-background transition-colors hover:bg-brand/80 disabled:opacity-50"
+                            className="btn-primary-sm"
                           >
                             {locking ? 'Locking...' : 'Confirm — Make Permanent'}
                           </button>
@@ -925,7 +914,7 @@ export function AuthFlow() {
                   <button
                     type="button"
                     onClick={() => router.push(ctaTarget)}
-                    className="w-full rounded-lg bg-primary py-3 font-semibold text-white transition-colors hover:bg-primary/90"
+                    className="btn-primary-sm w-full"
                   >
                     {ctaLabel}
                   </button>
@@ -941,7 +930,13 @@ export function AuthFlow() {
 
               {/* SECTION 1: Success header */}
               <div className="flex flex-col items-center gap-4 text-center">
-                <CharacterMascot size="sm" line={successTagline} />
+                <CharacterMascot
+                  key={character.name}
+                  character={character}
+                  size="sm"
+                  line={successTagline}
+                  onReroll={rerollCharacter}
+                />
 
                 <h2 className="font-heading text-xl text-success">
                   Authenticated
@@ -959,7 +954,7 @@ export function AuthFlow() {
                 {/* Step 1: Copy connection URL */}
                 <div className="flex gap-3">
                   <div className="flex flex-col items-center">
-                    <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/20 text-xs font-semibold text-primary">
+                    <span className="flex h-7 w-7 items-center justify-center border-2 border-brand bg-brand/10 font-pixel text-[9px] text-brand">
                       1
                     </span>
                   </div>
@@ -971,7 +966,7 @@ export function AuthFlow() {
                       This URL connects Claude to your LazyLotto Agent. Use it in
                       Claude AI, Claude Desktop, or any MCP-compatible client.
                     </p>
-                    <div className="rounded-lg border border-secondary bg-[#111113] px-4 py-3">
+                    <div className="border-2 border-secondary bg-[var(--color-panel)] px-4 py-3">
                       <p className="break-all font-mono text-sm text-brand">
                         {connectionUrl}
                       </p>
@@ -983,7 +978,7 @@ export function AuthFlow() {
                         setCopied(true);
                         setTimeout(() => setCopied(false), 2000);
                       }}
-                      className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary py-3 font-semibold text-white transition-colors hover:bg-primary/90"
+                      className="btn-primary-sm w-full"
                     >
                       {copied ? (
                         <>
@@ -1005,7 +1000,7 @@ export function AuthFlow() {
                     </button>
                     {showJsonConfig && (
                       <div className="flex flex-col gap-2">
-                        <div className="relative rounded-lg border border-secondary bg-[#111113] p-4">
+                        <div className="relative border-2 border-secondary bg-[var(--color-panel)] p-4">
                           <pre className="break-all font-mono text-xs text-brand whitespace-pre-wrap">
                             {claudeConfig}
                           </pre>
@@ -1025,7 +1020,7 @@ export function AuthFlow() {
                 {/* Step 2: Add to Claude */}
                 <div className="flex gap-3">
                   <div className="flex flex-col items-center">
-                    <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/20 text-xs font-semibold text-primary">
+                    <span className="flex h-7 w-7 items-center justify-center border-2 border-brand bg-brand/10 font-pixel text-[9px] text-brand">
                       2
                     </span>
                   </div>
@@ -1039,11 +1034,11 @@ export function AuthFlow() {
                     </p>
                     <ul className="flex flex-col gap-1.5 text-sm text-muted">
                       <li className="flex gap-2">
-                        <span className="text-muted/60">&#8226;</span>
+                        <span className="text-brand/60" aria-hidden="true">&#8226;</span>
                         <span>Claude AI: Settings &rarr; Integrations &rarr; Add custom MCP &rarr; paste URL</span>
                       </li>
                       <li className="flex gap-2">
-                        <span className="text-muted/60">&#8226;</span>
+                        <span className="text-brand/60" aria-hidden="true">&#8226;</span>
                         <span>Claude Desktop: Settings &rarr; MCP Servers &rarr; Add &rarr; paste config</span>
                       </li>
                     </ul>
@@ -1063,7 +1058,7 @@ export function AuthFlow() {
                 {/* Step 3: Start playing */}
                 <div className="flex gap-3">
                   <div className="flex flex-col items-center">
-                    <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/20 text-xs font-semibold text-primary">
+                    <span className="flex h-7 w-7 items-center justify-center border-2 border-brand bg-brand/10 font-pixel text-[9px] text-brand">
                       3
                     </span>
                   </div>
@@ -1071,10 +1066,13 @@ export function AuthFlow() {
                     <h3 className="text-sm font-semibold text-foreground">
                       Start playing
                     </h3>
-                    <p className="text-sm text-muted">
+                    <p className="text-sm text-muted" id="example-commands-label">
                       Once connected, try these commands:
                     </p>
-                    <div className="flex flex-wrap gap-2">
+                    <ul
+                      aria-labelledby="example-commands-label"
+                      className="flex flex-wrap gap-2 list-none p-0 m-0"
+                    >
                       {[
                         'Register me for LazyLotto',
                         'Show my deposit info',
@@ -1083,17 +1081,18 @@ export function AuthFlow() {
                         'Check my balance',
                         'Withdraw 10 HBAR',
                       ].map((cmd) => (
-                        <button
-                          key={cmd}
-                          type="button"
-                          onClick={() => void handleCopy(cmd, 'Command')}
-                          className="cursor-pointer rounded bg-secondary/50 px-3 py-1.5 text-left text-sm text-foreground transition-colors hover:bg-secondary hover:text-brand"
-                          title="Click to copy"
-                        >
-                          {cmd}
-                        </button>
+                        <li key={cmd}>
+                          <button
+                            type="button"
+                            onClick={() => void handleCopy(cmd, 'Command')}
+                            className="cursor-pointer border border-secondary bg-[var(--color-panel)] px-3 py-1.5 text-left text-sm text-foreground transition-colors hover:border-brand hover:text-brand"
+                            aria-label={`Copy command: ${cmd}`}
+                          >
+                            {cmd}
+                          </button>
+                        </li>
                       ))}
-                    </div>
+                    </ul>
                     <p className="text-xs text-muted">
                       The agent handles everything -- pool selection, entries, prize transfer.
                     </p>
@@ -1124,7 +1123,7 @@ export function AuthFlow() {
                         type="button"
                         onClick={() => void handleLock()}
                         disabled={locking}
-                        className="rounded-lg bg-brand px-4 py-1.5 text-xs font-semibold text-background transition-colors hover:bg-brand/80 disabled:opacity-50"
+                        className="btn-primary-sm"
                       >
                         {locking ? 'Locking...' : 'Confirm — Make Permanent'}
                       </button>
@@ -1163,7 +1162,7 @@ export function AuthFlow() {
               <button
                 type="button"
                 onClick={() => router.push(ctaTarget)}
-                className="w-full rounded-lg bg-primary py-3 font-semibold text-white transition-colors hover:bg-primary/90"
+                className="btn-primary-sm w-full"
               >
                 {ctaLabel}
               </button>
@@ -1174,15 +1173,17 @@ export function AuthFlow() {
           {/* ---- ERROR ---- */}
           {status === 'error' && (
             <div className="flex flex-col items-center gap-6 text-center">
-              <img
+              <Image
                 src="https://docs.lazysuperheroes.com/logo.svg"
                 alt="LazyLotto"
                 width={240}
                 height={80}
                 className="h-20 w-auto"
+                priority
+                unoptimized
               />
 
-              <p className="text-sm text-destructive">{error}</p>
+              <p className="type-body text-destructive">{error}</p>
 
               <button
                 type="button"
@@ -1190,13 +1191,14 @@ export function AuthFlow() {
                   setError('');
                   setStatus('landing');
                 }}
-                className="rounded-lg border border-secondary px-6 py-2.5 text-foreground transition-colors hover:bg-secondary"
+                className="btn-ghost-sm"
               >
-                Try Again
+                Try again
               </button>
             </div>
           )}
-        </div>
+          </div>
+        </ComicPanel>
       </div>
     </div>
   );

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useToast } from '../components/Toast';
 import { ComicPanel } from '../components/ComicPanel';
+import { SkeletonBox } from '../components/SkeletonBox';
 
 // ---------------------------------------------------------------------------
 // /account — the "everything that's not the lottery" page
@@ -244,9 +245,9 @@ export default function AccountPage() {
       localStorage.removeItem('lazylotto:tier');
       localStorage.removeItem('lazylotto:expiresAt');
       localStorage.removeItem('lazylotto:locked');
-      window.location.href = '/auth';
+      router.replace('/auth');
     }
-  }, [sessionToken]);
+  }, [sessionToken, router]);
 
   if (!sessionToken && !statusLoading) {
     // While the redirect lands, render nothing rather than a flash.
@@ -278,13 +279,16 @@ export default function AccountPage() {
           <ComicPanel label="PROFILE" tone="muted" halftone="none">
             <div className="px-6 py-6">
               {statusLoading ? (
-                <div className="space-y-3">
-                  <div className="h-4 w-48 animate-pulse bg-secondary/50" />
-                  <div className="h-4 w-64 animate-pulse bg-secondary/50" />
-                  <div className="h-4 w-56 animate-pulse bg-secondary/50" />
+                <div className="space-y-3" aria-label="Loading profile">
+                  <SkeletonBox className="h-4 w-48" />
+                  <SkeletonBox className="h-4 w-64" />
+                  <SkeletonBox className="h-4 w-56" />
                 </div>
               ) : status ? (
-                <dl className="grid gap-x-8 gap-y-4 sm:grid-cols-2">
+                <dl
+                  aria-label="Account profile"
+                  className="grid gap-x-8 gap-y-4 sm:grid-cols-2"
+                >
                   <div>
                     <dt className="label-caps mb-1">Hedera account</dt>
                     <dd className="font-mono text-sm text-foreground">
@@ -342,14 +346,20 @@ export default function AccountPage() {
               with payment incidents. */}
           {deadLetters.length > 0 && (
             <ComicPanel label="STUCK" tone="destructive" halftone="none">
+              {/* Header — corner sticker says "STUCK", heading restates
+                  the count, body explains the situation. The previous
+                  version had three stacked labels (sticker + kicker +
+                  heading) for the same state; the kicker is gone. The
+                  body copy was bumped from type-caption to type-body
+                  because users hitting this panel are stressed and
+                  need clear instruction, not 12px footnote text. */}
               <div className="border-b-2 border-destructive/40 px-6 py-5">
-                <p className="label-caps-destructive mb-2">Stuck deposits</p>
-                <h2 className="heading-1 mb-2 text-foreground">
+                <h2 className="heading-1 mb-3 text-foreground">
                   {deadLetters.length === 1
                     ? '1 deposit needs attention'
                     : `${deadLetters.length} deposits need attention`}
                 </h2>
-                <p className="type-caption">
+                <p className="type-body text-muted">
                   {deadLetters.length === 1 ? 'A deposit' : 'These deposits'}{' '}
                   from your wallet couldn&apos;t be credited automatically.
                   The funds are still in the agent wallet.{' '}
@@ -451,7 +461,7 @@ export default function AccountPage() {
                       type="button"
                       onClick={() => void handleLock()}
                       disabled={lockLoading}
-                      className="border-2 border-brand bg-brand px-4 py-2 font-pixel text-[9px] uppercase tracking-wider text-background transition-opacity hover:opacity-90 disabled:opacity-50"
+                      className="btn-primary-sm"
                     >
                       {lockLoading ? 'Locking…' : 'Confirm — make permanent'}
                     </button>
@@ -459,7 +469,7 @@ export default function AccountPage() {
                       type="button"
                       onClick={() => setLockConfirming(false)}
                       disabled={lockLoading}
-                      className="border-2 border-secondary px-4 py-2 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
+                      className="btn-ghost-sm"
                     >
                       Cancel
                     </button>
@@ -470,8 +480,8 @@ export default function AccountPage() {
                   <button
                     type="button"
                     onClick={() => setLockConfirming(true)}
-                    className="border-2 border-brand bg-brand px-4 py-2 font-pixel text-[9px] uppercase tracking-wider text-background transition-opacity hover:opacity-90"
-                    title="Make this token permanent"
+                    className="btn-primary-sm"
+                    aria-label="Make this token permanent"
                   >
                     Lock API key
                   </button>
@@ -479,7 +489,7 @@ export default function AccountPage() {
                     type="button"
                     onClick={() => void handleRevoke()}
                     disabled={revokeLoading}
-                    className="border-2 border-destructive px-4 py-2 font-pixel text-[9px] uppercase tracking-wider text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
+                    className="btn-ghost-sm-destructive"
                   >
                     {revokeLoading ? 'Revoking…' : 'Revoke & re-authenticate'}
                   </button>

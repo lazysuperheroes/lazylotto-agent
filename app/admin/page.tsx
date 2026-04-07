@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useToast } from '../components/Toast';
 import { Modal } from '../components/Modal';
 import { ComicPanel } from '../components/ComicPanel';
+import { SkeletonBox } from '../components/SkeletonBox';
 
 // ---------------------------------------------------------------------------
 // Types -- shaped to match actual API responses
@@ -127,11 +128,10 @@ function deriveOperatorBalances(
 
 // ---------------------------------------------------------------------------
 // Skeleton — structural placeholder for the admin landing page.
+// SkeletonBox itself lives in components/SkeletonBox.tsx — shared across
+// dashboard, account, audit, and admin so the placeholder treatment is
+// the same everywhere.
 // ---------------------------------------------------------------------------
-
-function SkeletonBox({ className = '' }: { className?: string }) {
-  return <div className={`animate-pulse rounded bg-secondary/50 ${className}`} />;
-}
 
 function AdminSkeleton() {
   return (
@@ -144,7 +144,7 @@ function AdminSkeleton() {
       {/* Top stats row: Users / Deposited / Rake / Gas */}
       <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
         {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="rounded-xl border border-secondary p-4 shadow">
+          <div key={i} className="border-2 border-secondary bg-[var(--color-panel)] p-4">
             <SkeletonBox className="mb-2 h-3 w-24" />
             <SkeletonBox className="h-7 w-32" />
           </div>
@@ -152,7 +152,7 @@ function AdminSkeleton() {
       </div>
 
       {/* Managed Users table */}
-      <div className="mb-6 rounded-xl border border-secondary p-6 shadow">
+      <div className="mb-6 border-2 border-secondary bg-[var(--color-panel)] p-6">
         <SkeletonBox className="mb-4 h-5 w-32" />
         <div className="space-y-3">
           {[0, 1, 2].map((i) => (
@@ -161,7 +161,7 @@ function AdminSkeleton() {
               <SkeletonBox className="h-4 w-32" />
               <SkeletonBox className="h-4 w-20" />
               <SkeletonBox className="h-4 w-24" />
-              <SkeletonBox className="h-6 w-16 rounded-full" />
+              <SkeletonBox className="h-6 w-16" />
             </div>
           ))}
         </div>
@@ -169,11 +169,11 @@ function AdminSkeleton() {
 
       {/* Two-column row: Dead letters + Reconciliation */}
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        <div className="rounded-xl border border-secondary p-6 shadow">
+        <div className="border-2 border-secondary bg-[var(--color-panel)] p-6">
           <SkeletonBox className="mb-4 h-5 w-40" />
           <SkeletonBox className="h-12 w-full" />
         </div>
-        <div className="rounded-xl border border-secondary p-6 shadow">
+        <div className="border-2 border-secondary bg-[var(--color-panel)] p-6">
           <SkeletonBox className="mb-4 h-5 w-40" />
           <SkeletonBox className="h-12 w-full" />
         </div>
@@ -622,25 +622,33 @@ export default function AdminPage() {
   // --- Permission denied state ---
   if (error) {
     return (
-      <div className="flex flex-1 items-center justify-center">
-        <div className="max-w-md rounded-xl border border-destructive/30 bg-destructive/10 p-8 text-center">
-          <p className="heading-1 text-destructive">Access Denied</p>
-          <p className="mt-2 text-sm text-muted">{error}</p>
-          <button
-            type="button"
-            onClick={() => {
-              localStorage.removeItem('lazylotto:sessionToken');
-              localStorage.removeItem('lazylotto:accountId');
-              localStorage.removeItem('lazylotto:tier');
-              localStorage.removeItem('lazylotto:expiresAt');
-              localStorage.removeItem('lazylotto:locked');
-              // Full reload intentional — clears all React state from forbidden admin
-              window.location.href = '/auth';
-            }}
-            className="mt-4 rounded-md bg-primary px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
-          >
-            Return to Login
-          </button>
+      <div className="flex flex-1 items-center justify-center px-4 py-12">
+        <div className="w-full max-w-md">
+          <ComicPanel label="DENIED" tone="destructive" halftone="none">
+            <div className="p-8 text-center">
+              <p className="label-caps-destructive mb-3">Access denied</p>
+              <h1 className="display-md mb-3 text-foreground">
+                Operator only
+              </h1>
+              <p className="type-body prose-width mx-auto mb-6 text-muted">
+                {error}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  localStorage.removeItem('lazylotto:sessionToken');
+                  localStorage.removeItem('lazylotto:accountId');
+                  localStorage.removeItem('lazylotto:tier');
+                  localStorage.removeItem('lazylotto:expiresAt');
+                  localStorage.removeItem('lazylotto:locked');
+                  router.replace('/auth');
+                }}
+                className="btn-primary-sm"
+              >
+                Return to login
+              </button>
+            </div>
+          </ComicPanel>
         </div>
       </div>
     );
@@ -728,7 +736,7 @@ export default function AdminPage() {
                   className={`shrink-0 border-2 px-4 py-2 font-pixel text-[10px] uppercase tracking-wider transition-colors disabled:opacity-50 ${
                     killSwitch.enabled
                       ? 'border-success bg-success text-background hover:opacity-90'
-                      : 'border-destructive bg-destructive text-white hover:opacity-90'
+                      : 'border-destructive bg-destructive text-foreground hover:opacity-90'
                   }`}
                 >
                   {killSwitchLoading ? '...' : killSwitch.enabled ? 'Disengage' : 'Engage'}
@@ -799,44 +807,44 @@ export default function AdminPage() {
                 <thead>
                   <tr className="border-b border-secondary bg-secondary/50 text-left">
                     <th
-                      className="cursor-pointer px-3 py-3 font-medium text-muted hover:text-foreground"
+                      className="cursor-pointer px-3 py-3 label-caps hover:text-foreground"
                       onClick={() => handleSort('hederaAccountId')}
                     >
                       Account ID{sortArrow('hederaAccountId')}
                     </th>
-                    <th className="px-3 py-3 font-medium text-muted">EOA</th>
+                    <th className="px-3 py-3 label-caps">EOA</th>
                     <th
-                      className="cursor-pointer px-3 py-3 font-medium text-muted hover:text-foreground"
+                      className="cursor-pointer px-3 py-3 label-caps hover:text-foreground"
                       onClick={() => handleSort('strategyName')}
                     >
                       Strategy{sortArrow('strategyName')}
                     </th>
                     <th
-                      className="cursor-pointer px-3 py-3 text-right font-medium text-muted hover:text-foreground"
+                      className="cursor-pointer px-3 py-3 text-right label-caps hover:text-foreground"
                       onClick={() => handleSort('rakePercent')}
                     >
                       Rake %{sortArrow('rakePercent')}
                     </th>
                     <th
-                      className="cursor-pointer px-3 py-3 text-right font-medium text-muted hover:text-foreground"
+                      className="cursor-pointer px-3 py-3 text-right label-caps hover:text-foreground"
                       onClick={() => handleSort('available')}
                     >
                       Available{sortArrow('available')}
                     </th>
                     <th
-                      className="cursor-pointer px-3 py-3 text-right font-medium text-muted hover:text-foreground"
+                      className="cursor-pointer px-3 py-3 text-right label-caps hover:text-foreground"
                       onClick={() => handleSort('reserved')}
                     >
                       Reserved{sortArrow('reserved')}
                     </th>
                     <th
-                      className="cursor-pointer px-3 py-3 font-medium text-muted hover:text-foreground"
+                      className="cursor-pointer px-3 py-3 label-caps hover:text-foreground"
                       onClick={() => handleSort('lastPlayedAt')}
                     >
                       Last Played{sortArrow('lastPlayedAt')}
                     </th>
                     <th
-                      className="cursor-pointer px-3 py-3 text-center font-medium text-muted hover:text-foreground"
+                      className="cursor-pointer px-3 py-3 text-center label-caps hover:text-foreground"
                       onClick={() => handleSort('active')}
                     >
                       Status{sortArrow('active')}
@@ -856,7 +864,7 @@ export default function AdminPage() {
                         {u.eoaAddress}
                       </td>
                       <td className="px-3 py-3">
-                        <span className="rounded bg-secondary px-2 py-0.5 text-xs text-muted">
+                        <span className="border border-secondary bg-[var(--color-panel)] px-2 py-0.5 text-xs text-muted">
                           {u.strategyName}
                         </span>
                       </td>
@@ -874,10 +882,10 @@ export default function AdminPage() {
                       </td>
                       <td className="px-3 py-3 text-center">
                         <span
-                          className={`inline-block rounded-full px-2 py-0.5 text-xs ${
+                          className={`inline-block border px-2 py-0.5 text-xs ${
                             u.active
-                              ? 'bg-success/20 text-success'
-                              : 'bg-destructive/20 text-destructive'
+                              ? 'border-success/60 bg-success/10 text-success'
+                              : 'border-destructive/60 bg-destructive/10 text-destructive'
                           }`}
                         >
                           {u.active ? 'Active' : 'Inactive'}
@@ -995,19 +1003,19 @@ export default function AdminPage() {
                     type="button"
                     onClick={() => void handleReconciliation()}
                     disabled={reconRunning}
-                    className="border-2 border-brand bg-brand/10 px-4 py-2 font-pixel text-[10px] uppercase tracking-wider text-brand transition-colors hover:bg-brand hover:text-background disabled:opacity-50"
+                    className="btn-ghost-sm-brand"
                   >
-                    {reconRunning ? 'Running…' : 'Run Reconciliation'}
+                    {reconRunning ? 'Running…' : 'Run reconciliation'}
                   </button>
                 </div>
 
                 {reconResult ? (
                   <div className="space-y-4">
                     {/* Solvency status */}
-                    <div className={`rounded-lg border px-4 py-3 ${
+                    <div className={`border-l-2 px-4 py-3 ${
                       reconResult.solvent
-                        ? 'border-success/30 bg-success/10'
-                        : 'border-destructive/30 bg-destructive/10'
+                        ? 'border-success bg-success/10'
+                        : 'border-destructive bg-destructive/10'
                     }`}>
                       <p className={`text-sm font-semibold ${
                         reconResult.solvent ? 'text-success' : 'text-destructive'
@@ -1024,11 +1032,11 @@ export default function AdminPage() {
                       <table className="w-full text-sm">
                         <thead>
                           <tr className="border-b border-secondary text-left">
-                            <th className="px-3 py-2 font-medium text-muted">Token</th>
-                            <th className="px-3 py-2 text-right font-medium text-muted">On-chain</th>
-                            <th className="px-3 py-2 text-right font-medium text-muted">Ledger</th>
-                            <th className="px-3 py-2 text-right font-medium text-muted">Raw Δ</th>
-                            <th className="px-3 py-2 text-right font-medium text-muted">Adjusted Δ</th>
+                            <th className="px-3 py-2 label-caps">Token</th>
+                            <th className="px-3 py-2 text-right label-caps">On-chain</th>
+                            <th className="px-3 py-2 text-right label-caps">Ledger</th>
+                            <th className="px-3 py-2 text-right label-caps">Raw Δ</th>
+                            <th className="px-3 py-2 text-right label-caps">Adjusted Δ</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1067,7 +1075,7 @@ export default function AdminPage() {
                     </div>
 
                     {/* Network fees breakdown */}
-                    <div className="rounded-lg bg-secondary/30 px-4 py-3 text-xs text-muted">
+                    <div className="border border-secondary bg-[var(--color-panel)] px-4 py-3 text-xs text-muted">
                       <p>
                         Mirror node fees: <span className="text-foreground font-mono">
                           {reconResult.actualNetworkFeesHbar.toFixed(4)} HBAR
@@ -1087,8 +1095,8 @@ export default function AdminPage() {
 
                     {/* Warnings */}
                     {reconResult.warnings.length > 0 && (
-                      <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3">
-                        <p className="mb-2 text-xs font-semibold text-destructive">Warnings</p>
+                      <div className="border-l-2 border-destructive bg-destructive/10 px-4 py-3">
+                        <p className="label-caps-destructive mb-2">Warnings</p>
                         <ul className="space-y-1 text-xs text-destructive">
                           {reconResult.warnings.map((w, i) => (
                             <li key={i}>• {w}</li>
@@ -1143,9 +1151,9 @@ export default function AdminPage() {
                 e.stopPropagation();
                 void handleWithdrawFees();
               }}
-              className="shrink-0 border-2 border-brand bg-brand px-4 py-2 font-pixel text-[10px] uppercase tracking-wider text-background transition-opacity hover:opacity-90"
+              className="btn-primary-sm shrink-0"
             >
-              Withdraw Fees
+              Withdraw fees
             </button>
           </div>
 
@@ -1207,7 +1215,7 @@ export default function AdminPage() {
         description="Sends accumulated rake from the agent wallet to the operator withdrawal address. If OPERATOR_WITHDRAW_ADDRESS is set in the environment, it overrides the recipient field below."
       >
         <div className="mb-4">
-          <label htmlFor="wf-token" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+          <label htmlFor="wf-token" className="label-caps mb-2 block">
             Token
           </label>
           <select
@@ -1215,7 +1223,7 @@ export default function AdminPage() {
             value={withdrawFeesToken}
             onChange={(e) => setWithdrawFeesToken(e.target.value as 'HBAR' | 'LAZY')}
             disabled={withdrawFeesLoading}
-            className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-brand focus:outline-none disabled:opacity-50"
+            className="w-full border-2 border-secondary bg-[var(--color-panel)] px-4 py-3 text-sm text-foreground transition-colors focus:border-brand disabled:opacity-50"
           >
             <option value="HBAR">HBAR</option>
             <option value="LAZY">LAZY</option>
@@ -1223,7 +1231,7 @@ export default function AdminPage() {
         </div>
 
         <div className="mb-4">
-          <label htmlFor="wf-amount" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+          <label htmlFor="wf-amount" className="label-caps mb-2 block">
             Amount
           </label>
           <input
@@ -1231,26 +1239,29 @@ export default function AdminPage() {
             type="number"
             min="0"
             step="any"
+            inputMode="decimal"
+            autoComplete="off"
             value={withdrawFeesAmount}
             onChange={(e) => setWithdrawFeesAmount(e.target.value)}
             disabled={withdrawFeesLoading}
             placeholder="0.00"
-            className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground placeholder:text-muted focus:border-brand focus:outline-none disabled:opacity-50"
+            className="w-full border-2 border-secondary bg-[var(--color-panel)] px-4 py-3 text-sm text-foreground placeholder:text-muted transition-colors focus:border-brand disabled:opacity-50"
           />
         </div>
 
         <div className="mb-5">
-          <label htmlFor="wf-to" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+          <label htmlFor="wf-to" className="label-caps mb-2 block">
             Recipient (optional — env var overrides)
           </label>
           <input
             id="wf-to"
             type="text"
+            autoComplete="off"
             value={withdrawFeesTo}
             onChange={(e) => setWithdrawFeesTo(e.target.value)}
             disabled={withdrawFeesLoading}
             placeholder="0.0.XXXXXX"
-            className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground placeholder:text-muted focus:border-brand focus:outline-none disabled:opacity-50"
+            className="w-full border-2 border-secondary bg-[var(--color-panel)] px-4 py-3 text-sm text-foreground placeholder:text-muted transition-colors focus:border-brand disabled:opacity-50"
           />
         </div>
 
@@ -1259,7 +1270,7 @@ export default function AdminPage() {
             type="button"
             onClick={() => setWithdrawFeesOpen(false)}
             disabled={withdrawFeesLoading}
-            className="flex-1 rounded-lg border border-secondary px-4 py-2.5 text-sm font-medium text-muted transition-colors hover:text-foreground disabled:opacity-50"
+            className="btn-ghost-sm flex-1"
           >
             Cancel
           </button>
@@ -1267,9 +1278,9 @@ export default function AdminPage() {
             type="button"
             onClick={submitWithdrawFees}
             disabled={withdrawFeesLoading || !withdrawFeesAmount}
-            className="flex-1 rounded-lg bg-brand px-4 py-2.5 text-sm font-semibold text-background transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="btn-primary-sm flex-1"
           >
-            {withdrawFeesLoading ? 'Withdrawing…' : 'Confirm Withdraw'}
+            {withdrawFeesLoading ? 'Withdrawing…' : 'Confirm withdraw'}
           </button>
         </div>
       </Modal>
@@ -1283,7 +1294,7 @@ export default function AdminPage() {
         description="This will immediately block new plays and new registrations. Withdrawals, deregistration, and reads will stay working. Users will see the reason below on the dashboard."
       >
         <div className="mb-5">
-          <label htmlFor="ks-reason" className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-muted">
+          <label htmlFor="ks-reason" className="label-caps mb-2 block">
             Reason (shown to users)
           </label>
           <textarea
@@ -1293,8 +1304,9 @@ export default function AdminPage() {
             disabled={killSwitchLoading}
             rows={3}
             maxLength={200}
+            autoComplete="off"
             placeholder="e.g. Emergency maintenance — investigating a dApp contract issue"
-            className="w-full rounded-lg border border-secondary bg-secondary/30 px-4 py-2.5 text-sm text-foreground placeholder:text-muted focus:border-brand focus:outline-none disabled:opacity-50"
+            className="w-full border-2 border-secondary bg-[var(--color-panel)] px-4 py-3 text-sm text-foreground placeholder:text-muted transition-colors focus:border-brand disabled:opacity-50"
           />
           <p className="mt-1 text-right text-[10px] text-muted">
             {killSwitchReason.length} / 200
@@ -1306,7 +1318,7 @@ export default function AdminPage() {
             type="button"
             onClick={() => setKillSwitchModalOpen(false)}
             disabled={killSwitchLoading}
-            className="flex-1 rounded-lg border border-secondary px-4 py-2.5 text-sm font-medium text-muted transition-colors hover:text-foreground disabled:opacity-50"
+            className="btn-ghost-sm flex-1"
           >
             Cancel
           </button>
@@ -1314,9 +1326,9 @@ export default function AdminPage() {
             type="button"
             onClick={submitEnableKillSwitch}
             disabled={killSwitchLoading || !killSwitchReason.trim()}
-            className="flex-1 rounded-lg bg-destructive px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="btn-ghost-sm-destructive flex-1"
           >
-            {killSwitchLoading ? 'Engaging…' : 'Engage Kill Switch'}
+            {killSwitchLoading ? 'Engaging…' : 'Engage kill switch'}
           </button>
         </div>
       </Modal>

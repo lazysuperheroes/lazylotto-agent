@@ -27,12 +27,18 @@ export function GoldConfetti({ count = 24 }: GoldConfettiProps) {
     left: `${Math.random() * 100}%`,
     delay: `${Math.random() * 0.6}s`,
     duration: `${1.2 + Math.random() * 1.0}s`,
+    // Gold + off-white only — never blue. The third option used to be
+    // #3b82f6 (the deleted Tailwind primary), which contradicted the
+    // brand sweep at every celebration moment. Now we vary between
+    // brand gold (dominant) and brand-deep gold (warmer accent) plus
+    // an occasional off-white for visual interest. All values pulled
+    // through CSS variables so the celebration can never drift again.
     color:
       Math.random() > 0.3
-        ? '#e5a800' // brand gold (most particles)
+        ? 'var(--color-brand)' // brand gold (most particles)
         : Math.random() > 0.5
-          ? '#fafafa' // off-white accent
-          : '#3b82f6', // primary blue accent
+          ? 'var(--color-foreground)' // off-white accent
+          : 'var(--color-brand-deep)', // dark gold accent
     size: `${4 + Math.random() * 4}px`,
     rotation: `${Math.random() * 360}deg`,
   }));

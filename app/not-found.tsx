@@ -1,22 +1,25 @@
 import Link from 'next/link';
+import Image from 'next/image';
 
 export default function NotFound() {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center px-4">
-      <img
+    <div className="flex flex-1 flex-col items-center justify-center px-4 py-12">
+      <Image
         src="https://docs.lazysuperheroes.com/logo.svg"
         alt="Lazy Superheroes"
         width={144}
         height={48}
         className="mb-8 h-12 w-auto"
+        priority
+        unoptimized
       />
-      <h1 className="font-heading text-4xl text-brand">404</h1>
-      <p className="mt-2 text-muted">Page not found</p>
-      <Link
-        href="/auth"
-        className="mt-6 rounded-lg bg-primary px-6 py-2.5 text-white transition-opacity hover:opacity-90"
-      >
-        Go to Auth Page
+      <p className="label-caps-brand-lg mb-2">Issue not found</p>
+      <h1 className="display-lg mb-2 text-brand">404</h1>
+      <p className="type-body mb-6 text-muted">
+        This page is somewhere else in the LazyVerse.
+      </p>
+      <Link href="/auth" className="btn-primary-sm">
+        Sign in →
       </Link>
     </div>
   );

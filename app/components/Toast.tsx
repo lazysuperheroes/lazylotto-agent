@@ -39,11 +39,16 @@ export function useToast(): ToastContextValue {
 // ---------------------------------------------------------------------------
 // Variant styling
 // ---------------------------------------------------------------------------
+//
+// Sharp-corner comic vocabulary: thick border in the variant tone, panel
+// background, neo-brutalist offset shadow. Each variant gets a different
+// border color to encode the meaning, but the shape is always the same so
+// users learn to recognize toasts as a single UI primitive.
 
 const VARIANT_CLASSES: Record<ToastVariant, string> = {
-  success: 'bg-success text-white',
-  error: 'bg-destructive text-white',
-  info: 'bg-secondary text-foreground border border-brand/40',
+  success: 'border-2 border-success bg-[var(--color-panel)] text-foreground panel-shadow-sm',
+  error: 'border-2 border-destructive bg-[var(--color-panel)] text-foreground panel-shadow-sm',
+  info: 'border-2 border-brand bg-[var(--color-panel)] text-foreground panel-shadow-sm',
 };
 
 // ---------------------------------------------------------------------------
@@ -104,7 +109,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {items.map((item) => (
           <div
             key={item.id}
-            className={`pointer-events-auto rounded-lg px-4 py-2.5 text-sm font-medium shadow-lg ${
+            className={`pointer-events-auto px-4 py-3 text-sm ${
               VARIANT_CLASSES[item.variant]
             } ${item.exiting ? 'toast-exit' : 'toast-enter'}`}
           >
