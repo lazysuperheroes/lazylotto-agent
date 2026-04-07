@@ -19,6 +19,44 @@ import { withStore } from '../_lib/withStore';
 import { staticCorsHeaders } from '../_lib/cors';
 import { getRedis, KEY_PREFIX } from '~/auth/redis';
 
+// Process-level safety net for unhandled rejections from inside the
+// MCP SDK's async dispatch chain. The SDK's transport.handleRequest
+// loops through messages and calls onmessage WITHOUT awaiting, which
+// means any async error in the dispatcher escapes to the runtime.
+// On Vercel, an unhandled rejection terminates the function before
+// our route's catch can return a response — Vercel then serves its
+// generic /500 HTML page with no useful information.
+//
+// This handler logs the rejection with a tag we can find in Vercel
+// function logs and then suppresses the default behavior so the
+// function survives long enough to send our error response.
+//
+// Module-load idempotency: only register once per Lambda warm
+// container. Subsequent route imports skip the duplicate handler.
+declare global {
+  // eslint-disable-next-line no-var
+  var __lazylottoUnhandledRejectionHandlerInstalled__: boolean | undefined;
+}
+if (typeof process !== 'undefined' && !global.__lazylottoUnhandledRejectionHandlerInstalled__) {
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('[mcp] UNHANDLED REJECTION', {
+      reason:
+        reason instanceof Error
+          ? { message: reason.message, stack: reason.stack, name: reason.name }
+          : reason,
+      promise: String(promise),
+    });
+  });
+  process.on('uncaughtException', (err) => {
+    console.error('[mcp] UNCAUGHT EXCEPTION', {
+      message: err.message,
+      stack: err.stack,
+      name: err.name,
+    });
+  });
+  global.__lazylottoUnhandledRejectionHandlerInstalled__ = true;
+}
+
 // Play sessions involve MCP client → dApp reads + Hedera SDK writes.
 // Default 10s timeout is too short. Vercel Hobby allows up to 60s.
 export const maxDuration = 60;
