@@ -56,6 +56,9 @@ export async function OPTIONS() {
 }
 
 export const POST = withStore(async (request: Request) => {
+  // Each step is wrapped so we can attribute the failure to the right
+  // layer if anything goes wrong. The withStore wrapper has its own
+  // top-level catch as a safety net for anything we miss here.
   try {
     // Rate limit before doing any heavy work
     if (!await checkMcpRateLimit(request)) {
@@ -72,23 +75,67 @@ export const POST = withStore(async (request: Request) => {
       );
     }
 
-    const server = await createMcpServer();
+    let server;
+    try {
+      server = await createMcpServer();
+    } catch (err) {
+      console.error('[mcp] createMcpServer failed:', err);
+      throw new Error(
+        `MCP init failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless mode — no session tracking
       enableJsonResponse: true,      // JSON responses, no SSE streams
     });
 
-    await server.connect(transport);
-    const response = await transport.handleRequest(request);
-    await transport.close();
+    try {
+      await server.connect(transport);
+    } catch (err) {
+      console.error('[mcp] server.connect failed:', err);
+      throw new Error(
+        `MCP transport connect failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    let response: Response;
+    try {
+      response = await transport.handleRequest(request);
+    } catch (err) {
+      console.error('[mcp] transport.handleRequest threw:', err);
+      // Try to close cleanly even if handleRequest blew up
+      try {
+        await transport.close();
+      } catch (closeErr) {
+        console.warn('[mcp] transport.close after handleRequest failure:', closeErr);
+      }
+      throw new Error(
+        `MCP request handling failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    try {
+      await transport.close();
+    } catch (closeErr) {
+      // Closing after a successful handleRequest shouldn't matter
+      // for the response — log but don't fail.
+      console.warn('[mcp] transport.close failed (non-fatal):', closeErr);
+    }
 
     // withStore wrapper guarantees store.flush() after this returns.
     return response;
   } catch (err) {
+    // Last in-route catch — log + return JSON. The withStore wrapper
+    // has another safety net for anything that escapes even this.
+    console.error('[mcp] route handler catch:', err);
     const message = err instanceof Error ? err.message : String(err);
+    const stack = err instanceof Error ? err.stack : undefined;
     return new Response(
-      JSON.stringify({ error: message }),
+      JSON.stringify({
+        error: message,
+        ...(process.env.NODE_ENV !== 'production' && stack ? { stack } : {}),
+      }),
       {
         status: 500,
         headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
