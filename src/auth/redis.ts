@@ -61,6 +61,8 @@ interface RedisLike {
   getdel<T = string>(key: string): Promise<T | null>;
   expire(key: string, seconds: number): Promise<number>;
   persist(key: string): Promise<number>;
+  /** Time-to-live for a key in seconds. -2 = missing, -1 = no expiry. */
+  ttl(key: string): Promise<number>;
   smembers(key: string): Promise<string[]>;
   sadd(key: string, ...members: string[]): Promise<number>;
   srem(key: string, ...members: string[]): Promise<number>;
@@ -207,6 +209,13 @@ function createInMemoryStore(): RedisLike {
       if (!entry) return 0;
       delete entry.expiresAt;
       return 1;
+    },
+    async ttl(key: string) {
+      const entry = store.get(key);
+      if (!entry) return -2;
+      if (isExpired(entry)) { store.delete(key); return -2; }
+      if (entry.expiresAt === undefined) return -1;
+      return Math.floor((entry.expiresAt - Date.now()) / 1000);
     },
     async smembers(key: string) {
       return Array.from(sets.get(key) ?? []);

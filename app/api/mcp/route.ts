@@ -72,10 +72,14 @@ interface RateLimitState {
   allowed: boolean;
   /** Current count after the increment. */
   count: number;
+  /** Remaining TTL in seconds after the increment (-2 = missing, -1 = no expiry). */
+  ttl: number;
   /** "upstash" (cluster-wide) or "memory" (per-Lambda only). */
   mode: 'upstash' | 'memory';
   /** The identity used for keying — first 16 chars of token, IP, or 'unknown'. */
   identity: string;
+  /** Whether we called expire() on this increment (only when count === 1). */
+  expireCalled: boolean;
 }
 
 async function checkMcpRateLimit(request: Request): Promise<RateLimitState> {
@@ -89,14 +93,28 @@ async function checkMcpRateLimit(request: Request): Promise<RateLimitState> {
   const redis = await getRedis();
   const key = `${KEY_PREFIX.rateLimit}mcp:${identity}`;
   const count = await redis.incr(key);
+  let expireCalled = false;
   if (count === 1) {
     await redis.expire(key, MCP_RATE_WINDOW_SEC);
+    expireCalled = true;
+  }
+  // Probe the TTL so we can surface it in the diagnostic headers —
+  // the ~30 request reset pattern we saw in UAT §13 looked TTL-related
+  // and this will confirm whether the key is actually persisting its
+  // expiry or being reset/deleted between requests.
+  let ttl = -1;
+  try {
+    ttl = await redis.ttl(key);
+  } catch {
+    /* diagnostic only — don't fail the request if ttl probe fails */
   }
   return {
     allowed: count <= MCP_RATE_LIMIT,
     count,
+    ttl,
     mode,
     identity,
+    expireCalled,
   };
 }
 
@@ -111,6 +129,9 @@ function rateLimitHeaders(state: RateLimitState): Record<string, string> {
   return {
     'X-RateLimit-Limit': String(MCP_RATE_LIMIT),
     'X-RateLimit-Remaining': String(Math.max(0, MCP_RATE_LIMIT - state.count)),
+    'X-RateLimit-Count': String(state.count),
+    'X-RateLimit-Ttl': String(state.ttl),
+    'X-RateLimit-Expire-Called': String(state.expireCalled),
     'X-RateLimit-Mode': state.mode,
     'X-RateLimit-Identity': state.identity,
   };
