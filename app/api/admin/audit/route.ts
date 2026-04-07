@@ -455,27 +455,17 @@ export async function GET(request: Request) {
         case 'rake':
           totalRake += amt;
           break;
-        case 'play':
-          if (entry.burns && entry.burns.length > 0) {
-            totalBurned += entry.burns.reduce((sum, b) => sum + (Number(b.amount) || 0), 0);
-          } else {
-            totalBurned += amt;
-          }
-          break;
+        // 'play' is handled below from the v2 reader's normalized
+        // sessions instead of the in-loop accumulator. The legacy
+        // accumulator only knew about op:'batch' (v1) and silently
+        // skipped v2 ops, causing the audit summary to undercount
+        // every v2 play session. The reader correctly aggregates
+        // both shapes via its v1 fallback path.
         case 'withdrawal':
           totalWithdrawn += amt;
           break;
       }
     }
-
-    // `balanceLeft` is the user's remaining play money in the agent's
-    // internal ledger (NOT a profit/loss net). Prizes never enter this
-    // ledger because winnings flow directly to the user's EOA via the
-    // contract's transferPendingPrizes call. The previous "Net" label
-    // confused this with P/L; the field is now explicitly named
-    // balanceLeft and the audit page surfaces totalWon as a separate
-    // dimension. See user feedback in commit history.
-    const balanceLeft = totalDeposited - totalRake - totalBurned - totalWithdrawn;
 
     // Build the v2 normalized sessions list. The reader handles
     // both v1 batch messages and v2 sequence messages, producing a
@@ -507,6 +497,34 @@ export async function GET(request: Request) {
     } catch (parseErr) {
       console.warn('[admin/audit] v2 reader failed:', parseErr);
     }
+
+    // Reassign totalBurned from the parsed sessions instead of the
+    // in-loop op-name switch. The reader unifies v1 batch + v2
+    // sequence into NormalizedSession[].totalSpentByToken, so we
+    // pull HBAR spending out of there. The single-number
+    // `totalBurned` field is preserved for backward compat with
+    // the audit page summary bar, but it now correctly reflects
+    // v2 plays going forward.
+    //
+    // Note: totalSpentByToken keys are whatever the writer set in
+    // play_pool_result.spentToken, normalized via
+    // poolFeeTokenForAudit() in MultiUserAgent — "HBAR" for native,
+    // a token id for FTs. The reader's v1 fallback hardcodes "HBAR"
+    // because v1 batch only ever recorded HBAR plays.
+    for (const session of v2Sessions) {
+      const hbarSpent = session.totalSpentByToken['HBAR'] ?? 0;
+      const hbarLowerSpent = session.totalSpentByToken['hbar'] ?? 0;
+      totalBurned += hbarSpent + hbarLowerSpent;
+    }
+
+    // `balanceLeft` is the user's remaining play money in the agent's
+    // internal ledger (NOT a profit/loss net). Prizes never enter this
+    // ledger because winnings flow directly to the user's EOA via the
+    // contract's transferPendingPrizes call. The previous "Net" label
+    // confused this with P/L; the field is now explicitly named
+    // balanceLeft and the audit page surfaces totalWon as a separate
+    // dimension. See user feedback in commit history.
+    const balanceLeft = totalDeposited - totalRake - totalBurned - totalWithdrawn;
 
     const explorerBase = network === 'mainnet'
       ? 'https://hashscan.io/mainnet'
