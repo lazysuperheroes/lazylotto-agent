@@ -8,13 +8,23 @@
  * running" from "Vercel is serving a 500 page":
  *   - status:    always 'ok' when the route executes
  *   - network:   testnet | mainnet (from env)
- *   - version:   package version (from npm_package_version)
+ *   - version:   package version (from NEXT_PUBLIC_APP_VERSION,
+ *                injected at build time by next.config.mjs from
+ *                package.json — see notes below)
  *   - timestamp: ISO string, so stale-cache probes can see freshness
  *
  * Deliberately does NOT check Redis, Hedera SDK, or any downstream
  * service. A health endpoint that fans out is a health endpoint that
  * cascades failures — and the MCP / status routes already cover the
  * "is everything actually working" question.
+ *
+ * Version sourcing: Vercel does NOT set `npm_package_version` at
+ * function runtime — that var is only present when the process was
+ * launched by an `npm run` script. So reading it directly always
+ * returned the fallback ('0.1.0') in production. The fix is to use
+ * `NEXT_PUBLIC_APP_VERSION` which `next.config.mjs` already injects
+ * from `package.json` at build time. The `npm_package_version`
+ * fallback is kept for local CLI runs.
  */
 
 import { NextResponse } from 'next/server';
@@ -41,7 +51,10 @@ export async function GET() {
     {
       status: 'ok',
       network: process.env.HEDERA_NETWORK ?? 'testnet',
-      version: process.env.npm_package_version ?? '0.1.0',
+      version:
+        process.env.NEXT_PUBLIC_APP_VERSION ??
+        process.env.npm_package_version ??
+        '0.1.0',
       timestamp: new Date().toISOString(),
     },
     {

@@ -83,7 +83,13 @@ export function buildDiscoveryResponse(baseUrl: string): DiscoveryResponse {
     description:
       'Multi-user custodial lottery agent on Hedera by Lazy Superheroes. ' +
       'Plays LazyLotto pools on behalf of users, manages deposits, and transfers prizes.',
-    version: process.env.npm_package_version ?? '0.1.0',
+    // NEXT_PUBLIC_APP_VERSION is injected from package.json by
+    // next.config.mjs at build time. npm_package_version is the
+    // CLI fallback (only set when launched via `npm run`).
+    version:
+      process.env.NEXT_PUBLIC_APP_VERSION ??
+      process.env.npm_package_version ??
+      '0.1.0',
     operator: 'Lazy Superheroes',
     uaid: process.env.UAID ?? null,
 
