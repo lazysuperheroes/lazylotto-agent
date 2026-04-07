@@ -491,9 +491,19 @@ export async function GET(request: Request) {
         payload,
       }));
     let v2Sessions: NormalizedSession[] = [];
+    let wireSchemaStats: { v1Messages: number; v2Messages: number; unknownMessages: number } = {
+      v1Messages: 0,
+      v2Messages: 0,
+      unknownMessages: 0,
+    };
     try {
       const parsed = await parseAuditTopic(rawTopicMessages);
       v2Sessions = parsed.sessions;
+      wireSchemaStats = {
+        v1Messages: parsed.stats.v1Messages,
+        v2Messages: parsed.stats.v2Messages,
+        unknownMessages: parsed.stats.unknownMessages,
+      };
     } catch (parseErr) {
       console.warn('[admin/audit] v2 reader failed:', parseErr);
     }
@@ -514,6 +524,7 @@ export async function GET(request: Request) {
         users,
         entries,
         sessions: v2Sessions,
+        wireSchema: wireSchemaStats,
         summary: {
           totalDeposited: Math.round(totalDeposited * 100) / 100,
           totalRake: Math.round(totalRake * 100) / 100,

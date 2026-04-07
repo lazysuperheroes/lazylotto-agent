@@ -423,9 +423,19 @@ export async function GET(request: Request) {
       userTopicMessages.push({ sequence: seq, timestamp, payload });
     }
     let v2Sessions: NormalizedSession[] = [];
+    let wireSchemaStats: { v1Messages: number; v2Messages: number; unknownMessages: number } = {
+      v1Messages: 0,
+      v2Messages: 0,
+      unknownMessages: 0,
+    };
     try {
       const parsed = await parseAuditTopic(userTopicMessages);
       v2Sessions = parsed.sessions;
+      wireSchemaStats = {
+        v1Messages: parsed.stats.v1Messages,
+        v2Messages: parsed.stats.v2Messages,
+        unknownMessages: parsed.stats.unknownMessages,
+      };
     } catch (parseErr) {
       console.warn('[user/audit] v2 reader failed:', parseErr);
     }
@@ -441,6 +451,7 @@ export async function GET(request: Request) {
         explorerUrl: `${explorerBase}/topic/${topicId}`,
         entries,
         sessions: v2Sessions,
+        wireSchema: wireSchemaStats,
         summary: {
           totalDeposited: Math.round(totalDeposited * 100) / 100,
           totalRake: Math.round(totalRake * 100) / 100,

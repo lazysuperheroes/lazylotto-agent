@@ -157,6 +157,21 @@ interface AuditResponse {
    * sessions surface here.
    */
   sessions?: V2NormalizedSession[];
+  /**
+   * HCS-20 wire schema mix on this topic. v1 = legacy batch
+   * messages from before the v2 migration; v2 = the new
+   * play_session_open / play_pool_result / play_session_close
+   * sequence going forward. Old v1 messages on the topic are
+   * immutable, so the topic stays a mix until we burn it on the
+   * mainnet cutover. NOT the same as the local store's
+   * schemaVersion (which is shown on /admin reconciliation) —
+   * different concept.
+   */
+  wireSchema?: {
+    v1Messages: number;
+    v2Messages: number;
+    unknownMessages: number;
+  };
   summary: AuditSummary;
   message?: string;
   // Admin-only fields
@@ -916,6 +931,49 @@ export default function AuditPage() {
             >
               Retry
             </button>
+          </div>
+        )}
+
+        {/* ---- HCS-20 wire schema mix ───────────────────────────
+            Shows how many messages on this topic are in the
+            legacy v1 (`op:'batch'`) shape vs the new v2
+            (`play_session_*` sequence) shape. Distinct from the
+            local store schemaVersion shown on /admin reconciliation
+            — that's about persisted record format, this is about
+            on-chain message format.
+
+            Old v1 messages on the topic are immutable (HCS is
+            append-only), so the topic stays a mix until we
+            sunset the testnet topic on the mainnet cutover.
+            ---- */}
+        {data.wireSchema && (data.wireSchema.v1Messages > 0 || data.wireSchema.v2Messages > 0) && (
+          <div className="mb-6 border-l-2 border-brand bg-brand/5 px-4 py-3">
+            <p className="label-caps mb-2">Audit topic schema</p>
+            <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted">
+              <span>
+                v1 (legacy batch):{' '}
+                <span className="num-tabular text-foreground">{data.wireSchema.v1Messages}</span>{' '}
+                <span className="text-muted/60">message{data.wireSchema.v1Messages === 1 ? '' : 's'}</span>
+              </span>
+              <span>
+                v2 (sequence):{' '}
+                <span className="num-tabular text-brand">{data.wireSchema.v2Messages}</span>{' '}
+                <span className="text-muted/60">message{data.wireSchema.v2Messages === 1 ? '' : 's'}</span>
+              </span>
+              {data.wireSchema.unknownMessages > 0 && (
+                <span>
+                  unknown:{' '}
+                  <span className="num-tabular text-destructive">{data.wireSchema.unknownMessages}</span>
+                </span>
+              )}
+            </div>
+            <p className="mt-2 text-[11px] italic text-muted/60">
+              v2 became the writer default at commit{' '}
+              <code className="font-mono">549ed40</code>. Older v1 messages on
+              the topic are immutable; the reader handles both shapes. This
+              is the on-chain message format and is unrelated to the local
+              store schema version shown on the admin reconciliation page.
+            </p>
           </div>
         )}
 
