@@ -14,7 +14,7 @@ import { getWalletInfo } from '../hedera/wallet.js';
 import type { Client } from '@hashgraph/sdk';
 import type { IStore } from './IStore.js';
 import { hbarToNumber } from '../utils/format.js';
-import { roundToDecimals } from '../utils/math.js';
+import { roundToDecimals, getTokenMeta } from '../utils/math.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
 import { CURRENT_SCHEMA_VERSION } from './types.js';
 import {
@@ -43,6 +43,15 @@ export interface ReconciliationResult {
   untrackedFeesHbar: number;
   delta: Record<string, number>;
   adjustedDelta: Record<string, number>;
+  /**
+   * Display symbols for each token ID seen in onChain or ledgerTotal.
+   * "hbar" → "HBAR", "0.0.6011249" → "LAZY", etc. Populated by warming
+   * the token registry (mirror node lookup with fallback) so the admin
+   * UI doesn't have to render raw IDs the operator can't read at a
+   * glance. If lookup fails, the symbol falls back to the raw ID so
+   * the table still renders something.
+   */
+  symbols: Record<string, string>;
   solvent: boolean;
   warnings: string[];
   /** Schema version divergence report — PR6 addition. */
@@ -130,6 +139,26 @@ export async function reconcile(
 
   // 5. Compute raw deltas
   const allTokens = new Set([...Object.keys(onChain), ...Object.keys(ledgerTotal)]);
+
+  // 5a. Warm the token registry for every token we're about to report
+  //     on. getTokenMeta caches in-process and falls back to the raw
+  //     ID if mirror node lookup fails. We do this BEFORE building the
+  //     delta + warnings so the warning strings can use display symbols
+  //     ("LAZY", "HBAR") instead of raw token IDs that operators can't
+  //     read at a glance ("0.0.6011249"). Best-effort — if any single
+  //     lookup fails the entire reconcile still returns.
+  const symbols: Record<string, string> = {};
+  await Promise.all(
+    Array.from(allTokens).map(async (token) => {
+      try {
+        const meta = await getTokenMeta(token);
+        symbols[token] = meta.symbol;
+      } catch {
+        symbols[token] = token;
+      }
+    }),
+  );
+
   const delta: Record<string, number> = {};
   const adjustedDelta: Record<string, number> = {};
   let solvent = true;
@@ -144,16 +173,18 @@ export async function reconcile(
       ? delta[token] + untrackedFeesHbar
       : delta[token];
 
+    const display = symbols[token] ?? token;
+
     // Solvency check uses adjusted delta (accounts for known fee drain)
     if (adjustedDelta[token] < -0.01) {
       solvent = false;
       warnings.push(
-        `INSOLVENCY: ${token} on-chain=${chain.toFixed(4)}, ledger=${ledger.toFixed(4)}, ` +
+        `INSOLVENCY: ${display} on-chain=${chain.toFixed(4)}, ledger=${ledger.toFixed(4)}, ` +
           `adjusted_shortfall=${Math.abs(adjustedDelta[token]).toFixed(4)}`
       );
     } else if (adjustedDelta[token] > 1) {
       warnings.push(
-        `UNACCOUNTED: ${token} on-chain has ${adjustedDelta[token].toFixed(4)} more than ledger tracks`
+        `UNACCOUNTED: ${display} on-chain has ${adjustedDelta[token].toFixed(4)} more than ledger tracks`
       );
     }
   }
@@ -197,6 +228,7 @@ export async function reconcile(
     untrackedFeesHbar,
     delta,
     adjustedDelta,
+    symbols,
     solvent,
     warnings,
     schema: {

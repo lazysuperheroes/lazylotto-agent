@@ -208,6 +208,14 @@ export default function AdminPage() {
     untrackedFeesHbar: number;
     delta: Record<string, number>;
     adjustedDelta: Record<string, number>;
+    /**
+     * Display symbols keyed by token ID. "hbar" → "HBAR",
+     * "0.0.6011249" → "LAZY", etc. Populated server-side from the
+     * token registry. Falls back to the raw token ID if mirror node
+     * lookup fails. Optional in case an old reconcile response is
+     * cached without it — render fall back to raw ID then.
+     */
+    symbols?: Record<string, string>;
     solvent: boolean;
     warnings: string[];
   }
@@ -1083,10 +1091,23 @@ export default function AdminPage() {
                             const adjusted = reconResult.adjustedDelta[token] ?? 0;
                             const isShortfall = adjusted < -0.01;
                             const isSurplus = adjusted > 0.01;
+                            // Symbol from server-side enrichment. Falls
+                            // back to the raw token ID if the registry
+                            // didn't know about it (mirror node lookup
+                            // failed during reconcile).
+                            const symbol = reconResult.symbols?.[token] ?? token;
+                            const isHbar = token === 'hbar';
                             return (
                               <tr key={token} className="border-b border-secondary/30">
-                                <td className="px-3 py-2 font-mono text-xs text-foreground">
-                                  {token}
+                                <td className="px-3 py-2 text-xs">
+                                  <div className="font-semibold text-foreground">
+                                    {symbol}
+                                  </div>
+                                  {!isHbar && symbol !== token && (
+                                    <div className="font-mono text-[10px] text-muted">
+                                      {token}
+                                    </div>
+                                  )}
                                 </td>
                                 <td className="px-3 py-2 text-right font-mono text-xs text-foreground">
                                   {(reconResult.onChain[token] ?? 0).toFixed(4)}

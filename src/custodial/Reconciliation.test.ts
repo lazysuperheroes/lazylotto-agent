@@ -133,6 +133,14 @@ function computeReconciliation(input: ReconInput): ReconciliationResult {
   }
   const schemaOperator = operator.schemaVersion ?? 0;
 
+  // Test helper builds a trivial symbols map (just maps each token to
+  // itself or "HBAR" for native). The real reconcile() warms the
+  // registry from mirror node; tests don't need that round trip.
+  const symbols: Record<string, string> = {};
+  for (const token of allTokens) {
+    symbols[token] = token === 'hbar' ? 'HBAR' : token;
+  }
+
   return {
     timestamp: new Date().toISOString(),
     onChain,
@@ -142,6 +150,7 @@ function computeReconciliation(input: ReconInput): ReconciliationResult {
     untrackedFeesHbar,
     delta,
     adjustedDelta,
+    symbols,
     solvent,
     warnings,
     schema: {
