@@ -96,7 +96,7 @@ export function buildDiscoveryResponse(baseUrl: string): DiscoveryResponse {
       auth: `${baseUrl}/auth`,
       challenge: `${baseUrl}/api/auth/challenge`,
       verify: `${baseUrl}/api/auth/verify`,
-      mcp: `${baseUrl}/mcp`,
+      mcp: `${baseUrl}/api/mcp`,
       dashboard: `${baseUrl}/dashboard`,
       health: `${baseUrl}/api/health`,
       discover: `${baseUrl}/api/discover`,

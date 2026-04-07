@@ -100,7 +100,7 @@ function buildAgentProfile(hcs11: any) {
         network,
         auth_endpoint: `${baseUrl}/api/auth/challenge`,
         discover_endpoint: `${baseUrl}/api/discover`,
-        mcp_endpoint: `${baseUrl}/mcp`,
+        mcp_endpoint: `${baseUrl}/api/mcp`,
         dashboard: `${baseUrl}/dashboard`,
         rake_range: `${process.env.RAKE_MIN_PERCENT ?? 2}-${process.env.RAKE_MAX_PERCENT ?? 5}%`,
         accepted_tokens: 'HBAR,LAZY',
