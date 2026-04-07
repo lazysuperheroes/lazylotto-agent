@@ -346,9 +346,19 @@ export class MultiUserAgent {
         );
       }
 
+      // Truthful prize-transfer status from LottoAgent (Task A).
+      // Phase 5 may have succeeded, skipped, or failed-with-retries —
+      // the SessionReport now carries the outcome via prizeTransferOutcome
+      // and we propagate it instead of the previous hardcoded `true`.
+      const transferOutcome = report.prizeTransferOutcome;
+      const prizesActuallyTransferred =
+        transferOutcome?.status === 'succeeded' ||
+        transferOutcome?.status === 'skipped';
+
       // Build play session result
+      const sessionId = randomUUID();
       const session: PlaySessionResult = {
-        sessionId: randomUUID(),
+        sessionId,
         userId,
         timestamp: new Date().toISOString(),
         strategyName: user.strategyName,
@@ -369,7 +379,7 @@ export class MultiUserAgent {
         totalWins: report.totalWins,
         totalPrizeValue: report.totalPrizeValue,
         prizesByToken: report.prizesByToken,
-        prizesTransferred: true, // LottoAgent handles this in phase 5
+        prizesTransferred: prizesActuallyTransferred,
         gasCostHbar: estimatedGas,
         amountReserved: sessionBudget,
         amountSettled: actualSpent,
@@ -379,6 +389,52 @@ export class MultiUserAgent {
       // Record play session and persist user (lastPlayedAt already set above)
       this.store.recordPlaySession(session);
       this.store.saveUser(user);
+
+      // Dead-letter the failure (Task B). When phase 5 exhausts the
+      // retry ladder we record a structured entry the operator can
+      // see in the admin dashboard and resolve via the recovery tool.
+      // The contract call has already failed; the prizes are stranded
+      // in the agent wallet until an operator runs the recovery.
+      if (transferOutcome?.status === 'failed') {
+        try {
+          this.store.recordDeadLetter({
+            transactionId: sessionId, // sessionId is the natural key for prize failures
+            timestamp: new Date().toISOString(),
+            error: transferOutcome.error,
+            sender: user.hederaAccountId,
+            kind: 'prize_transfer_failed',
+            details: {
+              userId,
+              sessionId,
+              prizesByToken: report.prizesByToken,
+              prizeCount: transferOutcome.prizeCount,
+              attemptsLog: transferOutcome.attemptsLog,
+              ownerEoa: transferOutcome.ownerEoa,
+            },
+          });
+          logger.error('prize transfer dead-lettered', {
+            component: 'MultiUserAgent',
+            event: 'prize_transfer_failed',
+            userId,
+            sessionId,
+            prizeCount: transferOutcome.prizeCount,
+            attempts: transferOutcome.attemptsLog.length,
+            error: transferOutcome.error,
+          });
+        } catch (deadLetterErr) {
+          // Don't let a dead-letter write failure cascade. The
+          // session record itself is already saved with
+          // prizesTransferred:false, so the failure is at least
+          // visible there.
+          logger.warn('failed to dead-letter prize transfer', {
+            component: 'MultiUserAgent',
+            event: 'dead_letter_write_failed',
+            userId,
+            sessionId,
+            error: deadLetterErr instanceof Error ? deadLetterErr.message : String(deadLetterErr),
+          });
+        }
+      }
 
       logger.info('play session completed', {
         component: 'MultiUserAgent',
@@ -783,6 +839,223 @@ export class MultiUserAgent {
    */
   getPlayHistory(userId: string): PlaySessionResult[] {
     return this.store.getPlaySessionsForUser(userId);
+  }
+
+  /**
+   * Operator-only recovery action for stuck prizes (Task C).
+   *
+   * When LottoAgent's phase 5 transferPendingPrizes call fails (typically
+   * INSUFFICIENT_GAS) and the failure was dead-lettered (Task B), an
+   * operator runs this to push the prizes through using the same retry
+   * ladder as the in-flight path. The recovery is recorded on the HCS-20
+   * audit topic via AccountingService.recordPrizeRecovery so an
+   * independent third party can reconstruct the full history from the
+   * topic alone.
+   *
+   * Safety:
+   *   - Idempotent: if no prizes are pending in the agent wallet, returns
+   *     'nothing_to_recover' without touching the chain.
+   *   - dryRun mode returns the analysis without making any tx.
+   *   - The contract call uses transferAllPrizesWithRetry, so all 3
+   *     gas-ladder attempts apply here too.
+   *   - Cross-user contamination: this transfers ALL of the agent's
+   *     currently-pending prizes to the target user. If multiple users
+   *     have stranded prizes, the operator must run them one at a time
+   *     and verify between calls. The defensive check inside the
+   *     in-flight path (LottoAgent.transferAllPrizes) only fires for
+   *     live plays — recovery callers are trusted operators who've
+   *     already verified the situation.
+   *   - On success, marks any prize_transfer_failed dead-letter entries
+   *     for this user as resolved with the recovery contract tx ID.
+   */
+  async recoverStuckPrizesForUser(
+    userId: string,
+    options: {
+      dryRun?: boolean;
+      reason: string;
+      performedBy: string;
+    },
+  ): Promise<{
+    status: 'recovered' | 'nothing_to_recover' | 'dry_run';
+    userId: string;
+    userEoa: string;
+    pendingPrizesBefore: number;
+    pendingPrizesAfter?: number;
+    prizesByToken: Record<string, number>;
+    nftCount: number;
+    contractTxId?: string;
+    hcs20RecoveryRecorded: boolean;
+    attempts?: number;
+    gasUsed?: number;
+    affectedSessions: string[];
+    resolvedDeadLetters: number;
+  }> {
+    const user = this.store.getUser(userId);
+    if (!user) throw new UserNotFoundError(userId);
+
+    // 1. Read agent's pending prizes via dApp MCP. Lazy import keeps
+    //    the MCP client out of the agent's hot path.
+    const { getUserState, getSystemInfo } = await import('../mcp/client.js');
+    const agentAccountId = getOperatorAccountId(this.client);
+    const agentState = await getUserState(agentAccountId);
+
+    // 2. Aggregate the breakdown for the audit log + return value.
+    const fungibleByToken: Record<string, number> = {};
+    let nftCount = 0;
+    for (const p of agentState.pendingPrizes) {
+      if (p.fungiblePrize?.amount > 0) {
+        const tk = p.fungiblePrize.token;
+        fungibleByToken[tk] = (fungibleByToken[tk] ?? 0) + p.fungiblePrize.amount;
+      }
+      for (const n of p.nfts) {
+        nftCount += n.serials.length;
+      }
+    }
+
+    // 3. Find affected dead-letter entries for this user. Used to mark
+    //    them resolved after a successful recovery.
+    const allDeadLetters = this.store.getDeadLetters();
+    const affectedEntries = allDeadLetters.filter(
+      (e) =>
+        e.kind === 'prize_transfer_failed' &&
+        e.details?.userId === userId &&
+        !e.resolvedAt,
+    );
+    const affectedSessions = affectedEntries
+      .map((e) => e.details?.sessionId)
+      .filter((s): s is string => typeof s === 'string');
+
+    // 4. Nothing to do?
+    if (agentState.pendingPrizesCount === 0) {
+      return {
+        status: 'nothing_to_recover',
+        userId,
+        userEoa: user.eoaAddress,
+        pendingPrizesBefore: 0,
+        prizesByToken: {},
+        nftCount: 0,
+        hcs20RecoveryRecorded: false,
+        affectedSessions,
+        resolvedDeadLetters: 0,
+      };
+    }
+
+    // 5. Dry-run short circuit.
+    if (options.dryRun) {
+      return {
+        status: 'dry_run',
+        userId,
+        userEoa: user.eoaAddress,
+        pendingPrizesBefore: agentState.pendingPrizesCount,
+        prizesByToken: fungibleByToken,
+        nftCount,
+        hcs20RecoveryRecorded: false,
+        affectedSessions,
+        resolvedDeadLetters: 0,
+      };
+    }
+
+    // 6. Execute the contract call with the retry ladder.
+    const sys = await getSystemInfo();
+    const contractId = sys.contractAddresses.lazyLotto;
+    const userEvm = (await import('../utils/format.js')).toEvmAddress(user.eoaAddress);
+    const { transferAllPrizesWithRetry } = await import('../hedera/contracts.js');
+    const txResult = await transferAllPrizesWithRetry(
+      this.client,
+      contractId,
+      userEvm,
+      agentState.pendingPrizesCount,
+    );
+
+    // 7. Record HCS-20 audit entry. Failure here is non-fatal — the
+    //    contract transfer already succeeded, only the audit log
+    //    record is missing if this throws.
+    let hcs20RecoveryRecorded = false;
+    try {
+      await this.accounting.recordPrizeRecovery({
+        userAccountId: user.hederaAccountId,
+        agentAccountId,
+        prizesTransferred: agentState.pendingPrizesCount,
+        prizesByToken: fungibleByToken,
+        contractTxId: txResult.result.transactionId,
+        reason: options.reason,
+        performedBy: options.performedBy,
+        affectedSessions,
+        attempts: txResult.attempt,
+        gasUsed: txResult.gasUsed,
+      });
+      hcs20RecoveryRecorded = true;
+    } catch (auditErr) {
+      logger.warn('prize recovery HCS-20 audit failed', {
+        component: 'MultiUserAgent',
+        event: 'prize_recovery_audit_failed',
+        userId,
+        contractTxId: txResult.result.transactionId,
+        error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+      });
+    }
+
+    // 8. Mark dead-letter entries as resolved. The store's
+    //    recordDeadLetter is an upsert by transactionId so writing the
+    //    same entry with resolvedAt set updates it in place.
+    let resolvedDeadLetters = 0;
+    for (const entry of affectedEntries) {
+      try {
+        this.store.recordDeadLetter({
+          ...entry,
+          resolvedAt: new Date().toISOString(),
+          resolvedBy: options.performedBy,
+          resolutionTxId: txResult.result.transactionId,
+        });
+        resolvedDeadLetters++;
+      } catch (resolveErr) {
+        logger.warn('failed to mark dead letter resolved', {
+          component: 'MultiUserAgent',
+          event: 'dead_letter_resolve_failed',
+          userId,
+          deadLetterId: entry.transactionId,
+          error: resolveErr instanceof Error ? resolveErr.message : String(resolveErr),
+        });
+      }
+    }
+
+    // 9. Verify post-recovery state. Mirror node propagation can lag
+    //    a few seconds; this is best-effort and just for logging.
+    let pendingPrizesAfter: number | undefined;
+    try {
+      const after = await getUserState(agentAccountId);
+      pendingPrizesAfter = after.pendingPrizesCount;
+    } catch {
+      /* informational only */
+    }
+
+    logger.info('stuck prizes recovered', {
+      component: 'MultiUserAgent',
+      event: 'prizes_recovered',
+      userId,
+      pendingPrizesBefore: agentState.pendingPrizesCount,
+      pendingPrizesAfter,
+      contractTxId: txResult.result.transactionId,
+      attempts: txResult.attempt,
+      gasUsed: txResult.gasUsed,
+      resolvedDeadLetters,
+    });
+
+    return {
+      status: 'recovered',
+      userId,
+      userEoa: user.eoaAddress,
+      pendingPrizesBefore: agentState.pendingPrizesCount,
+      pendingPrizesAfter,
+      prizesByToken: fungibleByToken,
+      nftCount,
+      contractTxId: txResult.result.transactionId,
+      hcs20RecoveryRecorded,
+      attempts: txResult.attempt,
+      gasUsed: txResult.gasUsed,
+      affectedSessions,
+      resolvedDeadLetters,
+    };
   }
 
   /**

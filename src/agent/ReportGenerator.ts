@@ -33,6 +33,31 @@ export interface PoolResult {
   prizeDetails: PrizeDetail[];
 }
 
+/**
+ * Outcome of phase-5 prize transfer, surfaced from LottoAgent so the
+ * downstream session record can carry the truth instead of guessing.
+ * Mirrors the discriminated union in LottoAgent.ts (kept here as a
+ * structural type to avoid a circular import — ReportGenerator is
+ * deliberately a leaf module).
+ */
+export type PrizeTransferOutcomeReport =
+  | { status: 'skipped'; reason: string }
+  | {
+      status: 'succeeded';
+      contractTxId: string;
+      prizeCount: number;
+      attempt: number;
+      gasUsed: number;
+      ownerEoa: string;
+    }
+  | {
+      status: 'failed';
+      prizeCount: number;
+      ownerEoa: string;
+      error: string;
+      attemptsLog: { attempt: number; gas: number; error?: string }[];
+    };
+
 export interface SessionReport {
   startedAt: string;
   endedAt: string;
@@ -49,6 +74,13 @@ export interface SessionReport {
   prizesByToken: Record<string, number>;
   poolResults: PoolResult[];
   currency: string;
+  /**
+   * Result of the phase-5 prize transfer attempt. `undefined` only if
+   * the session aborted before phase 5 (rare — phase 5 runs in a
+   * finally block). MultiUserAgent uses this to set the session
+   * record's `prizesTransferred` flag and to dead-letter failures.
+   */
+  prizeTransferOutcome?: PrizeTransferOutcomeReport;
 }
 
 export class ReportGenerator {
@@ -73,6 +105,26 @@ export class ReportGenerator {
   addPoolResult(result: PoolResult): void {
     this.poolResults.push(result);
   }
+
+  /**
+   * Total wins seen so far in this session — used by the cross-user
+   * contamination check in LottoAgent.transferAllPrizes (Task E). Live
+   * count, not the finalized report value.
+   */
+  getCurrentWinCount(): number {
+    return this.poolResults.reduce((s, r) => s + r.wins, 0);
+  }
+
+  /**
+   * Stash the phase-5 prize transfer outcome so it lands in the next
+   * generate() call. Set by LottoAgent in the finally block after
+   * safeTransferPrizes runs.
+   */
+  setPrizeTransferOutcome(outcome: PrizeTransferOutcomeReport): void {
+    this.prizeTransferOutcome = outcome;
+  }
+
+  private prizeTransferOutcome?: PrizeTransferOutcomeReport;
 
   generate(): SessionReport {
     const now = new Date();
@@ -108,6 +160,7 @@ export class ReportGenerator {
       prizesByToken,
       poolResults: this.poolResults,
       currency: this.currency,
+      ...(this.prizeTransferOutcome ? { prizeTransferOutcome: this.prizeTransferOutcome } : {}),
     };
   }
 

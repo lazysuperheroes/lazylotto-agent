@@ -40,7 +40,15 @@ interface TopicMessagesResponse {
 interface AuditEntry {
   sequence: number;
   timestamp: string;
-  type: 'deposit' | 'rake' | 'play' | 'withdrawal' | 'operator_withdrawal' | 'deploy' | 'unknown';
+  type:
+    | 'deposit'
+    | 'rake'
+    | 'play'
+    | 'withdrawal'
+    | 'operator_withdrawal'
+    | 'deploy'
+    | 'prize_recovery'
+    | 'unknown';
   operation: string;
   amount?: string;
   token?: string;
@@ -65,6 +73,22 @@ interface AuditEntry {
     wins: number;
     prizeDetails: unknown[];
   }[];
+  /**
+   * Structured fields parsed from a `prize_recovery` HCS-20 message.
+   * Populated only when type === 'prize_recovery'.
+   */
+  recovery?: {
+    userAccountId: string;
+    agentAccountId: string;
+    prizesTransferred: number;
+    prizesByToken?: Record<string, number>;
+    contractTxId: string;
+    reason: string;
+    performedBy: string;
+    affectedSessions?: string[];
+    attempts?: number;
+    gasUsed?: number;
+  };
   raw: Record<string, unknown>;
 }
 
@@ -104,8 +128,19 @@ function involvesAccount(payload: Record<string, unknown>, accountId: string): b
   const to = String(payload.to ?? '');
   const from = String(payload.from ?? '');
   const memo = String(payload.memo ?? '');
+  // prize_recovery messages identify the user via top-level `user`
+  // and the agent via top-level `agent`. Match against either so
+  // user-filtered admin views surface their own recovery actions.
+  const user = String(payload.user ?? '');
+  const agent = String(payload.agent ?? '');
 
-  if (to === accountId || from === accountId || memo.includes(accountId)) {
+  if (
+    to === accountId ||
+    from === accountId ||
+    user === accountId ||
+    agent === accountId ||
+    memo.includes(accountId)
+  ) {
     return true;
   }
 
@@ -125,6 +160,7 @@ function classifyType(payload: Record<string, unknown>): AuditEntry['type'] {
   const memo = String(payload.memo ?? '');
 
   if (op === 'deploy') return 'deploy';
+  if (op === 'prize_recovery') return 'prize_recovery';
 
   if (op === 'mint') {
     return 'deposit';
@@ -174,6 +210,28 @@ function toAuditEntry(seq: number, timestamp: string, payload: Record<string, un
   if (payload.memo !== undefined) entry.memo = String(payload.memo);
   if (payload.sessionId !== undefined) entry.sessionId = String(payload.sessionId);
 
+  // Extract structured fields from prize_recovery messages so the
+  // audit page can render the recovery details (who, what, why, how
+  // many attempts, contract tx ID) without re-parsing raw payload.
+  if (op === 'prize_recovery') {
+    entry.recovery = {
+      userAccountId: String(payload.user ?? ''),
+      agentAccountId: String(payload.agent ?? ''),
+      prizesTransferred: Number(payload.prizesTransferred ?? 0),
+      contractTxId: String(payload.contractTxId ?? ''),
+      reason: String(payload.reason ?? ''),
+      performedBy: String(payload.performedBy ?? ''),
+      ...(payload.prizesByToken
+        ? { prizesByToken: payload.prizesByToken as Record<string, number> }
+        : {}),
+      ...(Array.isArray(payload.affectedSessions)
+        ? { affectedSessions: payload.affectedSessions as string[] }
+        : {}),
+      ...(payload.attempts !== undefined ? { attempts: Number(payload.attempts) } : {}),
+      ...(payload.gasUsed !== undefined ? { gasUsed: Number(payload.gasUsed) } : {}),
+    };
+  }
+
   // For batch operations, extract burn sub-entries
   if (op === 'batch' && Array.isArray(payload.operations)) {
     const ops = payload.operations as Record<string, unknown>[];
@@ -195,9 +253,13 @@ function extractAccountIds(payload: Record<string, unknown>): Set<string> {
 
   const to = String(payload.to ?? '');
   const from = String(payload.from ?? '');
+  const user = String(payload.user ?? '');
+  const agent = String(payload.agent ?? '');
 
   if (hederaIdPattern.test(to)) ids.add(to);
   if (hederaIdPattern.test(from)) ids.add(from);
+  if (hederaIdPattern.test(user)) ids.add(user);
+  if (hederaIdPattern.test(agent)) ids.add(agent);
 
   // Check batch sub-operations
   if (payload.op === 'batch' && Array.isArray(payload.operations)) {

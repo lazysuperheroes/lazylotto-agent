@@ -43,6 +43,35 @@ import {
 } from './ReportGenerator.js';
 import { errorMsg, hbarToNumber, tokenBalanceToNumber, toEvmAddress } from '../utils/format.js';
 
+/**
+ * Result of the phase-5 prize transfer attempt. Surfaced back to
+ * MultiUserAgent so the session record can carry the truth instead
+ * of the previous hardcoded `prizesTransferred: true`.
+ *
+ * - skipped: nothing to do (no pending prizes, transferToOwner off,
+ *   or no ownerAddress configured)
+ * - succeeded: contract call returned, prizes are now owned by EOA
+ * - failed: contract call exhausted retries — operator must run the
+ *   recovery tool to push the prizes through
+ */
+export type PrizeTransferOutcome =
+  | { status: 'skipped'; reason: string }
+  | {
+      status: 'succeeded';
+      contractTxId: string;
+      prizeCount: number;
+      attempt: number;
+      gasUsed: number;
+      ownerEoa: string;
+    }
+  | {
+      status: 'failed';
+      prizeCount: number;
+      ownerEoa: string;
+      error: string;
+      attemptsLog: { attempt: number; gas: number; error?: string }[];
+    };
+
 // ── Prerequisite shape returned by MCP check_prerequisites ────
 
 interface Prerequisite {
@@ -266,7 +295,10 @@ export class LottoAgent {
       // ── Phase 5: Transfer prizes (always attempt) ─────────────
       if (accountId) {
         console.log('\n[5/6] Checking prizes');
-        await this.safeTransferPrizes(accountId);
+        const outcome = await this.safeTransferPrizes(accountId);
+        // Stash on the report generator so the SessionReport carries
+        // the truth instead of MultiUserAgent guessing/hardcoding.
+        this.reportGenerator.setPrizeTransferOutcome(outcome);
       }
 
       // Close MCP connection after all MCP reads are done
@@ -701,18 +733,31 @@ export class LottoAgent {
   //  The owner claims via the dApp at their convenience.
   // ══════════════════════════════════════════════════════════════
 
-  private async safeTransferPrizes(accountId: string): Promise<void> {
+  private async safeTransferPrizes(accountId: string): Promise<PrizeTransferOutcome> {
     try {
-      await this.transferAllPrizes(accountId);
+      return await this.transferAllPrizes(accountId);
     } catch (e) {
-      console.error(`  Prize transfer failed: ${errorMsg(e)}`);
+      const message = errorMsg(e);
+      const attemptsLog =
+        (e as Error & { attemptsLog?: { attempt: number; gas: number; error?: string }[] }).attemptsLog ?? [];
+      console.error(`  Prize transfer failed: ${message}`);
+      // The strategy may not have an ownerAddress (single-user CLI
+      // mode) — preserve outcome contract for that path.
+      const ownerEoa = this.strategyEngine.getOwnerAddress() ?? '';
+      return {
+        status: 'failed',
+        prizeCount: 0, // unknown, may have been read or may have failed before read
+        ownerEoa,
+        error: message,
+        attemptsLog,
+      };
     }
   }
 
-  private async transferAllPrizes(accountId: string): Promise<void> {
+  private async transferAllPrizes(accountId: string): Promise<PrizeTransferOutcome> {
     if (!this.strategyEngine.shouldTransferToOwner()) {
       console.log('  transferToOwner disabled in strategy.');
-      return;
+      return { status: 'skipped', reason: 'transferToOwner disabled in strategy' };
     }
 
     const ownerAddress = this.strategyEngine.getOwnerAddress();
@@ -721,14 +766,38 @@ export class LottoAgent {
         '  No ownerAddress in strategy — prizes remain in agent wallet.'
       );
       console.log('  Set playStyle.ownerAddress to auto-forward prizes.');
-      return;
+      return { status: 'skipped', reason: 'no ownerAddress in strategy' };
     }
 
     // Check pending prizes via MCP read
     const state = await getUserState(accountId);
     if (state.pendingPrizesCount === 0) {
       console.log('  No pending prizes to transfer.');
-      return;
+      return { status: 'skipped', reason: 'no pending prizes' };
+    }
+
+    // Defensive cross-user contamination check (Task E):
+    // The contract's transferPendingPrizes(owner, MaxUint256) reassigns
+    // ALL of the agent wallet's currently-pending prizes to `owner`.
+    // If a previous user's transfer failed and their prizes are still
+    // in the agent's pending list, this call would incorrectly send
+    // them to the current user. We don't have a way to selectively
+    // transfer per-user from the contract, but we can at least DETECT
+    // and log if the count looks larger than expected.
+    //
+    // The check: if the dApp reports more pending prizes than this
+    // session won, log a structured warning so operators can spot it
+    // in Vercel logs.
+    const expectedFromThisSession = this.reportGenerator.getCurrentWinCount();
+    if (
+      expectedFromThisSession > 0 &&
+      state.pendingPrizesCount > expectedFromThisSession
+    ) {
+      console.warn(
+        `  ⚠ CROSS-USER WARNING: agent pending prizes (${state.pendingPrizesCount}) > this session's wins (${expectedFromThisSession}). ` +
+          `Old stranded prizes may be transferred to ${ownerAddress}. ` +
+          `Run reconciliation against play history.`,
+      );
     }
 
     console.log(
@@ -736,16 +805,34 @@ export class LottoAgent {
         `transferring to ${ownerAddress}`
     );
 
-    // Convert owner to EVM address and call shared utility
+    // Convert owner to EVM address and call shared utility with the
+    // retry-with-escalating-gas helper (Task D). Retries 1→2→3 with
+    // 225K → 300K → 400K per prize. INSUFFICIENT_GAS is the only
+    // retryable error; everything else (revert, network) propagates
+    // immediately and gets dead-lettered (Task B).
     const ownerEvmAddress = toEvmAddress(ownerAddress);
     const contractId = await this.getContractId();
-    const { transferAllPrizes: doTransfer } = await import('../hedera/contracts.js');
-    const txResult = await doTransfer(this.client, contractId, ownerEvmAddress);
+    const { transferAllPrizesWithRetry } = await import('../hedera/contracts.js');
+    const txResult = await transferAllPrizesWithRetry(
+      this.client,
+      contractId,
+      ownerEvmAddress,
+      state.pendingPrizesCount,
+    );
 
     console.log(
-      `  Transferred ${state.pendingPrizesCount} prize(s): ` +
-        `${txResult.transactionId} (${txResult.status})`
+      `  Transferred ${state.pendingPrizesCount} prize(s) on attempt ${txResult.attempt}: ` +
+        `${txResult.result.transactionId} (${txResult.result.status})`
     );
+
+    return {
+      status: 'succeeded',
+      contractTxId: txResult.result.transactionId,
+      prizeCount: state.pendingPrizesCount,
+      attempt: txResult.attempt,
+      gasUsed: txResult.gasUsed,
+      ownerEoa: ownerAddress,
+    };
   }
 
   // ══════════════════════════════════════════════════════════════

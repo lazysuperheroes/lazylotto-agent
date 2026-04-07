@@ -20,6 +20,12 @@ import type {
 } from './types.js';
 
 export type DeadLetterEntry = {
+  /**
+   * Stable ID for this entry. For `deposit_failed` (the default,
+   * legacy shape), this is the on-chain transaction ID of the failed
+   * deposit. For `prize_transfer_failed`, this is the play session ID
+   * — there's no tx ID for a transfer that never succeeded.
+   */
   transactionId: string;
   timestamp: string;
   error: string;
@@ -27,6 +33,37 @@ export type DeadLetterEntry = {
   sender?: string;
   /** Memo from the deposit (if any). Used for refund-by-sender filtering. */
   memo?: string;
+  /**
+   * Discriminant for the failure type. Defaults to `deposit_failed`
+   * for legacy entries that don't carry the field. Used by the admin
+   * dashboard to render the right action affordance (refund vs.
+   * recover prizes) and by the recovery tool to find affected
+   * sessions.
+   */
+  kind?: 'deposit_failed' | 'prize_transfer_failed';
+  /**
+   * Free-form details specific to the failure kind. For prize
+   * transfer failures, this carries the userId, sessionId, prize
+   * totals, and the retry attempts log so the operator can decide
+   * whether to retry, escalate, or refund.
+   */
+  details?: {
+    userId?: string;
+    sessionId?: string;
+    prizesByToken?: Record<string, number>;
+    prizeCount?: number;
+    attemptsLog?: { attempt: number; gas: number; error?: string }[];
+    [key: string]: unknown;
+  };
+  /**
+   * Resolution markers set by the recovery tool when an operator
+   * processes the dead letter. Once `resolvedAt` is non-null the
+   * admin badge skips this entry (still queryable for the audit
+   * trail, just not "open").
+   */
+  resolvedAt?: string;
+  resolvedBy?: string;
+  resolutionTxId?: string;
 };
 
 export interface IStore {

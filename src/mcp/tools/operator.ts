@@ -2,7 +2,8 @@
  * Operator (platform admin) MCP tools.
  *
  * Registers: operator_balance, operator_withdraw_fees, operator_reconcile,
- * operator_health, operator_dead_letters, operator_refund
+ * operator_health, operator_dead_letters, operator_refund,
+ * operator_recover_stuck_prizes
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -153,6 +154,41 @@ export function registerOperatorTools(
         return json(result);
       } catch (e) {
         return errorResult(`Refund failed: ${errorMsg(e)}`);
+      }
+    }
+  );
+
+  server.tool(
+    'operator_recover_stuck_prizes',
+    'Recover prizes that got stranded in the agent wallet because the in-flight ' +
+      'transferPendingPrizes call failed (typically INSUFFICIENT_GAS). Calls the ' +
+      'contract with the same retry-with-escalating-gas ladder used by the play path, ' +
+      'records the recovery on the HCS-20 audit topic, and marks any matching ' +
+      'prize_transfer_failed dead-letter entries as resolved. Default mode is dry-run; ' +
+      'pass execute=true to perform the transfer.',
+    {
+      userId: z.string().describe('Internal user ID whose stuck prizes should be recovered'),
+      execute: z.boolean().default(false).describe('Set true to actually perform the transfer (default false = dry-run)'),
+      reason: z.string().default('manual recovery via operator_recover_stuck_prizes').describe('Free-text reason recorded in the HCS-20 audit entry'),
+      auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
+    },
+    async ({ userId, execute, reason, auth_token }) => {
+      const authResult = await requireAuth(auth_token);
+      const denied = requireOperator(authResult);
+      if (denied) return denied;
+      // Identify the operator for the audit log entry. After requireOperator
+      // passes, authResult is guaranteed to have an `auth` field.
+      const performedBy =
+        'auth' in authResult ? authResult.auth.accountId : 'unknown';
+      try {
+        const result = await multiUser.recoverStuckPrizesForUser(userId, {
+          dryRun: !execute,
+          reason,
+          performedBy,
+        });
+        return json(result);
+      } catch (e) {
+        return errorResult(`Recovery failed: ${errorMsg(e)}`);
       }
     }
   );

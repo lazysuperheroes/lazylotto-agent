@@ -204,6 +204,58 @@ export class AccountingService {
     });
   }
 
+  /**
+   * Record a manual operator-initiated prize recovery as a new HCS-20
+   * op type. Used when prizes got stranded in the agent wallet because
+   * the in-flight transferPendingPrizes call failed (typically with
+   * INSUFFICIENT_GAS) and an operator ran the recovery tool to push
+   * them through.
+   *
+   * `op: "prize_recovery"` is outside the canonical HCS-20 spec, like
+   * `control` already is. We keep the protocol header (`p`, `tick`) so
+   * downstream readers can filter by topic + operation cleanly.
+   *
+   * Schema v2 introduced specifically for this op so audit consumers
+   * can branch on `v` field rather than guessing at the shape.
+   */
+  async recordPrizeRecovery(details: {
+    userAccountId: string;
+    agentAccountId: string;
+    prizesTransferred: number;
+    /** Per-token totals computed from local sessions, if available. */
+    prizesByToken?: Record<string, number>;
+    /** Hedera contract tx ID returned by transferPendingPrizes. */
+    contractTxId: string;
+    /** Free-text reason recorded by the operator (or "auto" if scripted). */
+    reason: string;
+    /** Operator account ID that initiated the recovery. */
+    performedBy: string;
+    /** Local session IDs whose prizes were affected, if known. */
+    affectedSessions?: string[];
+    /** Number of retry attempts before success (1 = first try). */
+    attempts?: number;
+    /** Final gas value used for the successful contract call. */
+    gasUsed?: number;
+  }): Promise<void> {
+    await this.submitMessage({
+      p: 'hcs-20',
+      op: 'prize_recovery',
+      tick: this.tick,
+      v: 2,
+      user: details.userAccountId,
+      agent: details.agentAccountId,
+      prizesTransferred: details.prizesTransferred,
+      ...(details.prizesByToken ? { prizesByToken: details.prizesByToken } : {}),
+      contractTxId: details.contractTxId,
+      reason: details.reason,
+      performedBy: details.performedBy,
+      ...(details.affectedSessions ? { affectedSessions: details.affectedSessions } : {}),
+      ...(details.attempts ? { attempts: details.attempts } : {}),
+      ...(details.gasUsed ? { gasUsed: details.gasUsed } : {}),
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   // ── Batched Operations ───────────────────────────────────
 
   /**

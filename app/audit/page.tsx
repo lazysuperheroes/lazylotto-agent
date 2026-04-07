@@ -30,10 +30,31 @@ interface PoolWinResult {
   }>;
 }
 
+interface RecoveryEntry {
+  userAccountId: string;
+  agentAccountId: string;
+  prizesTransferred: number;
+  prizesByToken?: Record<string, number>;
+  contractTxId: string;
+  reason: string;
+  performedBy: string;
+  affectedSessions?: string[];
+  attempts?: number;
+  gasUsed?: number;
+}
+
 interface AuditEntry {
   sequence: number;
   timestamp: string;
-  type: 'deposit' | 'rake' | 'play' | 'withdrawal' | 'operator_withdrawal' | 'deploy' | 'unknown';
+  type:
+    | 'deposit'
+    | 'rake'
+    | 'play'
+    | 'withdrawal'
+    | 'operator_withdrawal'
+    | 'deploy'
+    | 'prize_recovery'
+    | 'unknown';
   operation: string;
   amount?: string;
   token?: string;
@@ -45,6 +66,7 @@ interface AuditEntry {
   totalWins?: number;
   totalSpent?: number;
   poolResults?: PoolWinResult[];
+  recovery?: RecoveryEntry;
   raw: Record<string, unknown>;
 }
 
@@ -115,6 +137,8 @@ function accentColor(type: AuditEntry['type']): string {
       return 'border-l-destructive';
     case 'deploy':
       return 'border-l-secondary';
+    case 'prize_recovery':
+      return 'border-l-brand';
     default:
       return 'border-l-secondary';
   }
@@ -135,6 +159,8 @@ function badgeClasses(type: AuditEntry['type']): string {
       return 'bg-destructive/15 text-destructive';
     case 'deploy':
       return 'bg-secondary text-muted';
+    case 'prize_recovery':
+      return 'bg-brand/15 text-brand';
     default:
       return 'bg-secondary text-muted';
   }
@@ -154,6 +180,8 @@ function typeLabel(type: AuditEntry['type']): string {
       return 'Operator';
     case 'deploy':
       return 'Deploy';
+    case 'prize_recovery':
+      return 'Recovery';
     default:
       return 'Unknown';
   }
@@ -715,6 +743,65 @@ export default function AuditPage() {
                     )}
                     {entry.type === 'play' && (entry.totalWins === 0 || entry.totalWins == null) && entry.totalSpent != null && (
                       <p className="mt-1 text-xs text-muted">No wins this session</p>
+                    )}
+
+                    {/* Prize recovery details — surfaces operator-initiated
+                        recoveries from the prize_recovery HCS-20 op so an
+                        independent third party can verify "user X had Y
+                        prizes recovered, here's the contract tx, here's
+                        the reason." This is the audit-trail companion to
+                        the operator_recover_stuck_prizes MCP tool. */}
+                    {entry.type === 'prize_recovery' && entry.recovery && (
+                      <div className="mt-2 rounded bg-brand/10 px-3 py-2">
+                        <p className="text-sm font-semibold text-brand">
+                          {entry.recovery.prizesTransferred} prize{entry.recovery.prizesTransferred === 1 ? '' : 's'} recovered
+                        </p>
+                        <div className="mt-1 space-y-1 text-xs text-muted">
+                          <p>
+                            <span className="text-foreground/60">User:</span>{' '}
+                            <code className="font-mono">{entry.recovery.userAccountId}</code>
+                          </p>
+                          <p>
+                            <span className="text-foreground/60">From agent:</span>{' '}
+                            <code className="font-mono">{entry.recovery.agentAccountId}</code>
+                          </p>
+                          {entry.recovery.prizesByToken && Object.keys(entry.recovery.prizesByToken).length > 0 && (
+                            <p>
+                              <span className="text-foreground/60">Tokens:</span>{' '}
+                              {Object.entries(entry.recovery.prizesByToken)
+                                .map(([t, a]) => `${a} ${displayToken(t)}`)
+                                .join(', ')}
+                            </p>
+                          )}
+                          <p>
+                            <span className="text-foreground/60">Reason:</span> {entry.recovery.reason}
+                          </p>
+                          <p>
+                            <span className="text-foreground/60">Performed by:</span>{' '}
+                            <code className="font-mono">{entry.recovery.performedBy}</code>
+                          </p>
+                          {entry.recovery.attempts != null && (
+                            <p>
+                              <span className="text-foreground/60">Attempts:</span> {entry.recovery.attempts}
+                              {entry.recovery.gasUsed != null && (
+                                <span className="ml-2">
+                                  <span className="text-foreground/60">Gas:</span> {entry.recovery.gasUsed.toLocaleString()}
+                                </span>
+                              )}
+                            </p>
+                          )}
+                          <p>
+                            <span className="text-foreground/60">Contract tx:</span>{' '}
+                            <code className="font-mono break-all">{entry.recovery.contractTxId}</code>
+                          </p>
+                          {entry.recovery.affectedSessions && entry.recovery.affectedSessions.length > 0 && (
+                            <p>
+                              <span className="text-foreground/60">Affected sessions:</span>{' '}
+                              {entry.recovery.affectedSessions.length}
+                            </p>
+                          )}
+                        </div>
+                      </div>
                     )}
                   </div>
 
