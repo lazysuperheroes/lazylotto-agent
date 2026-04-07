@@ -399,8 +399,54 @@ export class MultiUserAgent {
           maxPerSession: Math.min(cappedBudgets[primaryToken].maxPerSession, sessionBudget),
         };
       }
+      // ── Stage 1 stop-gap: tighten the pool filter to tokens the
+      // user actually has positive balance in. Without this, the
+      // play loop's discovery picks ANY pool the strategy filter
+      // allows (default `feeToken: 'any'`), which means a user
+      // with only HBAR can trigger LAZY pool plays — and the LAZY
+      // entry fee comes out of the AGENT WALLET'S LAZY balance
+      // (operator funds), while the user is mis-billed in HBAR
+      // because primaryToken == 'hbar' is what gets settled.
+      //
+      // The schema constrains feeToken to 'HBAR' | 'LAZY' | 'any',
+      // so we can only express three cases here. The mixed-balance
+      // case still goes through 'any' and Stage 2's per-token
+      // settlement refactor will handle it correctly. The
+      // single-token cases below stop the operator-fund bleed
+      // immediately for the most common scenario (HBAR-only user).
+      const lazyTokenId = process.env.LAZY_TOKEN_ID;
+      const hbarBalance = user.balances.tokens[HBAR_TOKEN_KEY]?.available ?? 0;
+      const lazyBalance =
+        lazyTokenId ? (user.balances.tokens[lazyTokenId]?.available ?? 0) : 0;
+      let restrictedFeeToken: 'HBAR' | 'LAZY' | 'any';
+      if (hbarBalance > 0 && lazyBalance === 0) {
+        restrictedFeeToken = 'HBAR';
+      } else if (lazyBalance > 0 && hbarBalance === 0) {
+        restrictedFeeToken = 'LAZY';
+      } else {
+        // Both > 0 (or both == 0, but we'd have errored above).
+        // Stage 2 will fix the cross-token settlement math; for
+        // now leave the filter open and accept the residual bug.
+        restrictedFeeToken = user.strategySnapshot.poolFilter.feeToken;
+      }
+      if (restrictedFeeToken !== user.strategySnapshot.poolFilter.feeToken) {
+        logger.info('pool filter restricted to user-funded token', {
+          component: 'MultiUserAgent',
+          event: 'pool_filter_restricted',
+          userId,
+          original: user.strategySnapshot.poolFilter.feeToken,
+          restricted: restrictedFeeToken,
+          hbarBalance,
+          lazyBalance,
+        });
+      }
+
       const userStrategy = {
         ...user.strategySnapshot,
+        poolFilter: {
+          ...user.strategySnapshot.poolFilter,
+          feeToken: restrictedFeeToken,
+        },
         budget: {
           ...user.strategySnapshot.budget,
           tokenBudgets: cappedBudgets,
