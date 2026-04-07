@@ -75,6 +75,16 @@ interface AuditSummary {
   totalRake: number;
   totalBurned: number;
   totalWithdrawn: number;
+  /** Total prize value won across all play sessions (informational, not part of balance math). */
+  totalWon?: number;
+  /**
+   * Remaining play money in the agent's internal ledger:
+   * deposited - rake - played - withdrawn. NOT a profit/loss net —
+   * prizes never flow into this ledger because they go directly to
+   * the user's EOA via the contract's transferPendingPrizes call.
+   */
+  balanceLeft?: number;
+  /** Legacy alias for balanceLeft. Will be removed in a future PR. */
   netBalance: number;
 }
 
@@ -548,34 +558,66 @@ export default function AuditPage() {
           </div>
         )}
 
-        {/* ---- Summary Bar ---- */}
-        <div className="mb-8 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted">
-          <span>
-            Deposited:{' '}
-            <span className="text-success">{formatAmount(summary.totalDeposited)}</span>
-          </span>
-          <span className="hidden sm:inline">|</span>
-          <span>
-            Rake:{' '}
-            <span className="text-brand">{formatAmount(summary.totalRake)}</span>
-          </span>
-          <span className="hidden sm:inline">|</span>
-          <span>
-            Played:{' '}
-            <span className="text-info">{formatAmount(summary.totalBurned)}</span>
-          </span>
-          <span className="hidden sm:inline">|</span>
-          <span>
-            Withdrawn:{' '}
-            <span className="text-foreground">{formatAmount(summary.totalWithdrawn)}</span>
-          </span>
-          <span className="hidden sm:inline">|</span>
-          <span>
-            Net:{' '}
-            <span className={summary.netBalance >= 0 ? 'text-success' : 'text-destructive'}>
-              {summary.netBalance >= 0 ? '+' : ''}{formatAmount(summary.netBalance)}
+        {/* ---- Summary Bar ────────────────────────────────────
+            Two-row layout that distinguishes the two distinct
+            dimensions of the user's account state:
+
+              Row 1 (money flow): Deposited - Rake - Played - Withdrawn = Balance left.
+                "Balance left" is the remaining play money in the
+                agent's internal ledger, NOT a profit/loss net.
+
+              Row 2 (winnings, informational): Total prize value won.
+                Prizes never enter the internal ledger — they go
+                directly to the user's EOA via the contract's
+                transferPendingPrizes call. Surfaced separately so
+                users can see at a glance what they've won without
+                expanding individual session cards.
+
+            Previously the summary had a single "Net" field
+            computed as deposit - rake - played - withdrawn, which
+            confused users who read "Net" as P/L. The relabel +
+            split fixes that. ---- */}
+        <div className="mb-8 space-y-1 text-sm text-muted">
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            <span>
+              Deposited:{' '}
+              <span className="text-success">{formatAmount(summary.totalDeposited)}</span>
             </span>
-          </span>
+            <span className="hidden sm:inline">|</span>
+            <span>
+              Rake:{' '}
+              <span className="text-brand">{formatAmount(summary.totalRake)}</span>
+            </span>
+            <span className="hidden sm:inline">|</span>
+            <span>
+              Played:{' '}
+              <span className="text-info">{formatAmount(summary.totalBurned)}</span>
+            </span>
+            <span className="hidden sm:inline">|</span>
+            <span>
+              Withdrawn:{' '}
+              <span className="text-foreground">{formatAmount(summary.totalWithdrawn)}</span>
+            </span>
+            <span className="hidden sm:inline">|</span>
+            <span>
+              Balance left:{' '}
+              <span className={(summary.balanceLeft ?? summary.netBalance) >= 0 ? 'text-success' : 'text-destructive'}>
+                {formatAmount(summary.balanceLeft ?? summary.netBalance)}
+              </span>
+            </span>
+          </div>
+          {summary.totalWon != null && summary.totalWon > 0 && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              <span>
+                Won (claim on dApp):{' '}
+                <span className="text-brand">+{formatAmount(summary.totalWon)}</span>
+              </span>
+              <span className="text-[11px] italic text-muted/60">
+                Winnings flow to your wallet directly via the contract; they don&apos;t
+                offset your balance above.
+              </span>
+            </div>
+          )}
         </div>
 
         {/* NFT enrichment error banner */}

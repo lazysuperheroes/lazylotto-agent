@@ -345,6 +345,7 @@ export async function GET(request: Request) {
     let totalRake = 0;
     let totalBurned = 0;
     let totalWithdrawn = 0;
+    let totalWon = 0;
 
     for (const msg of allMessages) {
       const { seq, timestamp, payload } = decodeMessage(msg);
@@ -368,6 +369,9 @@ export async function GET(request: Request) {
               wins: p.wins,
               prizeDetails: p.prizeDetails,
             }));
+          // Aggregate prize value into the summary so users can see
+          // wins alongside spend, not buried inside session cards.
+          totalWon += session.totalPrizeValue ?? 0;
         }
       }
 
@@ -396,7 +400,13 @@ export async function GET(request: Request) {
       }
     }
 
-    const netBalance = totalDeposited - totalRake - totalBurned - totalWithdrawn;
+    // `balanceLeft` is the user's remaining play money in the agent's
+    // internal ledger (NOT a profit/loss net). Prizes never enter this
+    // ledger because winnings flow directly to the user's EOA via the
+    // contract's transferPendingPrizes call. The previous "Net" label
+    // confused this with P/L; surfaced as balanceLeft + totalWon as
+    // a separate dimension on the audit page.
+    const balanceLeft = totalDeposited - totalRake - totalBurned - totalWithdrawn;
 
     const explorerBase = network === 'mainnet'
       ? 'https://hashscan.io/mainnet'
@@ -413,7 +423,10 @@ export async function GET(request: Request) {
           totalRake: Math.round(totalRake * 100) / 100,
           totalBurned: Math.round(totalBurned * 100) / 100,
           totalWithdrawn: Math.round(totalWithdrawn * 100) / 100,
-          netBalance: Math.round(netBalance * 100) / 100,
+          totalWon: Math.round(totalWon * 100) / 100,
+          balanceLeft: Math.round(balanceLeft * 100) / 100,
+          // Legacy field for any consumer that hasn't been updated.
+          netBalance: Math.round(balanceLeft * 100) / 100,
         },
       },
       { headers: CORS_HEADERS },
