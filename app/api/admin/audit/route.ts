@@ -13,8 +13,10 @@
 
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
+import { getStore } from '../../_lib/store';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { HEDERA_DEFAULTS } from '~/config/defaults';
+import type { PlaySessionResult } from '~/custodial/types';
 
 // ---------------------------------------------------------------------------
 // Mirror node types
@@ -47,6 +49,22 @@ interface AuditEntry {
   memo?: string;
   sessionId?: string;
   burns?: { amount: string; memo: string }[];
+  /**
+   * Play session results enriched from the local store when sessionId
+   * matches. Mirror node messages only contain the burn sub-operations
+   * (per-pool entry buys), so without this enrichment a play entry has
+   * no cost total, no win count, and no prize details — which makes
+   * walking through the audit impossible. We join HCS-20 messages
+   * back to PlaySessionResult records via sessionId to fill in the
+   * gaps.
+   */
+  totalWins?: number;
+  totalSpent?: number;
+  poolResults?: {
+    poolName: string;
+    wins: number;
+    prizeDetails: unknown[];
+  }[];
   raw: Record<string, unknown>;
 }
 
@@ -286,6 +304,45 @@ export async function GET(request: Request) {
       }
     }
 
+    // Build a sessionId → PlaySessionResult map so we can enrich each
+    // play audit entry with cost/wins/prizes. The HCS-20 batch message
+    // for a play only has the per-pool burn sub-ops, NOT the rich
+    // session metadata — that lives in the local store keyed by
+    // sessionId.
+    //
+    // Two strategies:
+    //   1. User filter active → resolve that user, refresh just their
+    //      plays, build the map from one user's sessions. Cheap.
+    //   2. No filter → iterate all users and union their sessions.
+    //      Slower (one Redis fetch per user) but the only way to
+    //      enrich the unfiltered admin view.
+    //
+    // Failure here is non-fatal: if the store lookup fails, plays
+    // just render unenriched (the way they did before this fix).
+    const store = await getStore();
+    await store.refreshUserIndex();
+    const sessionMap = new Map<string, PlaySessionResult>();
+    try {
+      if (userFilter) {
+        const filteredUser = store.getUserByAccountId(userFilter);
+        if (filteredUser) {
+          await store.refreshPlaysForUser(filteredUser.userId);
+          for (const s of store.getPlaySessionsForUser(filteredUser.userId)) {
+            sessionMap.set(s.sessionId, s);
+          }
+        }
+      } else {
+        for (const u of store.getAllUsers()) {
+          await store.refreshPlaysForUser(u.userId);
+          for (const s of store.getPlaySessionsForUser(u.userId)) {
+            sessionMap.set(s.sessionId, s);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[admin/audit] session enrichment failed:', err);
+    }
+
     // Build entries — optionally filtered by user
     const entries: AuditEntry[] = [];
     let totalDeposited = 0;
@@ -298,6 +355,26 @@ export async function GET(request: Request) {
       if (userFilter && !involvesAccount(payload, userFilter)) continue;
 
       const entry = toAuditEntry(seq, timestamp, payload);
+
+      // Enrich play entries with the matching session record so the
+      // dashboard can show per-pool wins, prize NFT cards, and the
+      // total spent vs won. Mirrors the user audit endpoint's
+      // enrichment block (app/api/user/audit/route.ts:298-313).
+      if (entry.type === 'play' && entry.sessionId) {
+        const session = sessionMap.get(entry.sessionId);
+        if (session) {
+          entry.totalWins = session.totalWins;
+          entry.totalSpent = session.totalSpent;
+          entry.poolResults = session.poolResults
+            .filter((p) => p.wins > 0)
+            .map((p) => ({
+              poolName: p.poolName,
+              wins: p.wins,
+              prizeDetails: p.prizeDetails,
+            }));
+        }
+      }
+
       entries.push(entry);
 
       // Accumulate summary

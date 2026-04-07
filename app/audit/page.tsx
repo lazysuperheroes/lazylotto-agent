@@ -575,7 +575,17 @@ export default function AuditPage() {
                   key={entry.sequence}
                   className={`relative border border-secondary ${accentColor(entry.type)} border-l-4 p-4 pl-6`}
                 >
-                  {/* Header row: badge + timestamp + amount */}
+                  {/* Header row: badge + timestamp + amount.
+                      For deposit/rake/withdrawal entries, the HCS-20
+                      message has a top-level `amt` field that lands in
+                      entry.amount. For play entries, the batch message
+                      has no top-level amount (the cost lives in the
+                      burn sub-ops), so we surface the enriched
+                      totalSpent here instead — same right-column
+                      placement, so the user can scan a column of
+                      amounts to walk through the audit. The "spent"
+                      annotation distinguishes it from a deposit/rake
+                      readout. */}
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-3">
                       <span
@@ -588,11 +598,18 @@ export default function AuditPage() {
                       </span>
                     </div>
 
-                    {entry.amount && (
+                    {entry.amount ? (
                       <span className="font-heading text-sm text-foreground">
                         {entry.amount} {displayToken(entry.token)}
                       </span>
-                    )}
+                    ) : entry.type === 'play' && entry.totalSpent != null ? (
+                      <span className="font-heading text-sm text-foreground">
+                        {formatAmount(entry.totalSpent)}
+                        <span className="ml-1 text-[10px] uppercase tracking-wider text-muted">
+                          spent
+                        </span>
+                      </span>
+                    ) : null}
                   </div>
 
                   {/* Details */}
