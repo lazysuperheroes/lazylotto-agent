@@ -87,6 +87,16 @@ export default function AccountPage() {
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [statusLoading, setStatusLoading] = useState(true);
+  // True when the auth token is valid but the user has no player profile
+  // (admin-only accounts who never registered as a player). The profile
+  // section then renders a "no player profile" panel with the localStorage
+  // identity instead of going blank.
+  const [notRegistered, setNotRegistered] = useState(false);
+  // Snapshot of localStorage so the profile section has SOMETHING to show
+  // for admin-only / not-registered users. Reads happen in a mount effect
+  // to keep SSR deterministic.
+  const [storedAccountId, setStoredAccountId] = useState<string | null>(null);
+  const [storedTier, setStoredTier] = useState<string | null>(null);
   const [deadLetters, setDeadLetters] = useState<UserDeadLetter[]>([]);
   const [publicStats, setPublicStats] = useState<PublicStats | null>(null);
   const [lockLoading, setLockLoading] = useState(false);
@@ -133,6 +143,8 @@ export default function AccountPage() {
   useEffect(() => {
     const token = localStorage.getItem('lazylotto:sessionToken');
     setSessionToken(token);
+    setStoredAccountId(localStorage.getItem('lazylotto:accountId'));
+    setStoredTier(localStorage.getItem('lazylotto:tier'));
     if (!token) {
       router.replace('/auth');
       return;
@@ -147,6 +159,16 @@ export default function AccountPage() {
           localStorage.removeItem('lazylotto:accountId');
           localStorage.removeItem('lazylotto:tier');
           router.replace('/auth?expired=1');
+          return;
+        }
+        if (res.status === 404) {
+          // Authenticated but no player profile — common for admin-only
+          // accounts that never registered as players. Surface as a
+          // distinct state so the profile section can render the
+          // localStorage identity + an explanation, instead of going
+          // blank. The previous version silently swallowed the 404 and
+          // the profile card just showed nothing.
+          setNotRegistered(true);
           return;
         }
         if (res.ok) {
@@ -328,6 +350,42 @@ export default function AccountPage() {
                     <dt className="label-caps mb-1">Status</dt>
                     <dd className="text-sm text-foreground">
                       {status.active ? 'Active' : 'Inactive'}
+                    </dd>
+                  </div>
+                </dl>
+              ) : notRegistered ? (
+                // Authenticated but no player profile. Common case: an
+                // operator/admin who never registered as a player. Show
+                // what we know from localStorage + a friendly explanation
+                // + a link to /dashboard where they can register if they
+                // want to also play.
+                <dl
+                  aria-label="Account profile"
+                  className="grid gap-x-8 gap-y-4 sm:grid-cols-2"
+                >
+                  <div>
+                    <dt className="label-caps mb-1">Hedera account</dt>
+                    <dd className="font-mono text-sm text-foreground">
+                      {storedAccountId ?? '—'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="label-caps mb-1">Tier</dt>
+                    <dd className="text-sm capitalize text-foreground">
+                      {storedTier ?? 'user'}
+                    </dd>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <dt className="label-caps mb-1">Player profile</dt>
+                    <dd className="text-sm text-muted">
+                      Not registered as a player.{' '}
+                      <a
+                        href="/dashboard"
+                        className="text-brand transition-colors hover:text-foreground"
+                      >
+                        Register on the dashboard
+                      </a>{' '}
+                      if you want to play with this account.
                     </dd>
                   </div>
                 </dl>

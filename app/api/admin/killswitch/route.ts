@@ -8,7 +8,13 @@
  * POST   — engage with { reason: string }
  * DELETE — disengage
  *
- * Requires 'operator' tier auth.
+ * Requires 'admin' tier auth. (Was 'operator' originally — but the
+ * 'operator' tier is only granted to MCP_AUTH_TOKEN bearers via the
+ * shared-secret middleware path. WalletConnect users top out at
+ * 'admin' tier (when their accountId is in ADMIN_ACCOUNTS), and the
+ * admin page UI is the primary surface for engaging the kill switch
+ * during an incident. Locking it to operator made the kill switch
+ * unreachable from the web UI.)
  */
 
 import { NextResponse } from 'next/server';
@@ -31,7 +37,7 @@ export async function OPTIONS() {
 }
 
 export async function GET(request: Request) {
-  const auth = await requireTier(request, 'operator');
+  const auth = await requireTier(request, 'admin');
   if (isErrorResponse(auth)) return auth;
 
   const state = await getKillSwitchState();
@@ -40,7 +46,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const auth = await requireTier(request, 'operator');
+    const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
 
     const body = (await request.json().catch(() => ({}))) as {
@@ -81,7 +87,7 @@ export async function POST(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
-    const auth = await requireTier(request, 'operator');
+    const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
 
     await disableKillSwitch(auth.accountId);
