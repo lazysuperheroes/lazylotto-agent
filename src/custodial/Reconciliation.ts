@@ -194,6 +194,14 @@ export async function reconcile(
   //    stamped version. `0` means no schemaVersion field (legacy /
   //    pre-PR4 write). When the operator plans a migration they can
   //    see exactly how many records are behind the current version.
+  //
+  //    NOTE: schema drift is *not* added to the warnings array. It's
+  //    informational state, surfaced through the structured `schema`
+  //    field on the result so the admin UI can render it as its own
+  //    section instead of mixing it in with insolvency / unaccounted
+  //    warnings (which are real concerns). Operators run the migrate-
+  //    schema endpoint to clear it; until then v0 and v1 records are
+  //    structurally identical so there's nothing actionable.
   const schemaUserCounts: Record<number, number> = {};
   for (const user of users) {
     const v = user.schemaVersion ?? 0;
@@ -205,12 +213,6 @@ export async function reconcile(
     Object.keys(schemaUserCounts).every(
       (k) => Number(k) === CURRENT_SCHEMA_VERSION,
     );
-  if (!allAtCurrent) {
-    warnings.push(
-      `Schema drift: some records are behind v${CURRENT_SCHEMA_VERSION}. ` +
-        `Users: ${JSON.stringify(schemaUserCounts)}, operator: v${schemaOperator}.`,
-    );
-  }
 
   const pendingLedgerRemaining = await getPendingLedgerCount();
   if (pendingLedgerRemaining > 0) {

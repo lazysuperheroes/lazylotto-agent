@@ -199,6 +199,12 @@ export default function AdminPage() {
   const [operatorBalances, setOperatorBalances] = useState<OperatorBalanceRow[]>([]);
 
   // Reconciliation state
+  interface SchemaVersionReport {
+    current: number;
+    users: Record<number, number>;
+    operator: number;
+    allAtCurrent: boolean;
+  }
   interface ReconciliationResult {
     timestamp: string;
     onChain: Record<string, number>;
@@ -218,11 +224,23 @@ export default function AdminPage() {
     symbols?: Record<string, string>;
     solvent: boolean;
     warnings: string[];
+    /**
+     * Schema version divergence report. Surfaces which records are
+     * behind the current schema version. v0 = legacy/unstamped (pre
+     * PR4), v1 = current. Operators can run the migrate-schema
+     * endpoint to clear drift; until then v0 records remain readable
+     * because v0 and v1 are structurally identical.
+     */
+    schema?: SchemaVersionReport;
   }
   const [reconRunning, setReconRunning] = useState(false);
   const [reconMessage, setReconMessage] = useState<string | null>(null);
   const [reconResult, setReconResult] = useState<ReconciliationResult | null>(null);
   const [reconOpen, setReconOpen] = useState(false);
+  // Schema migration state — driven by the Schema Status section's
+  // "Migrate to current" button which posts to /api/admin/migrate-schema
+  // and refreshes the recon result on success.
+  const [migrateLoading, setMigrateLoading] = useState(false);
 
   const [operatorOpen, setOperatorOpen] = useState(false);
 
@@ -483,6 +501,49 @@ export default function AdminPage() {
       setReconRunning(false);
     }
   }, [authFetch]);
+
+  // --- Migrate schema ---
+  // Re-stamps every user record + the operator state with the current
+  // schemaVersion. Idempotent: safe to run when there's no drift, just
+  // returns "0 migrated". Re-runs reconciliation on success so the
+  // Schema Status section updates inline without a manual refresh.
+  const handleMigrateSchema = useCallback(async () => {
+    setMigrateLoading(true);
+    try {
+      const res = await authFetch('/api/admin/migrate-schema', {
+        method: 'POST',
+      });
+      if (res.status === 403) {
+        toast('Migration failed: insufficient permissions', { variant: 'error' });
+        return;
+      }
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast(
+          `Migration failed: ${(body as { error?: string }).error ?? res.status}`,
+          { variant: 'error' },
+        );
+        return;
+      }
+      const result = body as {
+        usersMigrated: number;
+        usersBehindBefore: number;
+        operatorMigrated: boolean;
+      };
+      const usersWord = result.usersMigrated === 1 ? 'record' : 'records';
+      toast(
+        `Migrated ${result.usersMigrated} user ${usersWord} + operator state`,
+      );
+      // Re-run reconciliation so the Schema Status section reflects
+      // the post-migration state without a manual click.
+      await handleReconciliation();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Migration request failed';
+      toast(`Migration failed: ${message}`, { variant: 'error' });
+    } finally {
+      setMigrateLoading(false);
+    }
+  }, [authFetch, toast, handleReconciliation]);
 
   // --- Refund dead letter ---
   // Feedback flows through toast() (success/error variants) for parity
@@ -1150,7 +1211,12 @@ export default function AdminPage() {
                       </p>
                     </div>
 
-                    {/* Warnings */}
+                    {/* Warnings — real concerns only (insolvency,
+                        unaccounted, fee fetch failures, queued ledger
+                        adjustments). Schema drift is no longer mixed
+                        in here; it has its own informational section
+                        below so the destructive panel reflects actual
+                        actionable problems. */}
                     {reconResult.warnings.length > 0 && (
                       <div className="border-l-2 border-destructive bg-destructive/10 px-4 py-3">
                         <p className="label-caps-destructive mb-2">Warnings</p>
@@ -1159,6 +1225,84 @@ export default function AdminPage() {
                             <li key={i}>• {w}</li>
                           ))}
                         </ul>
+                      </div>
+                    )}
+
+                    {/* Schema status — informational section, separate
+                        from warnings. Shows which records are at the
+                        current schema version vs behind, plus a one-
+                        click migration button when drift exists.
+                        Calm/muted tone because it's not an alarm —
+                        v0 (legacy/unstamped) and v1 are structurally
+                        identical, drift just means some records were
+                        written before the schemaVersion field existed.
+                        Active users converge naturally; the migration
+                        button re-stamps inactive ones. */}
+                    {reconResult.schema && (
+                      <div
+                        className={`border-l-2 px-4 py-3 ${
+                          reconResult.schema.allAtCurrent
+                            ? 'border-success bg-success/5'
+                            : 'border-brand bg-brand/5'
+                        }`}
+                      >
+                        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-3">
+                          <p className="label-caps">Schema status</p>
+                          {!reconResult.schema.allAtCurrent && (
+                            <button
+                              type="button"
+                              onClick={() => void handleMigrateSchema()}
+                              disabled={migrateLoading || reconRunning}
+                              className="border border-brand bg-brand/10 px-3 py-1 font-pixel text-[9px] uppercase tracking-wider text-brand transition-colors hover:bg-brand hover:text-background disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {migrateLoading
+                                ? 'Migrating…'
+                                : `Migrate to v${reconResult.schema.current}`}
+                            </button>
+                          )}
+                        </div>
+                        {reconResult.schema.allAtCurrent ? (
+                          <p className="text-xs text-success">
+                            ✓ All records at v{reconResult.schema.current}
+                          </p>
+                        ) : (
+                          <div className="space-y-1 text-xs text-muted">
+                            <p>
+                              Current version:{' '}
+                              <span className="text-foreground font-mono">
+                                v{reconResult.schema.current}
+                              </span>
+                            </p>
+                            <p>
+                              Users:{' '}
+                              {Object.entries(reconResult.schema.users).map(
+                                ([v, count], i, arr) => (
+                                  <span key={v}>
+                                    <span className="font-mono text-foreground">
+                                      {count}
+                                    </span>{' '}
+                                    at v{v}
+                                    {i < arr.length - 1 ? ', ' : ''}
+                                  </span>
+                                ),
+                              )}
+                            </p>
+                            <p>
+                              Operator:{' '}
+                              <span className="font-mono text-foreground">
+                                v{reconResult.schema.operator}
+                              </span>
+                            </p>
+                            <p className="mt-2 text-[11px] italic">
+                              Records written before the schemaVersion
+                              field existed are counted as v0. v0 and v
+                              {reconResult.schema.current} are
+                              structurally identical — migration just
+                              re-stamps the field so the drift report
+                              clears. Safe to run anytime; idempotent.
+                            </p>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
