@@ -198,16 +198,27 @@ export const POST = withStore(async (request: Request) => {
     }
 
     // Attach rate limit diagnostic headers to the success response.
-    // The SDK builds the Response object so we have to clone it (or
-    // create a new one with the same body + status + merged headers).
-    // Headers are immutable on the original Response — clone is the
-    // safest path.
+    // The SDK builds the Response with a ReadableStream body which
+    // can't be re-attached to a new Response without consuming it
+    // first (the stream gets locked). So we read the body as text,
+    // then construct a new Response with the merged headers and the
+    // text body. enableJsonResponse:true means the body is always
+    // a JSON string, so .text() is safe.
+    let bodyText: string;
+    try {
+      bodyText = await response.text();
+    } catch (textErr) {
+      console.error('[mcp] failed to read response body for header attach:', textErr);
+      // Bail out and return the original response without diagnostic
+      // headers — better to lose the headers than break the response.
+      return response;
+    }
     const headersWithRateLimit = new Headers(response.headers);
     if (rateLimitState) {
       const rl = rateLimitHeaders(rateLimitState);
       for (const [k, v] of Object.entries(rl)) headersWithRateLimit.set(k, v);
     }
-    const finalResponse = new Response(response.body, {
+    const finalResponse = new Response(bodyText, {
       status: response.status,
       statusText: response.statusText,
       headers: headersWithRateLimit,
