@@ -248,6 +248,25 @@ export default function AdminPage() {
   // ------------------------------------------------------------------
   // Auth-aware fetch helper
   // ------------------------------------------------------------------
+  //
+  // Pure: injects the Authorization header, handles 401 (universally
+  // fatal — no valid session means nothing on this page can work, so
+  // we redirect to /auth immediately), and returns the response for
+  // every other status. The caller decides what to do with 403/404/5xx
+  // because each call site has different criticality:
+  //
+  //   - /api/admin/overview: critical path. 403 = page denied.
+  //   - /api/admin/users / dead-letters / killswitch (GET): optional.
+  //     403 = silent skip, the corresponding card just doesn't render.
+  //   - mutation handlers (refund / withdraw-fees / killswitch POST):
+  //     403 = toast on the affected action, leave the rest of the page
+  //     working.
+  //
+  // The previous version set a global `error` state on any 403 and
+  // threw 'forbidden', which meant ANY parallel admin call returning
+  // 403 tipped the whole page into the denied state — even when other
+  // calls were succeeding. That was the killswitch-tier-mismatch bug
+  // hidden in plain sight.
   const authFetch = useCallback(
     async (url: string, options?: RequestInit): Promise<Response> => {
       const token = localStorage.getItem('lazylotto:sessionToken');
@@ -269,12 +288,6 @@ export default function AdminPage() {
         localStorage.removeItem('lazylotto:accountId');
         router.replace('/auth?expired=1');
         return new Promise(() => {});
-      }
-
-      if (res.status === 403) {
-        setError('Insufficient permissions. Admin access required.');
-        setLoading(false);
-        throw new Error('forbidden');
       }
 
       return res;
@@ -303,6 +316,15 @@ export default function AdminPage() {
       try {
         const res = await authFetch('/api/admin/overview');
         if (cancelled) return;
+        if (res.status === 403) {
+          // Critical-path 403: the user authenticated but doesn't have
+          // admin tier. The whole page can't render meaningfully without
+          // overview data, so set the global error and let the denied
+          // state render. Other parallel calls (users, killswitch, etc)
+          // are now allowed to fail independently without tripping this.
+          setError('Insufficient permissions. Admin access required.');
+          return;
+        }
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           setError(
@@ -316,7 +338,6 @@ export default function AdminPage() {
         setOperatorBalances(deriveOperatorBalances(data.operator));
       } catch (err) {
         if (cancelled) return;
-        if (err instanceof Error && err.message === 'forbidden') return;
         setError(err instanceof Error ? err.message : 'Failed to load overview');
       } finally {
         if (!cancelled) setLoading(false);
@@ -432,7 +453,9 @@ export default function AdminPage() {
       const res = await authFetch('/api/admin/reconcile', { method: 'POST' });
       const body = await res.json();
 
-      if (res.status === 501) {
+      if (res.status === 403) {
+        setReconMessage('Insufficient permissions for reconciliation.');
+      } else if (res.status === 501) {
         setReconMessage(
           (body as { message?: string; error?: string }).message ??
             (body as { error?: string }).error ??
@@ -447,7 +470,6 @@ export default function AdminPage() {
         setReconResult(body as ReconciliationResult);
       }
     } catch (err) {
-      if (err instanceof Error && err.message === 'forbidden') return;
       setReconMessage(err instanceof Error ? err.message : 'Reconciliation request failed');
     } finally {
       setReconRunning(false);
@@ -466,6 +488,12 @@ export default function AdminPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ transactionId }),
         });
+
+        if (res.status === 403) {
+          toast('Refund failed: insufficient permissions', { variant: 'error' });
+          return;
+        }
+
         const body = await res.json().catch(() => ({}));
 
         if (!res.ok) {
@@ -481,7 +509,6 @@ export default function AdminPage() {
           prev.filter((dl) => dl.transactionId !== transactionId),
         );
       } catch (err) {
-        if (err instanceof Error && err.message === 'forbidden') return;
         const message =
           err instanceof Error ? err.message : 'Refund request failed';
         toast(`Refund failed: ${message}`, { variant: 'error' });
@@ -513,6 +540,9 @@ export default function AdminPage() {
           ...(withdrawFeesTo ? { to: withdrawFeesTo } : {}),
         }),
       });
+      if (res.status === 403) {
+        throw new Error('Insufficient permissions for fee withdrawal');
+      }
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(
@@ -566,6 +596,9 @@ export default function AdminPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason }),
       });
+      if (res.status === 403) {
+        throw new Error('Insufficient permissions to engage kill switch');
+      }
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(
@@ -588,6 +621,9 @@ export default function AdminPage() {
     setKillSwitchLoading(true);
     try {
       const res = await authFetch('/api/admin/killswitch', { method: 'DELETE' });
+      if (res.status === 403) {
+        throw new Error('Insufficient permissions to disable kill switch');
+      }
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(
