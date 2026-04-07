@@ -31,6 +31,25 @@ import { HBAR_TOKEN_KEY } from '../config/strategy.js';
 // pure conversion / mapping functions with no agent state.
 
 /**
+ * Map a PoolResult.feeTokenId to the spentToken value the v2 audit
+ * messages should carry. The audit reader uses this to attribute
+ * spending per token, and external auditors rely on it to verify
+ * the agent didn't lie about which token was charged.
+ *
+ * "hbar" / "HBAR" / "" → "HBAR" (canonical native form)
+ * Hedera token ID (0.0.X) → returned unchanged
+ *
+ * The reader and the writer must agree on this mapping or the
+ * poolsRoot Merkle hash on play_session_close won't match what the
+ * reader recomputes from the pool messages it actually saw.
+ */
+function poolFeeTokenForAudit(feeTokenId: string | undefined): string {
+  if (!feeTokenId) return 'HBAR';
+  if (feeTokenId === 'hbar' || feeTokenId === 'HBAR') return 'HBAR';
+  return feeTokenId;
+}
+
+/**
  * Convert the agent's internal PrizeDetail[] shape (from
  * ReportGenerator) into the v2 wire shape PrizeEntry[]. Folds NFT
  * prizes by token ID so each NFT collection becomes a single entry
@@ -363,81 +382,137 @@ export class MultiUserAgent {
       throw new UserInactiveError(userId);
     }
 
-    // Select the token with the highest available balance to play with.
-    // Future enhancement: iterate all budgeted tokens and play each in sequence.
-    let primaryToken = 'hbar';
-    let bestAvailable = 0;
-    for (const tokenKey of Object.keys(user.strategySnapshot.budget.tokenBudgets)) {
+    // ── Per-token reservation (Stage 2) ──────────────────────
+    //
+    // Build a Map<token, reservedAmount> over the intersection of:
+    //   - tokens the user has positive balance in
+    //   - tokens the strategy budgets
+    //
+    // We reserve the per-token cap (or the user's full balance if
+    // smaller) for each one. The resulting set defines exactly
+    // which fee tokens the play loop can spend in. This replaces
+    // the old "pick one primary token" approach which conflated
+    // billing with selection and let cross-token spending leak
+    // operator funds. See the Stage 1 commit message for the
+    // incident background.
+    //
+    // After play, we settle each token independently from
+    // report.poolResults grouped by feeTokenId — no more sum-
+    // across-tokens math. Unused reservations are released per
+    // token. If any pool spent a token we didn't reserve, that's
+    // a defense-in-depth invariant violation and we throw.
+    const tokenReservations = new Map<string, number>();
+    for (const [tokenKey, tokenBudget] of Object.entries(user.strategySnapshot.budget.tokenBudgets)) {
       const entry = user.balances.tokens[tokenKey];
-      if (entry && entry.available > bestAvailable) {
-        bestAvailable = entry.available;
-        primaryToken = tokenKey;
+      const available = entry?.available ?? 0;
+      if (available <= 0) continue;
+      const cap = tokenBudget.maxPerSession ?? available;
+      const reserve = Math.min(cap, available);
+      if (reserve > 0) {
+        tokenReservations.set(tokenKey, reserve);
       }
     }
-    const firstTokenBudget = user.strategySnapshot.budget.tokenBudgets[primaryToken];
-    // Get available balance for the primary token
-    const tokenEntry = user.balances.tokens[primaryToken];
-    const tokenAvailable = tokenEntry?.available ?? 0;
-    const maxSession = firstTokenBudget?.maxPerSession ?? tokenAvailable;
-    const sessionBudget = Math.min(maxSession, tokenAvailable);
 
-    if (sessionBudget < this.config.minDepositAmount) {
+    if (tokenReservations.size === 0) {
       this.releaseLock(userId);
-      throw new InsufficientBalanceError(userId, this.config.minDepositAmount, tokenAvailable);
+      // Pick a representative balance for the error message — HBAR if
+      // the user has any, otherwise just 0. The error tells the user
+      // they need to deposit before they can play.
+      const hbarAvail = user.balances.tokens[HBAR_TOKEN_KEY]?.available ?? 0;
+      throw new InsufficientBalanceError(userId, this.config.minDepositAmount, hbarAvail);
     }
 
-    // Reserve funds before any on-chain interaction
-    this.ledger.reserve(userId, sessionBudget, primaryToken);
+    // The "primary token" concept is retained for legacy session
+    // record fields and backward-compat ledger calls, but it's
+    // now derived from the largest reservation rather than driving
+    // settlement.
+    let primaryToken = 'hbar';
+    let largestReservation = 0;
+    for (const [token, amount] of tokenReservations) {
+      if (amount > largestReservation) {
+        largestReservation = amount;
+        primaryToken = token;
+      }
+    }
+    // sessionBudget kept for legacy fields (amountReserved on
+    // PlaySessionResult). It's the largest single-token
+    // reservation, which is correct as a "headline" number even
+    // when multi-token plays happen.
+    const sessionBudget = largestReservation;
+
+    if (largestReservation < this.config.minDepositAmount) {
+      this.releaseLock(userId);
+      throw new InsufficientBalanceError(userId, this.config.minDepositAmount, largestReservation);
+    }
+
+    // Reserve every token in the set. If any reservation throws
+    // (insufficient balance race), release everything that did
+    // succeed and bail.
+    const successfullyReserved: { token: string; amount: number }[] = [];
+    try {
+      for (const [token, amount] of tokenReservations) {
+        this.ledger.reserve(userId, amount, token);
+        successfullyReserved.push({ token, amount });
+      }
+    } catch (reserveErr) {
+      for (const r of successfullyReserved) {
+        try {
+          this.ledger.releaseReserve(userId, r.amount, r.token);
+        } catch {
+          /* best effort */
+        }
+      }
+      this.releaseLock(userId);
+      throw reserveErr;
+    }
 
     try {
-      // Build a user-specific strategy with their EOA as prize destination
-      // Cap the token budget to the reserved amount to prevent overspend
-      const cappedBudgets = { ...user.strategySnapshot.budget.tokenBudgets };
-      if (cappedBudgets[primaryToken]) {
-        cappedBudgets[primaryToken] = {
-          ...cappedBudgets[primaryToken],
-          maxPerSession: Math.min(cappedBudgets[primaryToken].maxPerSession, sessionBudget),
+      // Build a user-specific strategy with their EOA as prize
+      // destination. Cap each reserved token's budget to the
+      // amount we actually reserved for it, so the LottoAgent
+      // budget manager can't overspend. Drop any token from
+      // tokenBudgets that we didn't reserve (because the user
+      // had 0 balance in it) — the play loop will then refuse
+      // to consider pools in that token via maxEntriesForPool().
+      const cappedBudgets: Record<string, { maxPerSession: number; maxPerPool: number; reserve: number }> = {};
+      for (const [token, reserved] of tokenReservations) {
+        const original = user.strategySnapshot.budget.tokenBudgets[token];
+        if (!original) continue;
+        cappedBudgets[token] = {
+          ...original,
+          maxPerSession: Math.min(original.maxPerSession, reserved),
         };
       }
-      // ── Stage 1 stop-gap: tighten the pool filter to tokens the
-      // user actually has positive balance in. Without this, the
-      // play loop's discovery picks ANY pool the strategy filter
-      // allows (default `feeToken: 'any'`), which means a user
-      // with only HBAR can trigger LAZY pool plays — and the LAZY
-      // entry fee comes out of the AGENT WALLET'S LAZY balance
-      // (operator funds), while the user is mis-billed in HBAR
-      // because primaryToken == 'hbar' is what gets settled.
-      //
-      // The schema constrains feeToken to 'HBAR' | 'LAZY' | 'any',
-      // so we can only express three cases here. The mixed-balance
-      // case still goes through 'any' and Stage 2's per-token
-      // settlement refactor will handle it correctly. The
-      // single-token cases below stop the operator-fund bleed
-      // immediately for the most common scenario (HBAR-only user).
+
+      // Pool filter override (Stage 1 carried forward into Stage 2):
+      // restrict to tokens the user has reservations in. The schema
+      // only allows 'HBAR' | 'LAZY' | 'any', so when the user has
+      // reservations in BOTH (HBAR + LAZY), we leave the filter as
+      // 'any' — the cappedBudgets above already prevents the play
+      // loop from spending tokens we didn't reserve. When the user
+      // has reservations in EXACTLY ONE of HBAR/LAZY, we tighten
+      // the filter to that token so discovery doesn't even consider
+      // the other one (saves MCP roundtrips and avoids any chance
+      // of leaking spend to operator funds).
       const lazyTokenId = process.env.LAZY_TOKEN_ID;
-      const hbarBalance = user.balances.tokens[HBAR_TOKEN_KEY]?.available ?? 0;
-      const lazyBalance =
-        lazyTokenId ? (user.balances.tokens[lazyTokenId]?.available ?? 0) : 0;
+      const hasHbarReservation = tokenReservations.has(HBAR_TOKEN_KEY);
+      const hasLazyReservation = lazyTokenId ? tokenReservations.has(lazyTokenId) : false;
       let restrictedFeeToken: 'HBAR' | 'LAZY' | 'any';
-      if (hbarBalance > 0 && lazyBalance === 0) {
+      if (hasHbarReservation && !hasLazyReservation) {
         restrictedFeeToken = 'HBAR';
-      } else if (lazyBalance > 0 && hbarBalance === 0) {
+      } else if (hasLazyReservation && !hasHbarReservation) {
         restrictedFeeToken = 'LAZY';
       } else {
-        // Both > 0 (or both == 0, but we'd have errored above).
-        // Stage 2 will fix the cross-token settlement math; for
-        // now leave the filter open and accept the residual bug.
-        restrictedFeeToken = user.strategySnapshot.poolFilter.feeToken;
+        restrictedFeeToken = 'any';
       }
       if (restrictedFeeToken !== user.strategySnapshot.poolFilter.feeToken) {
-        logger.info('pool filter restricted to user-funded token', {
+        logger.info('pool filter restricted to user-funded tokens', {
           component: 'MultiUserAgent',
           event: 'pool_filter_restricted',
           userId,
           original: user.strategySnapshot.poolFilter.feeToken,
           restricted: restrictedFeeToken,
-          hbarBalance,
-          lazyBalance,
+          reservedTokens: Array.from(tokenReservations.keys()),
         });
       }
 
@@ -467,15 +542,53 @@ export class MultiUserAgent {
       // (async fire-and-forget writes can race; the last write wins)
       user.lastPlayedAt = new Date().toISOString();
 
-      // Settle: deduct actual spend from reserved
-      const actualSpent = report.totalSpent;
-      this.ledger.settleSpend(userId, actualSpent, primaryToken);
-
-      // Release unused reserve
-      const unused = sessionBudget - actualSpent;
-      if (unused > 0) {
-        this.ledger.releaseReserve(userId, unused, primaryToken);
+      // ── Per-token settlement (Stage 2) ─────────────────────
+      //
+      // Compute spending per token from report.poolResults using
+      // the new feeTokenId field. This replaces the old approach
+      // of summing totalSpent across all tokens (meaningless cross-
+      // token arithmetic) and settling against a single primary
+      // token (causing the user to be billed for the wrong token).
+      //
+      // Defense-in-depth: if any pool spent a token that wasn't
+      // in our reservation set, throw — that means the play loop
+      // bypassed the budget cap somehow, which is a bug worth
+      // crashing on. The catch block below will release every
+      // reservation that's still outstanding.
+      const spentByTokenId = new Map<string, number>();
+      for (const r of report.poolResults) {
+        if (r.amountSpent <= 0) continue;
+        const token = r.feeTokenId || HBAR_TOKEN_KEY;
+        spentByTokenId.set(token, (spentByTokenId.get(token) ?? 0) + r.amountSpent);
       }
+      for (const [token, spent] of spentByTokenId) {
+        if (!tokenReservations.has(token)) {
+          throw new Error(
+            `BUG: play loop spent ${spent} of token ${token} but no reservation existed. ` +
+              `Reserved tokens: ${Array.from(tokenReservations.keys()).join(', ')}. ` +
+              `Releasing all reservations.`,
+          );
+        }
+      }
+      // Settle and release per token
+      let totalSpentAllTokens = 0;
+      for (const [token, reservedAmount] of tokenReservations) {
+        const actualSpent = spentByTokenId.get(token) ?? 0;
+        if (actualSpent > 0) {
+          this.ledger.settleSpend(userId, actualSpent, token);
+        }
+        const unused = reservedAmount - actualSpent;
+        if (unused > 0) {
+          this.ledger.releaseReserve(userId, unused, token);
+        }
+        totalSpentAllTokens += actualSpent; // legacy field, sum across tokens
+      }
+      // Legacy variable retained because the session record still
+      // has a single `totalSpent` field. It's the sum-across-tokens
+      // value (semantically meaningful only when all spending is
+      // in one token, but kept for backward compat with consumers
+      // that don't yet read spentByToken).
+      const actualSpent = totalSpentAllTokens;
 
       // Estimate gas cost (~0.000000082 HBAR per gas unit, ~1.97M gas per pool)
       // Only count pools that actually executed on-chain transactions
@@ -527,7 +640,16 @@ export class MultiUserAgent {
         gasCostHbar: estimatedGas,
         amountReserved: sessionBudget,
         amountSettled: actualSpent,
-        amountReleased: unused,
+        // amountReleased is the legacy single-token-released field.
+        // After per-token settlement it becomes the sum of unused
+        // releases across all tokens — same semantics as the legacy
+        // field for HBAR-only sessions, slightly different for
+        // multi-token sessions but still useful as a "headline"
+        // number that consumers can display.
+        amountReleased: Array.from(tokenReservations).reduce(
+          (sum, [token, reserved]) => sum + Math.max(0, reserved - (spentByTokenId.get(token) ?? 0)),
+          0,
+        ),
       };
 
       // Record play session and persist user (lastPlayedAt already set above)
@@ -624,10 +746,19 @@ export class MultiUserAgent {
           expectedPools: playedPools.length,
         });
 
-        // 2. Per-pool results — sequential await for chain ordering
+        // 2. Per-pool results — sequential await for chain ordering.
+        //
+        // spentToken now reads from PoolResult.feeTokenId rather
+        // than being hardcoded to 'HBAR'. The Stage 2 per-token
+        // refactor relies on this for downstream readers /
+        // reconciliation to know which token each pool actually
+        // charged. Without it, a LAZY pool would show up on the
+        // audit trail labelled 'HBAR' and break reconciliation
+        // for any third party reading the topic.
         for (let i = 0; i < playedPools.length; i++) {
           const pool = playedPools[i]!;
           const prizes = convertPrizeDetailsToV2(pool.prizeDetails ?? []);
+          const spentToken = poolFeeTokenForAudit(pool.feeTokenId);
           await this.accounting.recordPlayPoolResult({
             sessionId: session.sessionId,
             user: user.hederaAccountId,
@@ -636,7 +767,7 @@ export class MultiUserAgent {
             seq: i + 1,
             entries: pool.entriesBought,
             spent: pool.amountSpent,
-            spentToken: 'HBAR',
+            spentToken,
             wins: pool.wins,
             prizes,
           });
@@ -648,7 +779,7 @@ export class MultiUserAgent {
           playedPools.map((p) => ({
             poolId: p.poolId,
             spent: p.amountSpent,
-            spentToken: 'HBAR',
+            spentToken: poolFeeTokenForAudit(p.feeTokenId),
             wins: p.wins,
             prizes: convertPrizeDetailsToV2(p.prizeDetails ?? []),
           })),
@@ -698,15 +829,27 @@ export class MultiUserAgent {
 
       return session;
     } catch (error) {
-      // CRITICAL: release ALL reserved funds on failure
-      try {
-        this.ledger.releaseReserve(userId, sessionBudget, primaryToken);
-      } catch (releaseErr) {
-        console.warn(
-          `[MultiUserAgent] Failed to release reserve for ${userId}: ` +
-            `${releaseErr instanceof Error ? releaseErr.message : releaseErr}. ` +
-            'Funds may be recovered on restart.',
-        );
+      // CRITICAL: release every reservation on failure (per-token).
+      // The catch is wide because:
+      //   - If play() threw, no settlement happened, so the full
+      //     reservation is still locked.
+      //   - If play() returned but settlement threw on a defense-
+      //     in-depth check, some tokens may have been settled and
+      //     others not. We track which we settled on the success
+      //     path; here we just attempt to release everything that's
+      //     in tokenReservations and let releaseReserve clamp to
+      //     whatever's actually still reserved (it min()s against
+      //     entry.reserved internally).
+      for (const [token, amount] of tokenReservations) {
+        try {
+          this.ledger.releaseReserve(userId, amount, token);
+        } catch (releaseErr) {
+          console.warn(
+            `[MultiUserAgent] Failed to release reserve for ${userId} token=${token}: ` +
+              `${releaseErr instanceof Error ? releaseErr.message : releaseErr}. ` +
+              'Funds may be recovered on restart.',
+          );
+        }
       }
       throw error;
     } finally {

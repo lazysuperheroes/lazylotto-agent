@@ -825,4 +825,188 @@ describe('MultiUserAgent financial paths', () => {
       // Total: 70 available = 100 - 30
     });
   });
+
+  // ── 5. Per-token reservation/settlement (Stage 2) ─────────────
+  //
+  // These tests exercise the UserLedger primitives in the same
+  // pattern as the new MultiUserAgent.playForUser per-token flow:
+  //   - reserve every token in the user's balance set
+  //   - settle each token from a per-token spend Map
+  //   - release the unused reservation per token
+  //   - on play failure, release every reservation
+  //
+  // The bug these tests were written for: a HBAR-only user
+  // playing a LAZY pool used to cause operator-LAZY bleed because
+  // playForUser only reserved/settled one "primary" token. With
+  // per-token reservation, a token with 0 balance is never
+  // reserved and the play loop refuses to spend it.
+
+  describe('per-token reservation lifecycle', () => {
+    const LAZY = '0.0.8011209';
+
+    it('reserves multiple tokens for a multi-token user', () => {
+      const user = makeUser({
+        balances: {
+          tokens: {
+            hbar: { available: 100, reserved: 0, totalDeposited: 100, totalWithdrawn: 0, totalRake: 0 },
+            [LAZY]: { available: 50, reserved: 0, totalDeposited: 50, totalWithdrawn: 0, totalRake: 0 },
+          },
+        },
+      });
+      store.saveUser(user);
+
+      // Reserve 80 HBAR + 40 LAZY
+      ledger.reserve('user-1', 80, 'hbar');
+      ledger.reserve('user-1', 40, LAZY);
+
+      const bal = store.getUser('user-1')!.balances;
+      assert.equal(bal.tokens.hbar.available, 20);
+      assert.equal(bal.tokens.hbar.reserved, 80);
+      assert.equal(bal.tokens[LAZY]!.available, 10);
+      assert.equal(bal.tokens[LAZY]!.reserved, 40);
+    });
+
+    it('settles each token independently from a per-token spend map', () => {
+      const user = makeUser({
+        balances: {
+          tokens: {
+            hbar: { available: 100, reserved: 0, totalDeposited: 100, totalWithdrawn: 0, totalRake: 0 },
+            [LAZY]: { available: 50, reserved: 0, totalDeposited: 50, totalWithdrawn: 0, totalRake: 0 },
+          },
+        },
+      });
+      store.saveUser(user);
+
+      // Reserve everything per-token
+      const tokenReservations = new Map<string, number>([
+        ['hbar', 80],
+        [LAZY, 40],
+      ]);
+      for (const [token, amount] of tokenReservations) {
+        ledger.reserve('user-1', amount, token);
+      }
+
+      // Simulate the play loop spending: 25 HBAR + 30 LAZY
+      const spentByTokenId = new Map<string, number>([
+        ['hbar', 25],
+        [LAZY, 30],
+      ]);
+
+      // Per-token settlement loop (mirror of MultiUserAgent)
+      for (const [token, reserved] of tokenReservations) {
+        const actualSpent = spentByTokenId.get(token) ?? 0;
+        if (actualSpent > 0) {
+          ledger.settleSpend('user-1', actualSpent, token);
+        }
+        const unused = reserved - actualSpent;
+        if (unused > 0) {
+          ledger.releaseReserve('user-1', unused, token);
+        }
+      }
+
+      const bal = store.getUser('user-1')!.balances;
+      // HBAR: started 100, spent 25, ended 75 available, 0 reserved
+      assert.equal(bal.tokens.hbar.available, 75);
+      assert.equal(bal.tokens.hbar.reserved, 0);
+      // LAZY: started 50, spent 30, ended 20 available, 0 reserved
+      assert.equal(bal.tokens[LAZY]!.available, 20);
+      assert.equal(bal.tokens[LAZY]!.reserved, 0);
+    });
+
+    it('releases all reservations on simulated play failure', () => {
+      const user = makeUser({
+        balances: {
+          tokens: {
+            hbar: { available: 100, reserved: 0, totalDeposited: 100, totalWithdrawn: 0, totalRake: 0 },
+            [LAZY]: { available: 50, reserved: 0, totalDeposited: 50, totalWithdrawn: 0, totalRake: 0 },
+          },
+        },
+      });
+      store.saveUser(user);
+
+      const tokenReservations = new Map<string, number>([
+        ['hbar', 80],
+        [LAZY, 40],
+      ]);
+      for (const [token, amount] of tokenReservations) {
+        ledger.reserve('user-1', amount, token);
+      }
+
+      // Simulate play() throwing — release every reservation
+      for (const [token, amount] of tokenReservations) {
+        ledger.releaseReserve('user-1', amount, token);
+      }
+
+      const bal = store.getUser('user-1')!.balances;
+      assert.equal(bal.tokens.hbar.available, 100); // fully restored
+      assert.equal(bal.tokens.hbar.reserved, 0);
+      assert.equal(bal.tokens[LAZY]!.available, 50);
+      assert.equal(bal.tokens[LAZY]!.reserved, 0);
+    });
+
+    it('HBAR-only user only has HBAR in the reservation set', () => {
+      // This is the critical regression test for the bug. A user
+      // with only HBAR balance must NEVER end up with LAZY in the
+      // reservation set (because they have 0 LAZY available).
+      const user = makeUser({
+        balances: {
+          tokens: {
+            hbar: { available: 100, reserved: 0, totalDeposited: 100, totalWithdrawn: 0, totalRake: 0 },
+            // no LAZY entry
+          },
+        },
+        strategySnapshot: makeStrategy({
+          budget: {
+            tokenBudgets: {
+              hbar: { maxPerSession: 50, maxPerPool: 20, reserve: 0 },
+              [LAZY]: { maxPerSession: 50, maxPerPool: 20, reserve: 0 },
+            },
+            maxEntriesPerPool: 10,
+          },
+        }),
+      });
+      store.saveUser(user);
+
+      // Replicate the playForUser reservation-set computation:
+      // intersection of strategy budgets with positive-balance tokens
+      const tokenReservations = new Map<string, number>();
+      for (const [tokenKey, tokenBudget] of Object.entries(
+        user.strategySnapshot.budget.tokenBudgets,
+      )) {
+        const entry = user.balances.tokens[tokenKey];
+        const available = entry?.available ?? 0;
+        if (available <= 0) continue;
+        const cap = tokenBudget.maxPerSession ?? available;
+        tokenReservations.set(tokenKey, Math.min(cap, available));
+      }
+
+      assert.equal(tokenReservations.size, 1);
+      assert.ok(tokenReservations.has('hbar'));
+      assert.ok(!tokenReservations.has(LAZY));
+      assert.equal(tokenReservations.get('hbar'), 50); // capped at maxPerSession
+    });
+
+    it('correctly aggregates spentByTokenId from poolResults with mixed feeTokenId', () => {
+      // This is the per-token derivation from report.poolResults that
+      // MultiUserAgent uses to drive settlement. Verifies the math
+      // independently of the rest of the flow.
+      const poolResults = [
+        { poolId: 1, feeTokenId: 'hbar', amountSpent: 5 },
+        { poolId: 2, feeTokenId: 'hbar', amountSpent: 10 },
+        { poolId: 3, feeTokenId: LAZY, amountSpent: 20 },
+        { poolId: 4, feeTokenId: LAZY, amountSpent: 15 },
+        { poolId: 5, feeTokenId: 'hbar', amountSpent: 0 }, // no spend
+      ];
+
+      const spentByTokenId = new Map<string, number>();
+      for (const r of poolResults) {
+        if (r.amountSpent <= 0) continue;
+        spentByTokenId.set(r.feeTokenId, (spentByTokenId.get(r.feeTokenId) ?? 0) + r.amountSpent);
+      }
+
+      assert.equal(spentByTokenId.size, 2);
+      assert.equal(spentByTokenId.get('hbar'), 15); // 5 + 10
+      assert.equal(spentByTokenId.get(LAZY), 35);   // 20 + 15
+    });
+  });
 });

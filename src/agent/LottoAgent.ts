@@ -510,6 +510,12 @@ export class LottoAgent {
       entriesBought: 0,
       amountSpent: 0,
       feeTokenSymbol: sp.pool.feeTokenSymbol,
+      // budgetKey is the resolved token id ("hbar" or 0.0.X) for
+      // this pool's fee token. Threading it through here means
+      // PoolResult.feeTokenId always matches what the budget
+      // manager actually charged, even if the pool detail is
+      // missing or the symbol is ambiguous.
+      feeTokenId: budgetKey,
       rolled: false,
       wins: 0,
       prizesClaimed: 0,
@@ -537,6 +543,7 @@ export class LottoAgent {
       entriesBought: 0,
       amountSpent: 0,
       feeTokenSymbol: pool.feeTokenSymbol,
+      feeTokenId: budgetKey,
       rolled: false,
       wins: 0,
       prizesClaimed: 0,

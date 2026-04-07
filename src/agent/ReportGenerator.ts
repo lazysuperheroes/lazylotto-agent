@@ -26,6 +26,16 @@ export interface PoolResult {
   entriesBought: number;
   amountSpent: number;
   feeTokenSymbol: string;
+  /**
+   * Canonical token id for the pool's fee token. "hbar" for native
+   * HBAR pools, the Hedera token ID (e.g. "0.0.8011209") for FT
+   * pools. This is the budget key used by both the play loop
+   * (resolveBudgetKey) and the user-facing ledger. Required for
+   * per-token settlement in MultiUserAgent.playForUser — without
+   * it, the agent has to guess the token from the symbol, which
+   * is ambiguous when multiple tokens share a symbol.
+   */
+  feeTokenId: string;
   rolled: boolean;
   wins: number;
   prizesClaimed: number;

@@ -10,6 +10,7 @@ describe('ReportGenerator', () => {
       entriesBought: 3,
       amountSpent: 15,
       feeTokenSymbol: 'HBAR',
+      feeTokenId: 'hbar',
       rolled: true,
       wins: 1,
       prizesClaimed: 0,

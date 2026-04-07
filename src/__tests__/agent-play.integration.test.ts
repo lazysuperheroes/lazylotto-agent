@@ -188,6 +188,7 @@ describe('Agent Play Loop (integration)', () => {
           entriesBought: batch,
           amountSpent: sp.pool.entryFee * batch,
           feeTokenSymbol: sp.pool.feeTokenSymbol,
+          feeTokenId: 'hbar',
           rolled: true,
           wins: 0,
           prizesClaimed: 0,
@@ -248,6 +249,7 @@ describe('Agent Play Loop (integration)', () => {
         entriesBought: 3,
         amountSpent: 15,
         feeTokenSymbol: 'HBAR',
+        feeTokenId: 'hbar',
         rolled: true,
         wins: 1,
         prizesClaimed: 0,
@@ -261,6 +263,7 @@ describe('Agent Play Loop (integration)', () => {
         entriesBought: 2,
         amountSpent: 10,
         feeTokenSymbol: 'HBAR',
+        feeTokenId: 'hbar',
         rolled: true,
         wins: 0,
         prizesClaimed: 0,
@@ -299,6 +302,7 @@ describe('Agent Play Loop (integration)', () => {
             entriesBought: 2,
             amountSpent: 10,
             feeTokenSymbol: 'HBAR',
+            feeTokenId: 'hbar',
             rolled: true,
             wins: 0,
             prizesClaimed: 0,
@@ -313,6 +317,7 @@ describe('Agent Play Loop (integration)', () => {
             entriesBought: 0,
             amountSpent: 0,
             feeTokenSymbol: 'HBAR',
+            feeTokenId: 'hbar',
             rolled: false,
             wins: 0,
             prizesClaimed: 0,
@@ -339,7 +344,7 @@ describe('Agent Play Loop (integration)', () => {
       smallBudget.recordSpend(1, 10, 'hbar', 2);
       reportGenerator.addPoolResult({
         poolId: 1, poolName: 'Pool 1', entriesBought: 2,
-        amountSpent: 10, feeTokenSymbol: 'HBAR', rolled: true, wins: 0, prizesClaimed: 0, prizesTransferred: 0, prizeDetails: [],
+        amountSpent: 10, feeTokenSymbol: 'HBAR', feeTokenId: 'hbar', rolled: true, wins: 0, prizesClaimed: 0, prizesTransferred: 0, prizeDetails: [],
       });
 
       // Pool 2: budget only has 2 left, can't afford entryFee=5
