@@ -17,6 +17,8 @@ import { getStore } from '../../_lib/store';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { HEDERA_DEFAULTS } from '~/config/defaults';
 import type { PlaySessionResult } from '~/custodial/types';
+import { parseAuditTopic, type RawTopicMessage } from '~/custodial/hcs20-reader';
+import type { NormalizedSession } from '~/custodial/hcs20-v2';
 
 // ---------------------------------------------------------------------------
 // Mirror node types
@@ -475,6 +477,27 @@ export async function GET(request: Request) {
     // dimension. See user feedback in commit history.
     const balanceLeft = totalDeposited - totalRake - totalBurned - totalWithdrawn;
 
+    // Build the v2 normalized sessions list. The reader handles
+    // both v1 batch messages and v2 sequence messages, producing a
+    // single uniform NormalizedSession[] that the dashboard can
+    // render as session cards. This is the source of truth going
+    // forward — eventually entries[].type==='play' will be removed
+    // and only sessions will represent play activity.
+    const rawTopicMessages: RawTopicMessage[] = decoded
+      .filter(({ payload }) => !userFilter || involvesAccount(payload, userFilter))
+      .map(({ seq, timestamp, payload }) => ({
+        sequence: seq,
+        timestamp,
+        payload,
+      }));
+    let v2Sessions: NormalizedSession[] = [];
+    try {
+      const parsed = await parseAuditTopic(rawTopicMessages);
+      v2Sessions = parsed.sessions;
+    } catch (parseErr) {
+      console.warn('[admin/audit] v2 reader failed:', parseErr);
+    }
+
     const explorerBase = network === 'mainnet'
       ? 'https://hashscan.io/mainnet'
       : 'https://hashscan.io/testnet';
@@ -490,6 +513,7 @@ export async function GET(request: Request) {
         filteredBy: userFilter,
         users,
         entries,
+        sessions: v2Sessions,
         summary: {
           totalDeposited: Math.round(totalDeposited * 100) / 100,
           totalRake: Math.round(totalRake * 100) / 100,

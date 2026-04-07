@@ -146,11 +146,22 @@ export function registerOperatorTools(
       const authResult = await requireAuth(auth_token);
       const denied = requireOperator(authResult);
       if (denied) return denied;
+      const performedBy =
+        'auth' in authResult ? authResult.auth.accountId : 'unknown';
       try {
         const { processRefund } = await import('../../hedera/refund.js');
-        // Pass store for ledger adjustment — deducts from user balance if this was a deposit
-        const store = (multiUser as unknown as { store: import('../../custodial/IStore.js').IStore }).store;
-        const result = await processRefund(ctx.client, transactionId, store ? { store } : undefined);
+        // Pass store for ledger adjustment + accounting for HCS-20
+        // v2 audit entry. Without accounting, refunds happen on
+        // chain but never appear in the audit trail, leaving
+        // deposits as unpaired credits.
+        const store = multiUser.getStoreInstance();
+        const accounting = multiUser.getAccountingService();
+        const result = await processRefund(ctx.client, transactionId, {
+          store,
+          ...(accounting ? { accounting } : {}),
+          reason: 'operator_initiated',
+          performedBy,
+        });
         return json(result);
       } catch (e) {
         return errorResult(`Refund failed: ${errorMsg(e)}`);

@@ -21,6 +21,7 @@ import { transferHbar, transferToken } from './transfers.js';
 import { getOperatorAccountId } from './wallet.js';
 import { withChecksum } from '../utils/checksum.js';
 import type { IStore } from '../custodial/IStore.js';
+import type { AccountingService } from '../custodial/AccountingService.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
 import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 import { logger } from '../lib/logger.js';
@@ -43,6 +44,25 @@ export interface RefundResult {
 /** Optional store for ledger adjustment on refund. */
 export interface RefundLedgerOptions {
   store: IStore;
+  /**
+   * Optional AccountingService for HCS-20 v2 audit trail. When
+   * provided, processRefund writes a `refund` op to the topic
+   * after the on-chain transfer succeeds. Without it, refunds
+   * happen on chain but never appear in the audit trail —
+   * leaving deposits as un-paired credits and breaking
+   * reconciliation math for external auditors.
+   */
+  accounting?: AccountingService;
+  /**
+   * Operator account ID recorded as `performedBy` in the audit
+   * entry. Defaults to the agent operator account.
+   */
+  performedBy?: string;
+  /**
+   * Free-text reason for the refund (stuck_deposit,
+   * operator_initiated, etc.). Recorded in the audit entry.
+   */
+  reason?: string;
 }
 
 // ── Mirror node transaction shape (partial) ─────────────────────
@@ -326,6 +346,49 @@ export async function processRefund(
       // Ledger adjustment is best-effort — the on-chain refund already succeeded.
       // Log but don't fail the refund.
       console.error('[Refund] Ledger adjustment failed (on-chain refund succeeded):', e);
+    }
+  }
+
+  // ── HCS-20 v2 audit entry ────────────────────────────────────
+  // Write the refund to the on-chain audit topic so external
+  // auditors can pair every deposit with its inverse. Without this,
+  // a refund leaves a phantom credit on the audit trail (the
+  // original mint with no offsetting burn/refund), breaking
+  // reconciliation math for any third party reading the topic.
+  //
+  // Best-effort: the on-chain refund tx already succeeded, so we
+  // log on failure but don't throw — the operator can recover the
+  // missing audit entry manually if needed.
+  if (options?.accounting) {
+    try {
+      // Compute the human-readable amount that matches what the
+      // user actually saw. Token decimals already applied above
+      // for the refund tx itself, so re-derive here.
+      let humanAmount: number;
+      if (refundToken) {
+        const { getTokenMeta } = await import('../utils/math.js');
+        const meta = await getTokenMeta(refundToken);
+        humanAmount = refundAmount / Math.pow(10, meta.decimals);
+      } else {
+        humanAmount = refundAmount / 1e8;
+      }
+      await options.accounting.recordRefund({
+        amount: humanAmount,
+        from: agentAccountId,
+        to: senderAccountId,
+        originalDepositTxId: transactionId,
+        refundTxId,
+        reason: options.reason ?? 'operator_initiated',
+        performedBy: options.performedBy ?? agentAccountId,
+      });
+    } catch (auditErr) {
+      logger.warn('refund HCS-20 audit entry failed', {
+        component: 'Refund',
+        event: 'refund_audit_failed',
+        originalTx: transactionId,
+        refundTxId,
+        error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+      });
     }
   }
 

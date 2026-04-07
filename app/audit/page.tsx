@@ -88,11 +88,75 @@ interface AuditSummary {
   netBalance: number;
 }
 
+// ── v2 normalized session shape ──────────────────────────────
+//
+// Mirrors src/custodial/hcs20-v2.ts NormalizedSession but inlined
+// here so the client doesn't need a server-only import. The reader's
+// state machine produces these alongside the legacy entries[].
+
+interface V2PrizeFt { t: 'ft'; tk: string; amt: number }
+interface V2PrizeNft { t: 'nft'; tk: string; sym: string; ser: number[] }
+type V2Prize = V2PrizeFt | V2PrizeNft;
+
+interface V2NormalizedPool {
+  poolId: number;
+  seq: number;
+  entries: number;
+  spent: number;
+  spentToken: string;
+  wins: number;
+  prizes: V2Prize[];
+  ts: string;
+}
+
+type V2SessionStatus =
+  | 'closed_success'
+  | 'closed_aborted'
+  | 'in_flight'
+  | 'orphaned'
+  | 'corrupt';
+
+interface V2NormalizedSession {
+  sessionId: string;
+  user: string;
+  agent?: string;
+  status: V2SessionStatus;
+  strategy?: string;
+  boostBps?: number;
+  openedAt?: string;
+  closedAt?: string;
+  pools: V2NormalizedPool[];
+  totalSpent: number;
+  totalSpentByToken: Record<string, number>;
+  totalWins: number;
+  totalPrizeValue: number;
+  totalPrizeValueByToken: Record<string, number>;
+  totalNftCount: number;
+  prizeTransfer?: {
+    status: 'succeeded' | 'skipped' | 'failed' | 'recovered';
+    txId?: string;
+    attempts?: number;
+    gasUsed?: number;
+    lastError?: string;
+  };
+  warnings: string[];
+  firstSeq: number;
+  lastSeq: number;
+}
+
 interface AuditResponse {
   topicId: string | null;
   network?: string;
   explorerUrl?: string;
   entries: AuditEntry[];
+  /**
+   * Normalized session list from the v2 audit reader. Each session
+   * aggregates 1 open + N pool results + 1 close (or aborted) into
+   * a single card-renderable object. Replaces the per-message play
+   * cards in the entries[] list. Both v1 batch and v2 sequence
+   * sessions surface here.
+   */
+  sessions?: V2NormalizedSession[];
   summary: AuditSummary;
   message?: string;
   // Admin-only fields
@@ -245,6 +309,219 @@ function AuditSkeleton() {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SessionCard — single normalized session, expand for detail
+// ---------------------------------------------------------------------------
+//
+// Renders one v2 NormalizedSession. The face shows the operator's
+// signed close-message claim (or the v1 totals); clicking expands
+// to show open + per-pool detail + warnings if any. Status badges:
+//   closed_success  → brand gold (winning) or muted (losing)
+//   closed_aborted  → destructive
+//   in_flight       → muted spinner
+//   orphaned        → destructive
+//   corrupt         → destructive with hash icon
+
+function statusBadgeClasses(status: V2SessionStatus): string {
+  switch (status) {
+    case 'closed_success': return 'bg-success/15 text-success';
+    case 'closed_aborted': return 'bg-destructive/15 text-destructive';
+    case 'in_flight': return 'bg-info/15 text-info';
+    case 'orphaned': return 'bg-destructive/15 text-destructive';
+    case 'corrupt': return 'bg-destructive/15 text-destructive';
+  }
+}
+
+function statusLabel(status: V2SessionStatus): string {
+  switch (status) {
+    case 'closed_success': return 'Closed';
+    case 'closed_aborted': return 'Aborted';
+    case 'in_flight': return 'In flight';
+    case 'orphaned': return 'Orphaned';
+    case 'corrupt': return 'CORRUPT';
+  }
+}
+
+function prizeTransferLabel(
+  status: 'succeeded' | 'skipped' | 'failed' | 'recovered' | undefined,
+): { text: string; className: string } {
+  switch (status) {
+    case 'succeeded': return { text: 'Delivered to your wallet', className: 'text-success' };
+    case 'skipped': return { text: 'Nothing to deliver', className: 'text-muted' };
+    case 'failed': return { text: 'Delivery failed — operator notified', className: 'text-destructive' };
+    case 'recovered': return { text: 'Recovered by operator', className: 'text-brand' };
+    default: return { text: 'Unknown', className: 'text-muted' };
+  }
+}
+
+function SessionCard({
+  session,
+  explorerUrl,
+}: {
+  session: V2NormalizedSession;
+  explorerUrl?: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const isWin = session.totalWins > 0;
+
+  return (
+    <div className="border border-l-4 border-secondary border-l-brand bg-[var(--color-panel)]">
+      {/* Card face */}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full text-left p-4 transition-colors hover:bg-brand/5"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex-1">
+            <div className="flex items-center gap-2 mb-1">
+              <span className={`rounded px-2 py-0.5 text-xs font-semibold ${statusBadgeClasses(session.status)}`}>
+                {statusLabel(session.status)}
+              </span>
+              <span className="text-xs text-muted">
+                {session.openedAt ? formatTimestamp(session.openedAt) : '—'}
+              </span>
+              {session.strategy && (
+                <span className="text-xs text-muted">· {session.strategy}</span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+              <span className="text-foreground">
+                Spent <span className="num-tabular text-info">{formatAmount(session.totalSpent)}</span>
+              </span>
+              {isWin && (
+                <span className="text-foreground">
+                  Won <span className="num-tabular text-brand">+{formatAmount(session.totalPrizeValue)}</span>
+                  {session.totalNftCount > 0 && (
+                    <span className="ml-1 text-muted">+ {session.totalNftCount} NFT{session.totalNftCount === 1 ? '' : 's'}</span>
+                  )}
+                </span>
+              )}
+              <span className="text-xs text-muted">
+                {session.pools.length} pool{session.pools.length === 1 ? '' : 's'}
+              </span>
+            </div>
+            {/* Prize transfer status (the field that would have made
+                the 668 HBAR stuck-prize incident self-explanatory) */}
+            {session.prizeTransfer && (
+              <p className={`mt-1 text-xs ${prizeTransferLabel(session.prizeTransfer.status).className}`}>
+                Prize delivery: {prizeTransferLabel(session.prizeTransfer.status).text}
+                {session.prizeTransfer.txId && (
+                  <span className="ml-1 text-muted/60 font-mono text-[10px]">
+                    {session.prizeTransfer.txId}
+                  </span>
+                )}
+              </p>
+            )}
+            {/* Warnings (corrupt sessions, mismatches) */}
+            {session.warnings.length > 0 && (
+              <ul className="mt-1 space-y-0.5 text-[11px] text-destructive">
+                {session.warnings.map((w, i) => (
+                  <li key={i}>⚠ {w}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <span className="text-xs text-muted shrink-0">
+            {expanded ? '▾' : '▸'}
+          </span>
+        </div>
+      </button>
+
+      {/* Expanded detail */}
+      {expanded && (
+        <div className="border-t border-secondary px-4 py-3 text-xs text-muted space-y-3">
+          {/* Open metadata */}
+          <div>
+            <p className="text-foreground/60 mb-1">Session opened</p>
+            <p className="font-mono break-all">{session.sessionId}</p>
+            <p>
+              User: <code className="font-mono">{session.user}</code>
+              {session.agent && (
+                <span className="ml-2">
+                  Agent: <code className="font-mono">{session.agent}</code>
+                </span>
+              )}
+            </p>
+            {session.openedAt && (
+              <p>Opened: {formatTimestamp(session.openedAt)}</p>
+            )}
+            {session.closedAt && (
+              <p>Closed: {formatTimestamp(session.closedAt)}</p>
+            )}
+            <p>
+              Sequence: #{session.firstSeq}
+              {session.lastSeq !== session.firstSeq && ` – #${session.lastSeq}`}
+              {explorerUrl && (
+                <a
+                  href={explorerUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="ml-2 text-brand hover:underline"
+                >
+                  View topic on HashScan ↗
+                </a>
+              )}
+            </p>
+          </div>
+
+          {/* Per-pool breakdown */}
+          {session.pools.length > 0 && (
+            <div>
+              <p className="text-foreground/60 mb-1">Pools played</p>
+              <div className="space-y-1.5">
+                {session.pools.map((pool) => (
+                  <div key={pool.seq} className="flex items-center justify-between gap-2 border-l-2 border-secondary px-2 py-1">
+                    <div>
+                      <span className="text-foreground/80">Pool #{pool.poolId}</span>
+                      <span className="ml-2">{pool.entries} entries</span>
+                      <span className="ml-2 text-info">{formatAmount(pool.spent)} {pool.spentToken}</span>
+                    </div>
+                    {pool.wins > 0 && (
+                      <div className="text-right">
+                        <span className="text-brand">{pool.wins} win{pool.wins === 1 ? '' : 's'}</span>
+                        {pool.prizes.length > 0 && (
+                          <div className="text-[10px] text-muted">
+                            {pool.prizes.map((p, i) => {
+                              if (p.t === 'ft') {
+                                return <span key={i} className="ml-1">+{formatAmount(p.amt)} {p.tk}</span>;
+                              }
+                              return <span key={i} className="ml-1">+{p.ser.length} {p.sym} NFT{p.ser.length === 1 ? '' : 's'} (#{p.ser.join(', #')})</span>;
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Close: prize transfer details */}
+          {session.prizeTransfer && (
+            <div>
+              <p className="text-foreground/60 mb-1">Prize delivery</p>
+              <p className={prizeTransferLabel(session.prizeTransfer.status).className}>
+                {prizeTransferLabel(session.prizeTransfer.status).text}
+              </p>
+              {session.prizeTransfer.txId && (
+                <p className="font-mono break-all text-[10px]">{session.prizeTransfer.txId}</p>
+              )}
+              {session.prizeTransfer.attempts != null && (
+                <p>Attempts: {session.prizeTransfer.attempts}{session.prizeTransfer.gasUsed != null && ` · Gas: ${session.prizeTransfer.gasUsed.toLocaleString()}`}</p>
+              )}
+              {session.prizeTransfer.lastError && (
+                <p className="text-destructive">Error: {session.prizeTransfer.lastError}</p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -488,8 +765,14 @@ export default function AuditPage() {
 
   if (!data) return null;
 
-  const { entries, summary, explorerUrl, topicId } = data;
-  const displayedEntries = showAll ? entries : entries.slice(0, 20);
+  const { entries, sessions: v2Sessions, summary, explorerUrl, topicId } = data;
+  // Hide raw 'play' entries when we have v2 sessions to render
+  // them as cards instead. Other entry types (deposit, rake,
+  // withdrawal, refund, recovery) still come through entries[].
+  const nonPlayEntries = (v2Sessions && v2Sessions.length > 0)
+    ? entries.filter((e) => e.type !== 'play')
+    : entries;
+  const displayedEntries = showAll ? nonPlayEntries : nonPlayEntries.slice(0, 20);
 
   return (
     <div className="w-full px-4 py-8 sm:px-6 lg:px-8">
@@ -633,6 +916,25 @@ export default function AuditPage() {
             >
               Retry
             </button>
+          </div>
+        )}
+
+        {/* ---- v2 Session Cards ─────────────────────────────────
+            Reconstructed play sessions from the HCS-20 v2 reader.
+            One card per session, regardless of whether it's a v1
+            legacy batch or a v2 sequence (open + pools + close).
+            The face shows the close-message claims (or v1 totals)
+            so users can scan top to bottom and verify the math.
+            Click to expand for the per-pool breakdown.
+            ---- */}
+        {v2Sessions && v2Sessions.length > 0 && (
+          <div className="mb-6 space-y-4">
+            <h2 className="font-heading text-lg text-foreground">
+              Play sessions ({v2Sessions.length})
+            </h2>
+            {v2Sessions.map((s) => (
+              <SessionCard key={s.sessionId} session={s} explorerUrl={explorerUrl} />
+            ))}
           </div>
         )}
 

@@ -15,6 +15,7 @@ import type {
   OperatorState,
 } from './types.js';
 import { UserNotFoundError, InsufficientBalanceError, UserInactiveError, hasAvailableToken, reserveSummary } from './types.js';
+import { computePoolsRoot, type PrizeEntry } from './hcs20-v2.js';
 import type { SessionReport } from '../agent/ReportGenerator.js';
 import { randomUUID } from 'node:crypto';
 import { reconcile, type ReconciliationResult } from './Reconciliation.js';
@@ -22,6 +23,103 @@ import { logger } from '../lib/logger.js';
 import { assertKillSwitchDisabled } from '../lib/killswitch.js';
 import { acquireOperatorLock, releaseOperatorLock } from '../lib/locks.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
+
+// ── HCS-20 v2 helpers ─────────────────────────────────────────────
+//
+// Local helpers used by the play session emission path. Kept at
+// module scope rather than as MultiUserAgent methods because they're
+// pure conversion / mapping functions with no agent state.
+
+/**
+ * Convert the agent's internal PrizeDetail[] shape (from
+ * ReportGenerator) into the v2 wire shape PrizeEntry[]. Folds NFT
+ * prizes by token ID so each NFT collection becomes a single entry
+ * with a serials array, even if the prize details listed serials
+ * individually.
+ */
+function convertPrizeDetailsToV2(
+  prizeDetails: { fungibleAmount?: number; fungibleToken?: string; nfts?: { token: string; hederaId: string; serial: number }[] }[],
+): PrizeEntry[] {
+  const result: PrizeEntry[] = [];
+  // Group NFT serials by hederaId so a multi-serial win lands as one
+  // entry. The wire shape supports an array of serials per token.
+  const nftByToken = new Map<string, { sym: string; serials: Set<number> }>();
+
+  for (const d of prizeDetails) {
+    if (d.fungibleAmount && d.fungibleAmount > 0 && d.fungibleToken) {
+      result.push({ t: 'ft', tk: d.fungibleToken, amt: d.fungibleAmount });
+    }
+    for (const n of d.nfts ?? []) {
+      const key = n.hederaId;
+      if (!nftByToken.has(key)) {
+        nftByToken.set(key, { sym: n.token, serials: new Set() });
+      }
+      nftByToken.get(key)!.serials.add(n.serial);
+    }
+  }
+
+  for (const [hederaId, { sym, serials }] of nftByToken) {
+    result.push({
+      t: 'nft',
+      tk: hederaId,
+      sym,
+      ser: Array.from(serials).sort((a, b) => a - b),
+    });
+  }
+
+  return result;
+}
+
+/**
+ * Map the LottoAgent PrizeTransferOutcome (in-process discriminated
+ * union) to the v2 wire shape on play_session_close.prizeTransfer.
+ * "Skipped" sessions (no prizes won) write status:'skipped' which
+ * the reader treats as a successful close — there was nothing to
+ * transfer.
+ */
+function mapPrizeTransferOutcome(
+  outcome:
+    | { status: 'skipped'; reason: string }
+    | {
+        status: 'succeeded';
+        contractTxId: string;
+        prizeCount: number;
+        attempt: number;
+        gasUsed: number;
+        ownerEoa: string;
+      }
+    | {
+        status: 'failed';
+        prizeCount: number;
+        ownerEoa: string;
+        error: string;
+        attemptsLog: { attempt: number; gas: number; error?: string }[];
+      }
+    | undefined,
+): {
+  status: 'succeeded' | 'skipped' | 'failed' | 'recovered';
+  txId?: string;
+  attempts?: number;
+  gasUsed?: number;
+  lastError?: string;
+} {
+  if (!outcome) return { status: 'skipped' };
+  if (outcome.status === 'skipped') return { status: 'skipped' };
+  if (outcome.status === 'succeeded') {
+    return {
+      status: 'succeeded',
+      txId: outcome.contractTxId,
+      attempts: outcome.attempt,
+      gasUsed: outcome.gasUsed,
+    };
+  }
+  // failed
+  return {
+    status: 'failed',
+    attempts: outcome.attemptsLog.length,
+    lastError: outcome.error,
+  };
+}
 
 // ── Health snapshot returned by getHealth() ─────────────────────
 
@@ -447,23 +545,100 @@ export class MultiUserAgent {
         token: primaryToken,
       });
 
-      // Batch HCS-20 accounting
-      const hcs20Ops = report.poolResults
-        .filter((r) => r.amountSpent > 0)
-        .map((r) => ({
-          op: 'burn' as const,
-          amt: String(r.amountSpent),
-          from: user.hederaAccountId,
-          memo: `play:pool-${r.poolId}:${r.entriesBought}-entries`,
-        }));
+      // ── HCS-20 v2 audit trail emission ─────────────────────
+      //
+      // Replace the v1 single-batch message with a structured
+      // sequence: open → N pool results → close (or aborted).
+      // This makes the audit trail self-sufficient on chain so an
+      // independent third party can reconstruct the session
+      // without joining against our local PlaySessionResult store.
+      //
+      // The sequence is wrapped in its own try/catch with an
+      // aborted fallback. If any v2 write fails (HCS topic
+      // unavailable, agent process killed mid-sequence, contract
+      // dispute), we attempt to write play_session_aborted with
+      // the count of pool messages that did make it through. The
+      // reader's state machine treats aborted as a positive
+      // terminal marker (vs missing close → orphaned).
+      //
+      // Order of writes matters: HCS preserves consensus order
+      // within a topic, so the reader sees open before pools
+      // before close as long as we await sequentially.
+      const agentAccountId = getOperatorAccountId(this.client);
+      const playedPools = report.poolResults.filter((r) => r.entriesBought > 0);
+      let v2WrittenPools = 0;
+      try {
+        // 1. Open
+        await this.accounting.recordPlaySessionOpen({
+          sessionId: session.sessionId,
+          user: user.hederaAccountId,
+          agent: agentAccountId,
+          strategy: user.strategyName,
+          boostBps: 0,
+          expectedPools: playedPools.length,
+        });
 
-      if (hcs20Ops.length > 0) {
+        // 2. Per-pool results — sequential await for chain ordering
+        for (let i = 0; i < playedPools.length; i++) {
+          const pool = playedPools[i]!;
+          const prizes = convertPrizeDetailsToV2(pool.prizeDetails ?? []);
+          await this.accounting.recordPlayPoolResult({
+            sessionId: session.sessionId,
+            user: user.hederaAccountId,
+            agent: agentAccountId,
+            poolId: pool.poolId,
+            seq: i + 1,
+            entries: pool.entriesBought,
+            spent: pool.amountSpent,
+            spentToken: 'HBAR',
+            wins: pool.wins,
+            prizes,
+          });
+          v2WrittenPools++;
+        }
+
+        // 3. Close — compute Merkle root from the canonical pool data
+        const poolsRoot = await computePoolsRoot(
+          playedPools.map((p) => ({
+            poolId: p.poolId,
+            spent: p.amountSpent,
+            spentToken: 'HBAR',
+            wins: p.wins,
+            prizes: convertPrizeDetailsToV2(p.prizeDetails ?? []),
+          })),
+        );
+        await this.accounting.recordPlaySessionClose({
+          sessionId: session.sessionId,
+          user: user.hederaAccountId,
+          agent: agentAccountId,
+          poolsPlayed: playedPools.length,
+          poolsRoot,
+          totalWins: report.totalWins,
+          prizeTransfer: mapPrizeTransferOutcome(transferOutcome),
+        });
+      } catch (v2Err) {
+        // V2 sequence partial-write recovery. Try to emit aborted
+        // with whatever we have. This is best-effort; if even the
+        // aborted write fails the session ends up as orphaned in
+        // the reader's state machine, which is still distinguishable
+        // from "closed_success" — operators see it and investigate.
+        const errMsg = v2Err instanceof Error ? v2Err.message : String(v2Err);
+        console.warn(
+          `[MultiUserAgent] HCS-20 v2 sequence failed (wrote ${v2WrittenPools}/${playedPools.length} pools): ${errMsg}`,
+        );
         try {
-          await this.accounting.recordPlaySession(session.sessionId, hcs20Ops);
-        } catch (e) {
+          await this.accounting.recordPlaySessionAborted({
+            sessionId: session.sessionId,
+            user: user.hederaAccountId,
+            agent: agentAccountId,
+            completedPools: v2WrittenPools,
+            reason: 'v2_write_failure',
+            lastError: errMsg,
+          });
+        } catch (abortErr) {
           console.warn(
-            '[MultiUserAgent] HCS-20 play session recording failed:',
-            e instanceof Error ? e.message : e,
+            '[MultiUserAgent] V2 aborted marker also failed (session will be orphaned in reader):',
+            abortErr instanceof Error ? abortErr.message : abortErr,
           );
         }
       }
@@ -774,6 +949,26 @@ export class MultiUserAgent {
    */
   getOperatorBalance(): OperatorState {
     return this.store.getOperator();
+  }
+
+  /**
+   * Public access to the AccountingService instance for callers
+   * (refund route, recovery tool) that need to write HCS-20 v2
+   * audit entries. Returns null if accounting wasn't initialized
+   * (test envs, missing topic id, etc.).
+   */
+  getAccountingService(): AccountingService | null {
+    return this.accounting ?? null;
+  }
+
+  /**
+   * Public access to the underlying store for callers that need
+   * direct queries. Used by the refund route and a few admin tools
+   * that don't have a higher-level helper. Prefer adding a method
+   * on MultiUserAgent over reaching through this in new code.
+   */
+  getStoreInstance(): IStore {
+    return this.store;
   }
 
   /**

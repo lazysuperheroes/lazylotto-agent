@@ -13,6 +13,8 @@ import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { HEDERA_DEFAULTS } from '~/config/defaults';
+import { parseAuditTopic, type RawTopicMessage } from '~/custodial/hcs20-reader';
+import type { NormalizedSession } from '~/custodial/hcs20-v2';
 
 // ---------------------------------------------------------------------------
 // Mirror node types
@@ -408,6 +410,26 @@ export async function GET(request: Request) {
     // a separate dimension on the audit page.
     const balanceLeft = totalDeposited - totalRake - totalBurned - totalWithdrawn;
 
+    // Build the v2 normalized sessions list. The reader handles
+    // both v1 batch messages and v2 sequence messages, producing a
+    // single uniform NormalizedSession[] that the dashboard can
+    // render as session cards. Filter to messages that involve
+    // this user so the reader's per-session math reflects only
+    // their activity.
+    const userTopicMessages: RawTopicMessage[] = [];
+    for (const msg of allMessages) {
+      const { seq, timestamp, payload } = decodeMessage(msg);
+      if (!involvesAccount(payload, hederaAccountId)) continue;
+      userTopicMessages.push({ sequence: seq, timestamp, payload });
+    }
+    let v2Sessions: NormalizedSession[] = [];
+    try {
+      const parsed = await parseAuditTopic(userTopicMessages);
+      v2Sessions = parsed.sessions;
+    } catch (parseErr) {
+      console.warn('[user/audit] v2 reader failed:', parseErr);
+    }
+
     const explorerBase = network === 'mainnet'
       ? 'https://hashscan.io/mainnet'
       : 'https://hashscan.io/testnet';
@@ -418,6 +440,7 @@ export async function GET(request: Request) {
         network,
         explorerUrl: `${explorerBase}/topic/${topicId}`,
         entries,
+        sessions: v2Sessions,
         summary: {
           totalDeposited: Math.round(totalDeposited * 100) / 100,
           totalRake: Math.round(totalRake * 100) / 100,
