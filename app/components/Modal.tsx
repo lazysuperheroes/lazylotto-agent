@@ -245,7 +245,17 @@ export function Modal({
           shadow. The previous incarnation used rounded-xl + soft
           shadow-xl which contradicted everything inside it; now
           the wrapper IS a ComicPanel-shaped surface so any modal
-          content inherits the right frame for free. */}
+          content inherits the right frame for free.
+
+          Note on focus: the dialog has tabIndex={-1} so the Modal's
+          focus-trap logic can programmatically focus it as a fallback
+          when no focusable children exist (see isSafeFocusTarget).
+          The global :focus-visible rule in globals.css paints a
+          brand-gold outline around ANY keyboard-focused element, so
+          when the dialog is focused via keyboard, users see a clear
+          indicator. We intentionally do NOT add outline-none here —
+          the previous version did, and it silently broke the
+          fallback focus state for keyboard users. */}
       <div
         ref={dialogRef}
         role="dialog"
@@ -255,7 +265,7 @@ export function Modal({
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
-        className={`w-full ${SIZE_CLASS[size]} border-2 ${TONE_BORDER[tone]} bg-[var(--color-panel)] p-6 panel-shadow outline-none`}
+        className={`w-full ${SIZE_CLASS[size]} border-2 ${TONE_BORDER[tone]} bg-[var(--color-panel)] p-6 panel-shadow`}
       >
         <h3 id={titleId} className="heading-1 mb-2 text-foreground">
           {title}

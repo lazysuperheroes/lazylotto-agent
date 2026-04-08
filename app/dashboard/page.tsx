@@ -1109,18 +1109,18 @@ export default function DashboardPage() {
       )}
 
       <div className="mx-auto max-w-6xl">
-        {/* ---- Top Bar ──────────────────────────────────────
-            Thin pixel-font header. Dropped the redundant network
-            badge (the sidebar has a much bigger one now) and the
-            strategy badge (it moved into the hero metadata row).
-            The page title functions more like a chapter header on
-            a comic book page than a dashboard nameplate. */}
-        <header className="mb-10 flex flex-wrap items-baseline justify-between gap-4">
-          <div>
-            <p className="label-caps-lg mb-2">Your agent</p>
-            <h1 className="display-lg text-foreground">Dashboard</h1>
-          </div>
-
+        {/* Context chips row — stuck deposits alert on the left,
+            account identity chip on the right. The "Dashboard" page
+            title used to live here as an h1, but the narrative
+            headline inside the hero panel below is the real page
+            title now (see buildNarrativeHeadline). Having both
+            violated WCAG 1.3.1 (duplicate h1). Dropping the title
+            here also honours the watching-first framing — the user
+            isn't here to read "Dashboard", they're here to see what
+            the agent did. The sidebar still marks the active route.
+            Plain div (not header) since this row is no longer the
+            page banner — it's a row of supplementary chips. */}
+        <div className="mb-10 flex flex-wrap items-center justify-end gap-4">
           {/* Stuck deposits alert — small destructive chip linking to
               /account where the full list and contact-support actions
               live. Only rendered when there's actually something stuck.
@@ -1169,7 +1169,7 @@ export default function DashboardPage() {
               </code>
             </div>
           )}
-        </header>
+        </div>
 
         {/* ---- Agent operational status ────────────────────
             Kill switch banner rendered as a destructive ComicPanel
@@ -1294,18 +1294,21 @@ export default function DashboardPage() {
               <div className="min-w-0">
                 {/* Eyebrow row — deposits-checking pulse on the left
                     (only when active), freshness ribbon on the right.
-                    The "Your agent" label was redundant with the
-                    narrative headline that immediately follows. When
-                    deposits-checking is inactive AND freshness has no
-                    data, the whole row collapses via flex-wrap to zero
-                    height. */}
-                <div
-                  className="mb-5 flex flex-wrap items-center justify-between gap-x-5 gap-y-2"
-                  aria-live="polite"
-                  aria-atomic="true"
-                >
+                    NO aria-live on the wrapper: the freshness ribbon
+                    inside ticks every 5s via useFreshness, and an
+                    aria-atomic region here would make screen readers
+                    re-announce "last run 1m ago updated 5s ago refresh"
+                    every 5 seconds, forever. The only genuine live
+                    status in this row is "Checking deposits", which
+                    now carries its own scoped aria-live on the span
+                    where it actually belongs. */}
+                <div className="mb-5 flex flex-wrap items-center justify-between gap-x-5 gap-y-2">
                   {depositsChecking ? (
-                    <span className="label-caps-brand inline-flex items-center gap-1.5">
+                    <span
+                      className="label-caps-brand inline-flex items-center gap-1.5"
+                      role="status"
+                      aria-live="polite"
+                    >
                       <span
                         className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-brand"
                         aria-hidden="true"
@@ -1317,15 +1320,15 @@ export default function DashboardPage() {
                   )}
                   {/* Freshness ribbon right-aligned, carrying BOTH
                       the dashboard refresh time AND the agent's
-                      last-run relative time when available. The
-                      refresh button expands the tap target to the
-                      WCAG 44×44 minimum via invisible -m-2 p-2
-                      padding so mobile users can hit it easily. */}
+                      last-run relative time when available. Not a
+                      live region — the info is ambient, not a status
+                      announcement. Keyboard users get it via normal
+                      tab-to-button + title attribute. */}
                   {!depositsChecking && (statusFreshness || lastRunFreshness) && (
                     <button
                       type="button"
                       onClick={() => void handleCheckDeposits()}
-                      className="label-caps -m-2 p-2 text-muted/70 underline-offset-2 transition-colors hover:text-brand hover:underline"
+                      className="label-caps -m-2 p-2 text-muted underline-offset-2 transition-colors hover:text-brand hover:underline"
                       title="Click to re-check deposits and refresh balance"
                     >
                       {lastRunFreshness && (
@@ -1355,13 +1358,12 @@ export default function DashboardPage() {
                     prefix so the visual treatment stays at the JSX
                     layer while the builder stays pure text. */}
                 {(() => {
-                  if (!status) {
-                    return (
-                      <h1 className="heading-1 mb-3 text-muted" aria-live="polite">
-                        Loading&hellip;
-                      </h1>
-                    );
-                  }
+                  // The enclosing `{status && (...)}` guard means this
+                  // IIFE only runs with a truthy status. Previous dead
+                  // `!status` branch dropped — it was unreachable AND
+                  // contained a duplicate h1 that static analysers would
+                  // have flagged.
+                  //
                   // Figure out which state slot to feed the builder.
                   let headlineState:
                     | 'first-run'

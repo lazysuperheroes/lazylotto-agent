@@ -385,7 +385,7 @@ export function Sidebar() {
             ? `Toggle navigation — ${stuckCount} stuck deposit${stuckCount === 1 ? '' : 's'} need attention`
             : 'Toggle navigation'
         }
-        className="fixed left-4 top-4 z-50 flex h-10 w-10 items-center justify-center rounded-lg border border-[#27272a] bg-[#09090b] text-[#a1a1aa] transition-colors hover:text-[#fafafa] md:hidden"
+        className="fixed left-4 top-4 z-50 flex h-11 w-11 items-center justify-center rounded-lg border border-[#27272a] bg-[#09090b] text-[#a1a1aa] transition-colors hover:text-[#fafafa] md:hidden"
       >
         {open ? (
           /* X icon */
