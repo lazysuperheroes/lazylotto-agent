@@ -28,7 +28,12 @@
   --font-sans: var(--font-heebo), 'Heebo', sans-serif;
   --font-heading: var(--font-unbounded), 'Unbounded', sans-serif;
   --font-pixel: var(--font-pixel), 'Courier New', monospace;
-  --radius-xl: 0.75rem;
+  /* No border-radius tokens — the comic vocabulary commits to
+     sharp corners on every structural element. If you find
+     yourself wanting "rounded-lg", you almost certainly want a
+     bordered block with panel-shadow instead. Status indicator
+     dots (1.5x1.5, 2x2 px) still use rounded-full directly
+     because they're meant to read as circles. */
 }
 
 /* Source detection for Tailwind v4 — scan all component files */
@@ -123,6 +128,29 @@ html[data-theme='calm'] [class*='-top-3'][class*='font-pixel'] {
   transform: translateY(1px);
 }
 
+/* Button shadows soften in calm mode to match the panel-shadow
+   treatment. The button classes below set their box-shadow
+   directly via inline box-shadow rules rather than using the
+   .panel-shadow utility, so calm mode's .panel-shadow override
+   doesn't reach them — we have to override each button class
+   explicitly. Resting state drops 4px→2px; hover drops 6px→3px;
+   active drops 2px→1px (so the press feedback stays visible but
+   scaled down). */
+html[data-theme='calm'] .btn-primary,
+html[data-theme='calm'] .btn-primary-sm,
+html[data-theme='calm'] .btn-ghost-sm-brand {
+  box-shadow: 2px 2px 0 0 var(--color-ink);
+}
+html[data-theme='calm'] .btn-primary:hover:not(:disabled),
+html[data-theme='calm'] .btn-primary-sm:hover:not(:disabled),
+html[data-theme='calm'] .btn-ghost-sm-brand:hover:not(:disabled) {
+  box-shadow: 3px 3px 0 0 var(--color-ink);
+}
+html[data-theme='calm'] .btn-primary:active:not(:disabled),
+html[data-theme='calm'] .btn-primary-sm:active:not(:disabled) {
+  box-shadow: 1px 1px 0 0 var(--color-ink);
+}
+
 /* ─────────────────────────────────────────────────────────────
    Scoped calm preview
    ─────────────────────────────────────────────────────────────
@@ -162,6 +190,24 @@ html[data-theme='calm'] [class*='-top-3'][class*='font-pixel'] {
 .theme-preview-calm [class*='-top-3'][class*='font-pixel'] {
   box-shadow: 2px 2px 0 0 var(--color-ink);
   transform: translateY(1px);
+}
+
+/* Scoped button shadow calm — mirrors the root html[data-theme='calm']
+   rules so the Preferences live preview shows buttons at the same
+   softened intensity as they'd render under the real calm mode. */
+.theme-preview-calm .btn-primary,
+.theme-preview-calm .btn-primary-sm,
+.theme-preview-calm .btn-ghost-sm-brand {
+  box-shadow: 2px 2px 0 0 var(--color-ink);
+}
+.theme-preview-calm .btn-primary:hover:not(:disabled),
+.theme-preview-calm .btn-primary-sm:hover:not(:disabled),
+.theme-preview-calm .btn-ghost-sm-brand:hover:not(:disabled) {
+  box-shadow: 3px 3px 0 0 var(--color-ink);
+}
+.theme-preview-calm .btn-primary:active:not(:disabled),
+.theme-preview-calm .btn-primary-sm:active:not(:disabled) {
+  box-shadow: 1px 1px 0 0 var(--color-ink);
 }
 
 /* Character mascot fade-in animation */

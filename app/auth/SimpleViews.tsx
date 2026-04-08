@@ -110,9 +110,12 @@ export function ConnectingView({ phase, accountId }: ConnectingViewProps) {
       />
 
       {accountId && (
-        <span className="inline-flex items-center gap-2 rounded-full bg-secondary px-4 py-2 text-sm text-foreground">
-          <span className="h-2 w-2 rounded-full bg-success" />
-          {accountId}
+        // Sharp-cornered bordered chip matching the dashboard +
+        // AuthFlow already-auth treatment. See CompleteView for the
+        // rationale on dropping rounded-full pill shapes.
+        <span className="inline-flex items-center gap-2 border-2 border-secondary bg-[var(--color-panel)] px-3 py-2 text-sm text-foreground">
+          <span className="h-2 w-2 rounded-full bg-success" aria-hidden="true" />
+          <code className="font-mono">{accountId}</code>
         </span>
       )}
 

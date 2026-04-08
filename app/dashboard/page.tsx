@@ -1210,9 +1210,14 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Non-fatal error banner */}
+        {/* Non-fatal error banner — sharp corners + 2px border to
+            match the rest of the comic vocabulary. Previously used
+            rounded-lg from the pre-normalize era. */}
         {error && status && (
-          <div className="mb-6 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          <div
+            role="alert"
+            className="mb-6 border-2 border-destructive bg-destructive/10 px-4 py-3 text-sm text-destructive"
+          >
             {error}
           </div>
         )}

@@ -100,9 +100,14 @@ function SuccessHeader({
       <h2 className="font-heading text-xl text-success">
         {isReturning ? 'Re-authenticated' : 'Authenticated'}
       </h2>
-      <span className="inline-flex items-center gap-2 rounded-full bg-secondary px-4 py-2 text-sm text-foreground">
+      {/* Sharp-cornered bordered chip to match the dashboard's account
+          identity block + the AuthFlow already-auth treatment. Previous
+          rounded-full pill shape broke the sharp-corner vocabulary the
+          rest of the app commits to. Only the status dot stays circular
+          (2×2 indicator dots should be round). */}
+      <span className="inline-flex items-center gap-2 border-2 border-secondary bg-[var(--color-panel)] px-3 py-2 text-sm text-foreground">
         <span className="h-2 w-2 rounded-full bg-success" aria-hidden="true" />
-        {accountId}
+        <code className="font-mono">{accountId}</code>
       </span>
     </div>
   );

@@ -376,7 +376,17 @@ export function Sidebar() {
           invisible until the user opens the nav. Mirror the badge
           as a tiny destructive dot on the hamburger itself so users
           on mobile discover stuck deposits without having to open
-          the nav first. */}
+          the nav first.
+
+          Styling: sharp corners + brand-gold border on a panel
+          background, matching the rest of the comic vocabulary.
+          Previously used rounded-lg + hard-coded hex colors
+          (#27272a/#09090b/#a1a1aa/#fafafa) which (a) broke calm
+          mode because the hex values bypass tokens entirely, (b)
+          made this the only rounded element in the whole app.
+          Now uses border-secondary/bg-background/text-muted
+          tokens so theme variants pick it up, and sharp corners
+          match every other bordered element. */}
       <button
         type="button"
         onClick={toggle}
@@ -385,7 +395,7 @@ export function Sidebar() {
             ? `Toggle navigation — ${stuckCount} stuck deposit${stuckCount === 1 ? '' : 's'} need attention`
             : 'Toggle navigation'
         }
-        className="fixed left-4 top-4 z-50 flex h-11 w-11 items-center justify-center rounded-lg border border-[#27272a] bg-[#09090b] text-[#a1a1aa] transition-colors hover:text-[#fafafa] md:hidden"
+        className="fixed left-4 top-4 z-50 flex h-11 w-11 items-center justify-center border-2 border-secondary bg-background text-muted transition-colors hover:border-brand hover:text-foreground md:hidden"
       >
         {open ? (
           /* X icon */
