@@ -60,6 +60,110 @@ body {
 ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
 
+/* ─────────────────────────────────────────────────────────────
+   Calm mode — opt-in subdued theme variant
+   ─────────────────────────────────────────────────────────────
+   Applied via `data-theme="calm"` on the <html> root (set by the
+   client-side theme hook in app/lib/theme.ts). Users toggle on
+   /account under Preferences. The setting persists in localStorage.
+
+   What calm mode changes (and what it DOESN'T):
+     - DOES: strip halftone dots (they become a subtle flat tint)
+     - DOES: soften neo-brutalist panel shadows (still offset, but
+       smaller and closer to the panel body)
+     - DOES: quiet the letter-spacing on small-caps labels
+     - DOES: reduce mascot-wake hover transform so the dashboard
+       feels less playful
+     - DOESN'T: change the colour palette (brand gold stays gold,
+       destructive stays red) — calm mode is about VOLUME, not hue
+     - DOESN'T: hide the mascot or speech bubble
+     - DOESN'T: flatten the corner sticker entirely — it stays as
+       a smaller, subtler issue tag
+   The point is "quieter comic book", not "generic dashboard".
+   The impeccable.md style guide principles (confident borders,
+   sharp corners, purposeful typography, committed colour) all
+   still apply; calm mode adjusts INTENSITY, not IDENTITY. */
+
+html[data-theme='calm'] .halftone {
+  background-image: none;
+}
+html[data-theme='calm'] .halftone-dense {
+  background-image:
+    radial-gradient(
+      circle at 1px 1px,
+      rgba(229, 168, 0, 0.06) 1px,
+      transparent 0
+    );
+  background-size: 16px 16px;
+}
+html[data-theme='calm'] .panel-shadow {
+  box-shadow: 3px 3px 0 0 var(--color-ink);
+}
+html[data-theme='calm'] .panel-shadow-sm {
+  box-shadow: 2px 2px 0 0 var(--color-ink);
+}
+html[data-theme='calm'] .label-caps,
+html[data-theme='calm'] .label-caps-lg,
+html[data-theme='calm'] .label-caps-brand,
+html[data-theme='calm'] .label-caps-brand-lg,
+html[data-theme='calm'] .label-caps-destructive {
+  letter-spacing: 0.12em;
+}
+/* Reduce the mascot-wake hover transform to ~1/3 intensity so the
+   character still responds but doesn't bounce at the user. */
+@media (prefers-reduced-motion: no-preference) {
+  html[data-theme='calm'] .mascot-wake:hover {
+    transform: scale(1.01) rotate(-0.3deg);
+  }
+}
+/* Corner stickers shrink + soften their shadow in calm mode so they
+   read as a discreet label rather than a shouted callout. */
+html[data-theme='calm'] [class*='-top-3'][class*='font-pixel'] {
+  box-shadow: 2px 2px 0 0 var(--color-ink);
+  transform: translateY(1px);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Scoped calm preview
+   ─────────────────────────────────────────────────────────────
+   Mirrors the html[data-theme='calm'] rules but scoped to a
+   .theme-preview-calm wrapper so the Preferences panel can show
+   side-by-side previews of comic vs calm WITHOUT switching the
+   root theme. Lets users see both modes at once, decide, and
+   commit. The rules have to be duplicated (not imported) because
+   CSS selectors can't inherit targeting — the trade-off is a
+   bit of repetition in exchange for a real live-preview. */
+
+.theme-preview-calm .halftone {
+  background-image: none;
+}
+.theme-preview-calm .halftone-dense {
+  background-image:
+    radial-gradient(
+      circle at 1px 1px,
+      rgba(229, 168, 0, 0.06) 1px,
+      transparent 0
+    );
+  background-size: 16px 16px;
+}
+.theme-preview-calm .panel-shadow {
+  box-shadow: 3px 3px 0 0 var(--color-ink);
+}
+.theme-preview-calm .panel-shadow-sm {
+  box-shadow: 2px 2px 0 0 var(--color-ink);
+}
+.theme-preview-calm .label-caps,
+.theme-preview-calm .label-caps-lg,
+.theme-preview-calm .label-caps-brand,
+.theme-preview-calm .label-caps-brand-lg,
+.theme-preview-calm .label-caps-destructive {
+  letter-spacing: 0.12em;
+}
+.theme-preview-calm [class*='-top-3'][class*='font-pixel'] {
+  box-shadow: 2px 2px 0 0 var(--color-ink);
+  transform: translateY(1px);
+}
+
 /* Character mascot fade-in animation */
 @keyframes fadeScaleIn {
   from {

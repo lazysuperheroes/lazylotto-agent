@@ -3,6 +3,7 @@ import type { Metadata } from 'next';
 import { Heebo, Unbounded, Press_Start_2P } from 'next/font/google';
 import { Sidebar } from './components/Sidebar';
 import { ToastProvider } from './components/Toast';
+import { ThemeBoot } from './components/ThemeBoot';
 
 // ---------------------------------------------------------------------------
 // Fonts — loaded via next/font (no CSS @import needed)
@@ -106,6 +107,11 @@ export default function RootLayout({
         >
           Skip to main content
         </a>
+        {/* ThemeBoot reads the user's calm/comic preference from
+            localStorage and applies `data-theme="calm"` to <html>
+            so the calm-mode CSS variants in globals.css take effect.
+            Renders nothing — pure side effect on mount. */}
+        <ThemeBoot />
         <ToastProvider>
           <div className="flex min-h-screen">
             <Sidebar />
