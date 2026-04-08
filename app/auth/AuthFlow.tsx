@@ -7,7 +7,6 @@ import { DAppConnector } from '@hashgraph/hedera-wallet-connect/dist/lib/dapp';
 import {
   HederaJsonRpcMethod,
   HederaSessionEvent,
-  HederaChainId,
 } from '@hashgraph/hedera-wallet-connect/dist/lib/shared';
 import Image from 'next/image';
 import { useToast } from '../components/Toast';
@@ -20,6 +19,16 @@ import {
   persistCharacterIdx,
   randomCharacterIdx,
 } from '../lib/characters';
+import { clearSession } from '../lib/session';
+import {
+  CHAIN_IDS,
+  PROJECT_IDS,
+  getNetworkFromUrl,
+  networkLabel,
+  pickRandom,
+  type Network,
+} from './walletConnect';
+import { ConnectingView, ErrorView, LandingView } from './SimpleViews';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,38 +42,6 @@ type AuthStatus =
   | 'signing'
   | 'complete'
   | 'error';
-
-type Network = 'testnet' | 'mainnet';
-
-const PROJECT_IDS: Record<Network, string> = {
-  testnet: 'bd6270834787a8e7615806237172c87c',
-  mainnet: '6c3697705aa0c2e8a49d81ed6f734219',
-};
-
-const CHAIN_IDS: Record<Network, string> = {
-  testnet: HederaChainId.Testnet,
-  mainnet: HederaChainId.Mainnet,
-};
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function getNetworkFromUrl(): Network {
-  if (typeof window === 'undefined') return 'testnet';
-  const params = new URLSearchParams(window.location.search);
-  const raw = params.get('network')?.toLowerCase();
-  if (raw === 'mainnet') return 'mainnet';
-  return 'testnet';
-}
-
-function networkLabel(n: Network): string {
-  return n === 'mainnet' ? 'Mainnet' : 'Testnet';
-}
-
-function pickRandom(arr: string[]): string {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -131,11 +108,7 @@ export function AuthFlow() {
         const expiresAtMs = new Date(expiry).getTime();
         if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) {
           // Expired — purge and show landing with a hint
-          localStorage.removeItem('lazylotto:sessionToken');
-          localStorage.removeItem('lazylotto:accountId');
-          localStorage.removeItem('lazylotto:tier');
-          localStorage.removeItem('lazylotto:mcpUrl');
-          localStorage.removeItem('lazylotto:expiresAt');
+          clearSession();
           toast('Your session expired — please re-authenticate');
           setStatus('landing');
           return;
@@ -406,10 +379,7 @@ export function AuthFlow() {
 
   // ----- Re-authenticate (clear stored session) -----
   const handleReauthenticate = useCallback(() => {
-    localStorage.removeItem('lazylotto:sessionToken');
-    localStorage.removeItem('lazylotto:accountId');
-    localStorage.removeItem('lazylotto:tier');
-    localStorage.removeItem('lazylotto:mcpUrl');
+    clearSession();
     setStoredAccountId('');
     setShowUrl(false);
     setStatus('landing');
@@ -422,10 +392,7 @@ export function AuthFlow() {
     } catch {
       /* ignore */
     }
-    localStorage.removeItem('lazylotto:sessionToken');
-    localStorage.removeItem('lazylotto:accountId');
-    localStorage.removeItem('lazylotto:tier');
-    localStorage.removeItem('lazylotto:mcpUrl');
+    clearSession();
     setStatus('landing');
     setAccountId('');
     setSessionToken('');
@@ -662,89 +629,20 @@ export function AuthFlow() {
 
           {/* ---- LANDING ---- */}
           {status === 'landing' && (
-            <div className="flex flex-col items-center gap-6 text-center">
-              <Image
-                src="https://docs.lazysuperheroes.com/logo.svg"
-                alt="LazyLotto"
-                width={240}
-                height={80}
-                className="h-20 w-auto"
-                priority
-                unoptimized
-              />
-
-              <div className="flex items-center gap-2">
-                <h1 className="font-heading text-2xl text-foreground">
-                  LazyLotto Agent
-                </h1>
-                <span className="rounded bg-brand px-2 py-0.5 text-xs text-background">
-                  {networkLabel(net)}
-                </span>
-              </div>
-
-              {/* Character mascot with shimmer placeholder */}
-              <CharacterMascot
-                key={character.name}
-                character={character}
-                size="lg"
-                line={pickRandom(character.taglines)}
-                onReroll={rerollCharacter}
-              />
-
-              <p className="text-sm text-muted">
-                Sign a message to prove wallet ownership and receive your MCP
-                connection credentials. No transaction is submitted and no funds
-                are spent.
-              </p>
-
-              <button
-                type="button"
-                onClick={() => void handleAuth()}
-                className="btn-primary-sm w-full"
-              >
-                Connect Wallet
-              </button>
-
-              <p className="text-sm text-muted">
-                Supports HashPack, Blade, and other Hedera wallets via
-                WalletConnect.
-              </p>
-            </div>
+            <LandingView
+              network={net}
+              character={character}
+              rerollCharacter={rerollCharacter}
+              onConnect={() => void handleAuth()}
+            />
           )}
 
           {/* ---- CONNECTING / SIGNING ---- */}
           {isConnecting && (
-            <div className="flex flex-col items-center gap-6 text-center">
-              <Image
-                src="https://docs.lazysuperheroes.com/logo.svg"
-                alt="LazyLotto"
-                width={240}
-                height={80}
-                className="h-20 w-auto"
-                priority
-                unoptimized
-              />
-
-              {accountId && (
-                <span className="inline-flex items-center gap-2 rounded-full bg-secondary px-4 py-2 text-sm text-foreground">
-                  <span className="h-2 w-2 rounded-full bg-success" />
-                  {accountId}
-                </span>
-              )}
-
-              <div className="flex items-center gap-3">
-                <div className="h-5 w-5 animate-spin rounded-full border-2 border-muted border-t-brand" />
-                <span className="text-sm text-foreground">
-                  {status === 'connecting'
-                    ? 'Connecting wallet...'
-                    : 'Requesting signature...'}
-                </span>
-              </div>
-
-              <p className="text-sm text-muted">
-                Please approve the signing request in your wallet.
-              </p>
-            </div>
+            <ConnectingView
+              phase={status === 'connecting' ? 'connecting' : 'signing'}
+              accountId={accountId}
+            />
           )}
 
           {/* ---- COMPLETE ---- */}
@@ -1172,30 +1070,13 @@ export function AuthFlow() {
 
           {/* ---- ERROR ---- */}
           {status === 'error' && (
-            <div className="flex flex-col items-center gap-6 text-center">
-              <Image
-                src="https://docs.lazysuperheroes.com/logo.svg"
-                alt="LazyLotto"
-                width={240}
-                height={80}
-                className="h-20 w-auto"
-                priority
-                unoptimized
-              />
-
-              <p className="type-body text-destructive">{error}</p>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setError('');
-                  setStatus('landing');
-                }}
-                className="btn-ghost-sm"
-              >
-                Try again
-              </button>
-            </div>
+            <ErrorView
+              error={error}
+              onRetry={() => {
+                setError('');
+                setStatus('landing');
+              }}
+            />
           )}
           </div>
         </ComicPanel>
