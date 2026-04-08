@@ -228,7 +228,7 @@ Once you have real users and the system is running smoothly:
 {
   "status": "ok",
   "network": "mainnet",
-  "version": "0.1.32",
+  "version": "0.2.0",
   "timestamp": "2026-04-08T01:23:45.678Z"
 }
 ```
