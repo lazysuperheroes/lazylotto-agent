@@ -1202,7 +1202,7 @@ export default function AdminPage() {
                       </tbody>
                     </table>
                   </div>
-                  <p className="mt-2 text-[11px] italic text-muted/60">
+                  <p className="mt-2 type-caption-sm italic text-muted/60">
                     Data sourced from the HCS-20 audit topic. Cached for 60s.
                     Days with no activity are omitted.
                   </p>
@@ -1435,7 +1435,7 @@ export default function AdminPage() {
                                 v{reconResult.schema.operator}
                               </span>
                             </p>
-                            <p className="mt-2 text-[11px] italic">
+                            <p className="mt-2 type-caption-sm italic">
                               Records written before the schemaVersion
                               field existed are counted as v0. v0 and v
                               {reconResult.schema.current} are

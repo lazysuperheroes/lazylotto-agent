@@ -446,7 +446,7 @@ function SessionCard({
             )}
             {/* Warnings (corrupt sessions, mismatches) */}
             {session.warnings.length > 0 && (
-              <ul className="mt-1 space-y-0.5 text-[11px] text-destructive">
+              <ul className="mt-1 space-y-0.5 type-caption-sm text-destructive">
                 {session.warnings.map((w, i) => (
                   <li key={i}>⚠ {w}</li>
                 ))}
@@ -979,7 +979,7 @@ export default function AuditPage() {
                 Won (claim on dApp):{' '}
                 <span className="text-brand">+{formatAmount(summary.totalWon)}</span>
               </span>
-              <span className="text-[11px] italic text-muted/60">
+              <span className="type-caption-sm italic text-muted/60">
                 Winnings flow to your wallet directly via the contract; they don&apos;t
                 offset your balance above.
               </span>
@@ -1036,7 +1036,7 @@ export default function AuditPage() {
                 </span>
               )}
             </div>
-            <p className="mt-2 text-[11px] italic text-muted/60">
+            <p className="mt-2 type-caption-sm italic text-muted/60">
               v2 became the writer default at commit{' '}
               <code className="font-mono">549ed40</code>. Older v1 messages on
               the topic are immutable; the reader handles both shapes. This
@@ -1277,7 +1277,7 @@ export default function AuditPage() {
                   </div>
 
                   {/* Sequence number (subtle) */}
-                  <p className="mt-2 text-[11px] text-muted/50">
+                  <p className="mt-2 type-caption-sm text-muted/50">
                     #{entry.sequence}
                   </p>
                 </div>

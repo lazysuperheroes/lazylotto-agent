@@ -261,7 +261,7 @@ function UserContext() {
               aria-hidden="true"
             />
             <code
-              className="truncate font-mono text-[11px] text-foreground"
+              className="truncate font-mono type-caption-sm text-foreground"
               title={accountId}
             >
               {truncatedId}

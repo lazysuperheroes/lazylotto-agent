@@ -1468,11 +1468,16 @@ export default function DashboardPage() {
                     builder output by splitting on the known name
                     prefix so the visual treatment stays at the JSX
                     layer while the builder stays pure text. */}
+                {/* Narrative headline is a heading, not a live region.
+                    During a winning play, the play phase status +
+                    win celebration overlay + win toast ALREADY announce
+                    the event. Adding aria-live here meant screen readers
+                    got 4 competing announcements in the same ~20s window
+                    after a play. The h1 is still discoverable via normal
+                    heading navigation; it just doesn't re-announce when
+                    the underlying content updates. */}
                 {narrativeHeadline && (
-                  <h1
-                    className="heading-1 mb-3 text-foreground"
-                    aria-live="polite"
-                  >
+                  <h1 className="heading-1 mb-3 text-foreground">
                     <span className="text-brand">{narrativeHeadline.namePrefix}</span>
                     {narrativeHeadline.rest}
                   </h1>

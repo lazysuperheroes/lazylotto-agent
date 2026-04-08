@@ -527,6 +527,19 @@ html[data-theme='calm'] .btn-primary-sm:active:not(:disabled) {
   color: var(--color-muted);
 }
 
+/* Smaller caption variant — 11px, for dense contexts where the
+   12px base caption is still too large: error-list line items,
+   inline footnotes next to metric cards, sidebar mono-code
+   readouts in narrow columns. Font size + line-height only —
+   no colour baked in, callers pick text-muted / text-destructive
+   / text-foreground as appropriate. Replaces the ad-hoc
+   `text-[11px]` magic values that were scattered across audit,
+   admin, PrizeNftCard, and Sidebar. */
+.type-caption-sm {
+  font-size: 0.6875rem; /* 11px */
+  line-height: 1.45;
+}
+
 /* Constrain paragraph prose to a comfortable reading line.
    Apply to any <p> or prose container whose content is real
    sentences (not labels, not data rows). Uses ch units so the

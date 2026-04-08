@@ -140,7 +140,7 @@ export function PrizeNftCard({ raw, enriched, loading, size = 'regular' }: Prize
   const imageDim = size === 'compact' ? 'h-10 w-10' : 'h-14 w-14';
   const imagePx = size === 'compact' ? 40 : 56;
   const nameTextClass = size === 'compact' ? 'text-xs font-semibold' : 'text-sm font-semibold';
-  const collectionTextClass = size === 'compact' ? 'text-[10px]' : 'text-[11px]';
+  const collectionTextClass = size === 'compact' ? 'text-[10px]' : 'type-caption-sm';
   const containerClass =
     size === 'compact'
       ? 'flex items-center gap-2 border border-secondary bg-[var(--color-panel)] p-1.5 pr-2'
