@@ -234,6 +234,94 @@ place today. The bulk-rewrite scripts, dry-run diff tooling, and
 version-bump CLI are not. **Revisit when:** the first incompatible
 record-shape change happens.
 
+### HCS-20 v2 Audit Trail
+
+The agent writes a structured sequence to an HCS-20 topic for every
+play session: `play_session_open` → N × `play_pool_result` →
+`play_session_close` (or `play_session_aborted` on partial-write
+failure). Plus `mint` (deposits), `transfer` (rake), `burn`
+(withdrawals), `refund`, `prize_recovery`, and `control` ops for
+everything else.
+
+The full wire spec is in `docs/hcs20-v2-schema.md`. It's designed so
+an external auditor can reconstruct every user's ledger from the
+topic alone, without needing the agent's Redis store. The reader
+(`src/custodial/hcs20-reader.ts`) handles both v1 batch and v2
+sequence shapes via an anti-corruption layer — legacy testnet
+sessions parse correctly and surface as `closed_success` with a
+"v1 legacy" warning.
+
+Standalone CLI verifier at `src/scripts/verify-audit.ts`:
+
+```bash
+npx tsx src/scripts/verify-audit.ts --topic <topic-id> --user <accountId>
+```
+
+Produces per-user Deposited / Rake / Spent / Withdrawn / Refunded /
+Balance totals with no dependency on the agent's state. This is the
+artifact we'd hand to a regulator.
+
+### Prize Transfer Reliability
+
+Phase 5 of a play session reassigns pending prizes from the agent
+wallet to the user's EOA via the contract's `transferPendingPrizes`
+function. Gas scales with prize count, so the agent uses an
+escalating-gas retry ladder (225K → 300K → 400K per prize, capped
+at 14M) defined in `PRIZE_TRANSFER_RETRY` in
+`src/config/defaults.ts`. The ladder retries on `INSUFFICIENT_GAS`
+only — other errors propagate and get dead-lettered.
+
+Failed transfers record a `prize_transfer_failed` dead letter with
+the full retry log. The admin dashboard surfaces the count, and
+the operator recovery tool (`operator_recover_stuck_prizes` MCP
+tool, or the `src/scripts/recover-stuck-prizes.ts` CLI) pushes
+stranded prizes through with the same ladder. Successful recoveries
+write a `prize_recovery` op to the HCS-20 audit topic so the
+intervention is visible to external auditors.
+
+### Per-Token Play Correctness
+
+The play loop reserves a budget **per token** (intersection of the
+user's positive-balance tokens with the strategy's budgeted tokens),
+runs the LottoAgent with a pool filter tightened to exactly those
+tokens, and settles spend from `report.poolResults[].feeTokenId`
+independently per token. Defense-in-depth: if the play loop ever
+spends a token that wasn't in the reservation set, it throws and
+the catch block releases every outstanding reservation.
+
+This prevents a whole class of operator-fund-bleed bugs where a
+HBAR-only user could trigger a LAZY pool play and have the LAZY
+entry fee come out of the agent wallet (operator funds) while
+being mis-billed in HBAR. The regression test
+`'HBAR-only user only has HBAR in the reservation set'` in
+`src/custodial/MultiUserAgent.test.ts` locks this behavior in.
+
+### Reconcile Cron + Uptime Monitoring
+
+`/api/cron/reconcile` is a `CRON_SECRET`-authenticated endpoint
+that runs the same reconcile the admin dashboard does and returns
+`200` on solvent / `503` on insolvent. Wired in `vercel.json` to
+run hourly. Optionally fires a webhook on insolvency when
+`RECONCILE_FAILURE_WEBHOOK_URL` is set.
+
+Pair with an external uptime monitor (Better Stack, UptimeRobot,
+Vercel Monitoring) pointed at `/api/health` for liveness. See
+`docs/uptime-monitoring.md` for full wiring instructions.
+
+### Operator Runbooks
+
+- `docs/mainnet-deploy-checklist.md` — phase-by-phase mainnet
+  deploy runbook with exhaustive env var list and verification
+  steps
+- `docs/mainnet-hol-registration.md` — one-time HOL registration
+  walkthrough
+- `docs/incident-playbook.md` — symptom → action runbook for the
+  failure modes we've actually seen (stuck prizes, reconcile
+  insolvency, dead letters, corrupt sessions, MCP HTML 500,
+  operator-LAZY bleed)
+- `docs/disaster-recovery.md` — Redis loss recovery procedure
+  using the HCS-20 v2 trail as the backup
+
 ---
 
 ## Getting Started

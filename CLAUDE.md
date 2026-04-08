@@ -19,12 +19,13 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Three deployment
 - **Writes**: Direct Hedera SDK contract calls (agent signs all transactions)
 - **Wallet**: Agent holds its own Hedera account with private key in env
 - **Strategy**: Versioned JSON files define play behavior, budget, and risk tolerance
-- **Accounting**: HCS-20 immutable on-chain ledger (multi-user mode)
+- **Accounting**: HCS-20 v2 immutable on-chain ledger with per-pool play_session_open/play_pool_result/play_session_close sequence. Self-sufficient — external auditors can reconstruct from the topic alone. v1 batch messages still parse via the reader's dual-shape fallback for legacy testnet sessions. See `docs/hcs20-v2-schema.md` for the wire spec.
 - **Auth**: Hedera signature challenge-response, session tokens in Upstash Redis (or in-memory fallback)
 - **HTTP Transport**: Dual mode — stdio for Claude Desktop, HTTP/serverless for Vercel
-- **Frontend**: Next.js 16 app with WalletConnect auth page, user dashboard, admin dashboard
+- **Frontend**: Next.js 16 app with WalletConnect auth page, user dashboard, admin dashboard, audit page with SessionCard aggregation
 - **Persistence**: RedisStore (Vercel/production) or PersistentStore (local dev, JSON files)
 - **Discovery**: HOL HCS-11 profile + /api/discover endpoint
+- **Monitoring**: Hourly reconcile cron at `/api/cron/reconcile` (CRON_SECRET auth, optional webhook on insolvency); external uptime monitor on `/api/health`. See `docs/uptime-monitoring.md`.
 
 ## Tech Stack
 
@@ -42,18 +43,20 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Three deployment
 
 ## Key Directories
 
-- src/agent/       — Core agent logic (LottoAgent, StrategyEngine, BudgetManager, AuditReport)
-- src/custodial/   — Multi-user layer (UserLedger, DepositWatcher, MultiUserAgent, AccountingService, NegotiationHandler, GasTracker, PersistentStore, RedisStore)
-- src/hedera/      — Hedera SDK wrappers (wallet, contracts, mirror node, tokens, delegates, refund)
-- src/mcp/         — MCP client (dApp reads) and MCP server (22 agent control tools)
+- src/agent/       — Core agent logic (LottoAgent, StrategyEngine, BudgetManager, AuditReport, ReportGenerator)
+- src/custodial/   — Multi-user layer: UserLedger, DepositWatcher, MultiUserAgent (per-token reservation/settlement), AccountingService (v1+v2 writers), NegotiationHandler, GasTracker, PersistentStore, RedisStore, **hcs20-v2.ts** (schema types + helpers), **hcs20-reader.ts** (state-machine reader with dual v1+v2 dispatcher)
+- src/hedera/      — Hedera SDK wrappers (wallet, contracts, mirror node, tokens, delegates, refund with retry ladder)
+- src/mcp/         — MCP client (dApp reads) and MCP server (23 tools: 7 multi-user, 6 single-user, 7 operator incl. operator_recover_stuck_prizes)
 - src/hol/         — HOL registry integration (HCS-11 profile, UAID)
 - src/auth/        — Challenge-response authentication, session management, Redis client
 - src/cli/         — Interactive setup wizard
-- src/config/      — Strategy schema (Zod) and defaults
+- src/config/      — Strategy schema (Zod) and defaults, PRIZE_TRANSFER_RETRY gas ladder
+- src/scripts/     — Operator CLI tools: recover-stuck-prizes, verify-audit (standalone), audit-deposit-discrepancy, test-v2-reader
 - strategies/      — Versioned JSON strategy files
-- docs/            — Getting started guide, multi-user guide, MCP reference
+- docs/            — User guide, HOL discovery guide, HCS-20 v2 schema spec, mainnet checklists, incident playbook, DR plan, uptime monitoring
 - app/             — Next.js frontend (auth, dashboards, API routes, MCP endpoint)
 - app/api/_lib/    — Serverless singletons (store, hedera client, deposits, locks, MCP context)
+- app/api/cron/    — Vercel Cron endpoints (reconcile)
 - public/          — Static assets (favicon, robots.txt)
 
 ## Auth System
@@ -109,17 +112,22 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Three deployment
 5. Always associate tokens before receiving them
 6. Agent wallet should be a dedicated account with limited funding
 7. Prize transfer uses transferPendingPrizes (in-memory reassignment, not token transfer)
+8. `transferPendingPrizes` gas scales with prize count: 500K base + 225K per prize (first try), escalating to 300K then 400K per prize on retries. Capped at 14M. Defined in `PRIZE_TRANSFER_RETRY` in src/config/defaults.ts. The retry ladder is handled by `transferAllPrizesWithRetry` in src/hedera/contracts.ts and used by both the in-flight play path and `operator_recover_stuck_prizes`.
 
 ## Multi-User Security Rules
 
-1. Reserve-before-spend: always move funds from available -> reserved before playing
-2. Sequential play per user: never interleave User A's play with User B's
-3. Per-user mutex: in-memory (CLI) + Redis distributed lock (serverless) for play and withdraw
-4. Orphaned reserve recovery: on startup, release any stuck reserved amounts
-5. Idempotent deposits: track processed transaction IDs to prevent double-crediting
-6. Rake on deposits, not wins: users claim their own prizes from the dApp
-7. Refund ledger adjustment: processRefund deducts from user balance when memo matches a deposit
-8. Registration dedup: getUserByAccountId check prevents accidental double-registration
+1. **Per-token reservation + settlement**: `MultiUserAgent.playForUser` builds a `Map<token, reservedAmount>` over the intersection of the user's positive-balance tokens with the strategy's budgeted tokens, reserves each independently, and settles each from `report.poolResults[].feeTokenId` after the play. NEVER settle `report.totalSpent` (a meaningless cross-token sum) against a single "primary token". The critical regression test `'HBAR-only user only has HBAR in the reservation set'` locks this behavior in.
+2. **Defense-in-depth on unexpected token spend**: If the play loop tries to spend a token that wasn't in the user's reservation set, throw immediately. The catch block releases every outstanding reservation. Bleeding operator funds is unacceptable.
+3. **Pool filter restriction**: before building the user-specific LottoAgent, override `poolFilter.feeToken` based on the user's reserved-token set. `FeeTokenFilterSchema` supports an array form (`['HBAR','LAZY']`) for mixed-balance users — don't fall back to `'any'`.
+4. Sequential play per user: never interleave User A's play with User B's
+5. Per-user mutex: in-memory (CLI) + Redis distributed lock (serverless) for play and withdraw
+6. Orphaned reserve recovery: on startup, release any stuck reserved amounts
+7. Idempotent deposits: track processed transaction IDs to prevent double-crediting
+8. Rake on deposits, not wins: users claim their own prizes from the dApp
+9. **Prize transfer outcome is real**: `LottoAgent.safeTransferPrizes` returns a `PrizeTransferOutcome` discriminated union (`skipped | succeeded | failed`) and the session record's `prizesTransferred` reflects the actual result, NOT a hardcoded `true`. Failed transfers dead-letter as `kind: 'prize_transfer_failed'` with full retry log.
+10. Refund ledger adjustment: `processRefund` deducts from user balance when memo matches a deposit AND writes a `refund` op to HCS-20 via `AccountingService.recordRefund`
+11. Registration dedup: `getUserByAccountId` check prevents accidental double-registration
+12. **HCS-20 v2 audit trail is load-bearing**: every play session writes open + N pool_results + close (or aborted). `AccountingService.submitV2Message` hard-fails on >1024 byte messages. `agentSeq` is a monotonic per-agent counter recovered at startup via mirror node scan.
 
 ## Local Development Without Redis
 
@@ -148,7 +156,7 @@ npm run setup            — First-time wallet setup
 npm run status           — Check wallet balances
 npm run audit            — Configuration audit
 npm run wizard           — Interactive .env setup
-npm test                 — Run test suite (356 tests)
+npm test                 — Run test suite (380 tests)
 npm run build            — Compile + shebang injection
 npm run build:web        — Next.js production build
 npm run smoke-test       — Auth flow smoke test
@@ -161,3 +169,41 @@ lazylotto-agent --multi-user                      — Start custodial agent
 lazylotto-agent --multi-user --deploy-accounting  — Deploy HCS-20 topic
 lazylotto-agent --multi-user --mcp-server         — MCP server with multi-user tools
 ```
+
+Operator scripts (src/scripts/):
+```
+npx tsx src/scripts/recover-stuck-prizes.ts <userAccountId> [--execute] [--reason "..."]
+   — Emergency recovery for prizes stranded in agent wallet due to
+     failed transferPendingPrizes. Default dry-run; pass --execute
+     to actually transfer. Records to HCS-20 audit trail.
+
+npx tsx src/scripts/verify-audit.ts --topic <id> [--user <accountId>] [--json]
+   — Standalone audit verifier. Reconstructs per-user ledger from
+     the HCS-20 topic alone, no Redis dependency. Safe to run
+     against production (read only).
+
+npx tsx src/scripts/audit-deposit-discrepancy.ts
+   — Forensic walk comparing live store totalDeposited against
+     on-chain mint sums. Used to track down "ghost deposit"
+     discrepancies. Falls back to on-chain-only mode if Redis
+     creds aren't in .env.
+
+npx tsx src/scripts/test-v2-reader.ts
+   — Developer diagnostic: pulls the live HCS-20 topic and runs
+     it through parseAuditTopic, prints stats + session breakdown.
+     Useful for spot-checking after schema or reader changes.
+```
+
+## Documentation
+
+Key operator-facing docs in `docs/`:
+
+- `testnet-user-guide.md` — how end users play via dashboard or Claude
+- `hol-discovery-guide.md` — how the agent shows up on HOL (3-layer model)
+- `hcs20-v2-schema.md` — external-auditor spec for the on-chain audit trail
+- `mainnet-deploy-checklist.md` — phase-by-phase mainnet deploy runbook
+- `mainnet-hol-registration.md` — one-time mainnet HOL registration
+- `incident-playbook.md` — symptom → action runbook for production incidents
+- `disaster-recovery.md` — Redis loss recovery procedure + backup options
+- `uptime-monitoring.md` — wiring `/api/health` + reconcile cron into external monitoring
+- `testnet-uat.md` — pre-launch UAT checklist (mostly checked off)
