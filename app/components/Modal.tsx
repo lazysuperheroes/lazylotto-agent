@@ -52,12 +52,26 @@ interface ModalProps {
    * most single-field forms.
    */
   size?: 'sm' | 'md' | 'lg';
+  /**
+   * Border tone — defaults to brand gold for harmless modals.
+   * Use 'destructive' for confirmation dialogs that delete data,
+   * revoke tokens, or trigger refunds. The colour is a fast visual
+   * signal that the user should slow down before clicking through.
+   * Mirrors the ComicPanel tone vocabulary so the two compose
+   * cleanly.
+   */
+  tone?: 'brand' | 'destructive';
 }
 
 const SIZE_CLASS: Record<NonNullable<ModalProps['size']>, string> = {
   sm: 'max-w-sm',
   md: 'max-w-md',
   lg: 'max-w-lg',
+};
+
+const TONE_BORDER: Record<NonNullable<ModalProps['tone']>, string> = {
+  brand: 'border-brand',
+  destructive: 'border-destructive',
 };
 
 // Tag names considered focusable for the focus trap. Skip elements
@@ -127,6 +141,7 @@ export function Modal({
   children,
   locked = false,
   size = 'md',
+  tone = 'brand',
 }: ModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   // Snapshot the element that had focus when the modal opened so we
@@ -240,7 +255,7 @@ export function Modal({
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
-        className={`w-full ${SIZE_CLASS[size]} border-2 border-brand bg-[var(--color-panel)] p-6 panel-shadow outline-none`}
+        className={`w-full ${SIZE_CLASS[size]} border-2 ${TONE_BORDER[tone]} bg-[var(--color-panel)] p-6 panel-shadow outline-none`}
       >
         <h3 id={titleId} className="heading-1 mb-2 text-foreground">
           {title}

@@ -62,8 +62,12 @@ const VERIFICATION_BADGE: Record<
     icon: '🛡',
   },
   simple: {
+    // Muted brand-tone treatment instead of the leftover blue from the
+    // pre-normalize palette. The "known but unverified" tier is a
+    // weaker signal than "verified", so we keep it visible but use
+    // the foreground tone rather than competing with the gold brand.
     label: 'Known',
-    className: 'bg-blue-500/20 text-blue-300 border-blue-500/40',
+    className: 'bg-foreground/10 text-foreground border-foreground/30',
     tooltip: 'Known token in the Hedera ecosystem but has not been verified',
     icon: 'ℹ',
   },

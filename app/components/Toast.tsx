@@ -42,14 +42,50 @@ export function useToast(): ToastContextValue {
 //
 // Sharp-corner comic vocabulary: thick border in the variant tone, panel
 // background, neo-brutalist offset shadow. Each variant gets a different
-// border color to encode the meaning, but the shape is always the same so
-// users learn to recognize toasts as a single UI primitive.
+// border color AND a leading SVG icon — border alone was too subtle at
+// glance, especially with the gold/red palette. Icon is the first signal
+// the eye picks up, the colour reinforces it.
 
 const VARIANT_CLASSES: Record<ToastVariant, string> = {
   success: 'border-2 border-success bg-[var(--color-panel)] text-foreground panel-shadow-sm',
   error: 'border-2 border-destructive bg-[var(--color-panel)] text-foreground panel-shadow-sm',
   info: 'border-2 border-brand bg-[var(--color-panel)] text-foreground panel-shadow-sm',
 };
+
+const VARIANT_ICON_CLASS: Record<ToastVariant, string> = {
+  success: 'text-success',
+  error: 'text-destructive',
+  info: 'text-brand',
+};
+
+// Inline SVG icons (16x16, currentColor) so they pick up the variant
+// tint via VARIANT_ICON_CLASS. Aria-hidden because the variant is
+// announced via the surrounding aria-live region; the icon is purely
+// visual reinforcement.
+function VariantIcon({ variant }: { variant: ToastVariant }) {
+  const className = `h-4 w-4 shrink-0 ${VARIANT_ICON_CLASS[variant]}`;
+  if (variant === 'success') {
+    return (
+      <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <polyline points="3 8 7 12 13 4" />
+      </svg>
+    );
+  }
+  if (variant === 'error') {
+    return (
+      <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <line x1="4" y1="4" x2="12" y2="12" />
+        <line x1="12" y1="4" x2="4" y2="12" />
+      </svg>
+    );
+  }
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="8" cy="4" r="0.5" fill="currentColor" />
+      <line x1="8" y1="7" x2="8" y2="13" />
+    </svg>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -109,11 +145,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {items.map((item) => (
           <div
             key={item.id}
-            className={`pointer-events-auto px-4 py-3 text-sm ${
+            className={`pointer-events-auto flex items-start gap-2.5 px-4 py-3 text-sm ${
               VARIANT_CLASSES[item.variant]
             } ${item.exiting ? 'toast-exit' : 'toast-enter'}`}
           >
-            {item.message}
+            <span className="mt-0.5">
+              <VariantIcon variant={item.variant} />
+            </span>
+            <span>{item.message}</span>
           </div>
         ))}
       </div>

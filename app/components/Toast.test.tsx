@@ -96,8 +96,12 @@ describe('Toast', () => {
     act(() => {
       screen.getByText('Fire toast').click();
     });
-    const toastEl = screen.getByText('Win');
-    expect(toastEl.className).toContain('border-success');
+    // The bordered toast is the message text's parent — the message
+    // itself lives in an inner <span> alongside the variant icon, so
+    // we walk up one level to check the variant border class.
+    const toastEl = screen.getByText('Win').parentElement;
+    expect(toastEl).not.toBeNull();
+    expect(toastEl!.className).toContain('border-success');
   });
 
   it('applies the error variant border class', () => {
@@ -109,8 +113,9 @@ describe('Toast', () => {
     act(() => {
       screen.getByText('Fire toast').click();
     });
-    const toastEl = screen.getByText('Failed');
-    expect(toastEl.className).toContain('border-destructive');
+    const toastEl = screen.getByText('Failed').parentElement;
+    expect(toastEl).not.toBeNull();
+    expect(toastEl!.className).toContain('border-destructive');
   });
 
   it('auto-dismisses success toasts after the default 2500ms + exit animation', () => {
