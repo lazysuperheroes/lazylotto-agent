@@ -6,6 +6,8 @@ import { useToast } from '../components/Toast';
 import { ComicPanel } from '../components/ComicPanel';
 import { SkeletonBox } from '../components/SkeletonBox';
 import { clearSession } from '../lib/session';
+import { useTheme, type ThemePreference } from '../lib/theme';
+import { ThemePreviewMini } from '../components/ThemePreviewMini';
 
 // ---------------------------------------------------------------------------
 // /account — the "everything that's not the lottery" page
@@ -84,6 +86,7 @@ function formatTimestamp(iso: string): string {
 export default function AccountPage() {
   const router = useRouter();
   const { toast } = useToast();
+  const [theme, setTheme] = useTheme();
 
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
@@ -334,9 +337,13 @@ export default function AccountPage() {
   return (
     <div className="relative w-full px-4 py-10 sm:px-6 lg:px-10">
       <div className="mx-auto max-w-4xl">
-        {/* ---- Header ---- */}
+        {/* ---- Header ----
+            "Settings, support & proof" makes stuck-deposit support
+            discoverable BEFORE the user has a crisis — most users
+            won't recognize "settings" alone hides the refund flow
+            and the on-chain trust links. */}
         <header className="mb-10">
-          <p className="label-caps-lg mb-2">Settings & support</p>
+          <p className="label-caps-lg mb-2">Settings, support &amp; proof</p>
           <h1 className="display-lg text-foreground">Account</h1>
         </header>
 
@@ -365,40 +372,6 @@ export default function AccountPage() {
                     </dd>
                   </div>
                   <div>
-                    <dt className="label-caps mb-1">Strategy</dt>
-                    <dd className="text-sm text-foreground">
-                      {/* Inline dropdown — change takes effect on the
-                          next play session. The user's reservations
-                          for any in-flight session are unaffected. */}
-                      <select
-                        value={status.strategyName}
-                        onChange={(e) =>
-                          void handleStrategyChange(
-                            e.target.value as
-                              | 'conservative'
-                              | 'balanced'
-                              | 'aggressive',
-                          )
-                        }
-                        disabled={strategyLoading}
-                        aria-label="Strategy"
-                        className="border-2 border-secondary bg-[var(--color-panel)] px-2 py-1 text-sm text-foreground transition-colors focus:border-brand disabled:opacity-50"
-                      >
-                        <option value="conservative">conservative</option>
-                        <option value="balanced">balanced</option>
-                        <option value="aggressive">aggressive</option>
-                      </select>{' '}
-                      <span className="text-muted">
-                        ({status.strategyVersion})
-                      </span>
-                      {strategyLoading && (
-                        <span className="ml-2 text-xs text-muted italic">
-                          updating…
-                        </span>
-                      )}
-                    </dd>
-                  </div>
-                  <div>
                     <dt className="label-caps mb-1">Registered</dt>
                     <dd className="text-sm text-foreground">
                       {formatTimestamp(status.registeredAt)}
@@ -422,6 +395,94 @@ export default function AccountPage() {
                     <dt className="label-caps mb-1">Status</dt>
                     <dd className="text-sm text-foreground">
                       {status.active ? 'Active' : 'Inactive'}
+                    </dd>
+                  </div>
+
+                  {/* Strategy picker — spans both columns so the
+                      three radio cards can lay out horizontally on
+                      desktop (and stack on mobile). The previous
+                      version was a native <select> that fell between
+                      two stools visually: utilitarian in a comic-
+                      vocabulary surface. Radio cards give each option
+                      a real label + a one-line description so the
+                      choice is informed, not cryptic. */}
+                  <div className="sm:col-span-2">
+                    <dt className="label-caps mb-2">Strategy</dt>
+                    <dd>
+                      <fieldset disabled={strategyLoading}>
+                        <legend className="sr-only">Strategy</legend>
+                        <div
+                          role="radiogroup"
+                          aria-label="Strategy"
+                          className="grid gap-3 sm:grid-cols-3"
+                        >
+                          {(
+                            [
+                              {
+                                value: 'conservative',
+                                label: 'Conservative',
+                                blurb:
+                                  'Small entries, only the safest pools. Low variance — slow and steady.',
+                              },
+                              {
+                                value: 'balanced',
+                                label: 'Balanced',
+                                blurb:
+                                  'Medium entries across mid-EV pools. The default — reasonable swings.',
+                              },
+                              {
+                                value: 'aggressive',
+                                label: 'Aggressive',
+                                blurb:
+                                  'Bigger entries, high-EV pools only. More volatility — bigger upside and downside.',
+                              },
+                            ] as const
+                          ).map((opt) => {
+                            const isSelected = status.strategyName === opt.value;
+                            return (
+                              <label
+                                key={opt.value}
+                                className={`group relative flex cursor-pointer flex-col gap-1.5 border-2 bg-[var(--color-panel)] px-3 py-3 transition-colors ${
+                                  isSelected
+                                    ? 'border-brand bg-brand/5'
+                                    : 'border-secondary hover:border-brand/60'
+                                } ${strategyLoading ? 'cursor-wait opacity-50' : ''}`}
+                              >
+                                <input
+                                  type="radio"
+                                  name="strategy"
+                                  value={opt.value}
+                                  checked={isSelected}
+                                  onChange={() => void handleStrategyChange(opt.value)}
+                                  className="sr-only"
+                                />
+                                <div className="flex items-center gap-2">
+                                  {/* Sticker-style indicator — filled
+                                      brand block when selected, hollow
+                                      muted when not. */}
+                                  <span
+                                    className={`inline-block h-3 w-3 border-2 ${
+                                      isSelected
+                                        ? 'border-brand bg-brand'
+                                        : 'border-secondary'
+                                    }`}
+                                    aria-hidden="true"
+                                  />
+                                  <span className="font-heading text-sm font-extrabold uppercase tracking-wider text-foreground">
+                                    {opt.label}
+                                  </span>
+                                </div>
+                                <p className="type-caption">{opt.blurb}</p>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </fieldset>
+                      <p className="mt-2 type-caption">
+                        {strategyLoading
+                          ? 'Updating…'
+                          : `Active: ${status.strategyName} (${status.strategyVersion}). Changes take effect on the next play session.`}
+                      </p>
                     </dd>
                   </div>
                 </dl>
@@ -466,6 +527,91 @@ export default function AccountPage() {
                   Profile temporarily unavailable.
                 </p>
               )}
+            </div>
+          </ComicPanel>
+
+          {/* ---- Preferences ──────────────────────────────────
+              Display toggle between the full comic vocabulary
+              ("Comic" — halftone textures, hard neo-brutalist
+              shadows, full mascot-wake) and a subdued variant
+              ("Calm" — flat tints, softer shadows, quieter
+              mascot presence). Same palette, same typography,
+              same components — just different intensity. The
+              setting persists in localStorage and applies
+              instantly via data-theme on <html>. */}
+          <ComicPanel tone="muted" halftone="none">
+            <div className="px-6 py-6">
+              <h2 className="heading-1 mb-2 text-foreground">Display</h2>
+              <p className="type-caption mb-5">
+                Choose how loud the LazyLotto vocabulary is. The product
+                works the same either way — this is just the volume.
+              </p>
+              <fieldset>
+                <legend className="sr-only">Display mode</legend>
+                <div
+                  role="radiogroup"
+                  aria-label="Display mode"
+                  className="grid gap-3 sm:grid-cols-2"
+                >
+                  {(
+                    [
+                      {
+                        value: 'comic',
+                        label: 'Comic',
+                        blurb:
+                          'Full brand. Halftone, hard shadows, mascot in your face. The default.',
+                      },
+                      {
+                        value: 'calm',
+                        label: 'Calm',
+                        blurb:
+                          'Same brand, quieter. Flat panels, softer shadows, subdued motion.',
+                      },
+                    ] as const
+                  ).map((opt) => {
+                    const isSelected = theme === opt.value;
+                    return (
+                      <label
+                        key={opt.value}
+                        className={`group relative flex cursor-pointer flex-col gap-1.5 border-2 bg-[var(--color-panel)] px-3 pt-3 pb-4 transition-colors ${
+                          isSelected
+                            ? 'border-brand bg-brand/5'
+                            : 'border-secondary hover:border-brand/60'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="theme"
+                          value={opt.value}
+                          checked={isSelected}
+                          onChange={() => setTheme(opt.value as ThemePreference)}
+                          className="sr-only"
+                        />
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`inline-block h-3 w-3 border-2 ${
+                              isSelected
+                                ? 'border-brand bg-brand'
+                                : 'border-secondary'
+                            }`}
+                            aria-hidden="true"
+                          />
+                          <span className="font-heading text-sm font-extrabold uppercase tracking-wider text-foreground">
+                            {opt.label}
+                          </span>
+                        </div>
+                        <p className="type-caption">{opt.blurb}</p>
+                        {/* Live mini-preview of the mode — renders a tiny
+                            hero-panel sample with the treatment the option
+                            represents, regardless of the current root
+                            theme. Lets users see the difference before
+                            committing. */}
+                        <ThemePreviewMini variant={opt.value} />
+                      </label>
+                    );
+                  })}
+                </div>
+              </fieldset>
             </div>
           </ComicPanel>
 
@@ -649,7 +795,7 @@ export default function AccountPage() {
                       href={`https://hashscan.io/${networkPath}/account/${publicStats.agentWallet}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-2 border-2 border-secondary bg-[var(--color-panel)] px-4 py-2 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
+                      className="inline-flex items-center gap-2 border-2 border-secondary bg-[var(--color-panel)] px-4 py-2 font-pixel text-[10px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
                     >
                       Agent wallet <span aria-hidden="true">↗</span>
                     </a>
@@ -659,14 +805,14 @@ export default function AccountPage() {
                       href={`https://hashscan.io/${networkPath}/topic/${publicStats.hcs20TopicId}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-2 border-2 border-secondary bg-[var(--color-panel)] px-4 py-2 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
+                      className="inline-flex items-center gap-2 border-2 border-secondary bg-[var(--color-panel)] px-4 py-2 font-pixel text-[10px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
                     >
                       HCS-20 trail <span aria-hidden="true">↗</span>
                     </a>
                   )}
                   <a
                     href="/audit"
-                    className="inline-flex items-center gap-2 border-2 border-secondary bg-[var(--color-panel)] px-4 py-2 font-pixel text-[9px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
+                    className="inline-flex items-center gap-2 border-2 border-secondary bg-[var(--color-panel)] px-4 py-2 font-pixel text-[10px] uppercase tracking-wider text-muted transition-colors hover:border-brand hover:text-brand"
                   >
                     On-chain log <span aria-hidden="true">→</span>
                   </a>
