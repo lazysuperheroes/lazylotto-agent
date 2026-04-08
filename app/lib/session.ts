@@ -24,6 +24,11 @@ export const SESSION_KEYS = [
   // Throttle gate for /api/user/check-deposits — clear on sign-out so
   // the next sign-in's first dashboard load actually re-checks.
   'lazylotto:lastDepositCheck',
+  // Mascot rarity state — clear on sign-out so a fresh sign-in gets
+  // the early-visits speech bubbles again instead of inheriting the
+  // previous user's quiet window.
+  'lazylotto:mascot:visits',
+  'lazylotto:mascot:lastSpokenAt',
 ] as const;
 
 /**
