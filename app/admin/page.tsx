@@ -1191,7 +1191,7 @@ export default function AdminPage() {
                             <td className="px-2 py-1 text-right num-tabular text-brand">
                               {day.wins.count || ''}
                               {day.wins.nftCount > 0 && (
-                                <span className="text-[10px] text-muted/60"> +{day.wins.nftCount}n</span>
+                                <span className="text-[10px] text-muted"> +{day.wins.nftCount}n</span>
                               )}
                             </td>
                             <td className="px-2 py-1 text-right num-tabular text-foreground">
@@ -1202,7 +1202,7 @@ export default function AdminPage() {
                       </tbody>
                     </table>
                   </div>
-                  <p className="mt-2 type-caption-sm italic text-muted/60">
+                  <p className="mt-2 type-caption-sm italic text-muted">
                     Data sourced from the HCS-20 audit topic. Cached for 60s.
                     Days with no activity are omitted.
                   </p>

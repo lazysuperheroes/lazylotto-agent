@@ -218,7 +218,7 @@ export function PrizeNftCard({ raw, enriched, loading, size = 'regular' }: Prize
           </a>
           {badge && (
             <span
-              className={`inline-flex items-center gap-0.5 rounded border px-1 py-[1px] text-[9px] font-semibold ${badge.className}`}
+              className={`inline-flex items-center gap-0.5 border px-1 py-[1px] text-[10px] font-semibold ${badge.className}`}
               title={badge.tooltip}
             >
               <span>{badge.icon}</span>

@@ -1889,7 +1889,7 @@ export default function DashboardPage() {
                         Pending claim
                       </p>
                       {prizeFreshness && (
-                        <span className="label-caps text-muted/70">
+                        <span className="label-caps text-muted">
                           updated {prizeFreshness}
                         </span>
                       )}
@@ -2033,7 +2033,7 @@ export default function DashboardPage() {
               <div className="mb-2 flex items-baseline gap-3">
                 <p className="label-caps-lg">Play log</p>
                 {historyFreshness && (
-                  <span className="label-caps text-muted/70">
+                  <span className="label-caps text-muted">
                     updated {historyFreshness}
                   </span>
                 )}

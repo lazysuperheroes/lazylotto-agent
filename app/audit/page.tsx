@@ -438,7 +438,7 @@ function SessionCard({
               <p className={`mt-1 text-xs ${prizeTransferLabel(session.prizeTransfer.status).className}`}>
                 Prize delivery: {prizeTransferLabel(session.prizeTransfer.status).text}
                 {session.prizeTransfer.txId && (
-                  <span className="ml-1 text-muted/60 font-mono text-[10px]">
+                  <span className="ml-1 type-caption-sm font-mono text-muted">
                     {session.prizeTransfer.txId}
                   </span>
                 )}
@@ -803,20 +803,26 @@ export default function AuditPage() {
     <div className="w-full px-4 py-8 sm:px-6 lg:px-8">
       <div className="mx-auto max-w-6xl">
 
-        {/* ---- Header ---- */}
+        {/* ---- Header ----
+            Sister-page header treatment: dashboard has the narrative
+            mascot headline, admin uses display-md, audit matches admin
+            (calm operator-leaning surface, no mascot, just a clear
+            chapter title). Chips use the comic vocabulary — no rounded
+            corners, pixel-font small caps — so the page reads as part
+            of the same design system as the rest of the app. */}
         <header className="mb-8">
           <div className="flex items-center gap-3 flex-wrap">
-            <h1 className="font-heading text-2xl text-foreground">
+            <h1 className="display-md text-foreground">
               On-Chain Audit Trail
             </h1>
             {isAdmin && (
-              <span className="rounded bg-brand/15 px-2 py-0.5 text-xs font-semibold text-brand">
+              <span className="border-2 border-brand bg-brand/10 px-2 py-0.5 font-pixel text-[10px] uppercase tracking-wider text-brand">
                 Admin
               </span>
             )}
             {isAdmin && (
-              <span className="rounded bg-secondary px-2 py-0.5 text-xs text-muted">
-                {entries.length} messages &middot; {users.length} users
+              <span className="border-2 border-secondary bg-background px-2 py-0.5 font-pixel text-[10px] uppercase tracking-wider text-muted">
+                {entries.length} msgs &middot; {users.length} users
               </span>
             )}
           </div>
@@ -979,7 +985,7 @@ export default function AuditPage() {
                 Won (claim on dApp):{' '}
                 <span className="text-brand">+{formatAmount(summary.totalWon)}</span>
               </span>
-              <span className="type-caption-sm italic text-muted/60">
+              <span className="type-caption-sm italic text-muted">
                 Winnings flow to your wallet directly via the contract; they don&apos;t
                 offset your balance above.
               </span>
@@ -1022,12 +1028,12 @@ export default function AuditPage() {
               <span>
                 v1 (legacy batch):{' '}
                 <span className="num-tabular text-foreground">{data.wireSchema.v1Messages}</span>{' '}
-                <span className="text-muted/60">message{data.wireSchema.v1Messages === 1 ? '' : 's'}</span>
+                <span className="text-muted">message{data.wireSchema.v1Messages === 1 ? '' : 's'}</span>
               </span>
               <span>
                 v2 (sequence):{' '}
                 <span className="num-tabular text-brand">{data.wireSchema.v2Messages}</span>{' '}
-                <span className="text-muted/60">message{data.wireSchema.v2Messages === 1 ? '' : 's'}</span>
+                <span className="text-muted">message{data.wireSchema.v2Messages === 1 ? '' : 's'}</span>
               </span>
               {data.wireSchema.unknownMessages > 0 && (
                 <span>
@@ -1036,7 +1042,7 @@ export default function AuditPage() {
                 </span>
               )}
             </div>
-            <p className="mt-2 type-caption-sm italic text-muted/60">
+            <p className="mt-2 type-caption-sm italic text-muted">
               v2 became the writer default at commit{' '}
               <code className="font-mono">549ed40</code>. Older v1 messages on
               the topic are immutable; the reader handles both shapes. This
