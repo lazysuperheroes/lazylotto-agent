@@ -87,10 +87,12 @@ export function ComicPanel({
     <div className={`relative ${className}`}>
       {/* Corner sticker — absolute-positioned so it overhangs the panel
           edge like a real comic issue tag. Raised via z-index so it
-          sits on top of the border line. */}
+          sits on top of the border line. The .comic-sticker class is
+          the single hook calm-mode CSS targets — see globals.css and
+          ThemePreviewMini for the shared selector convention. */}
       {label && (
         <span
-          className={`absolute -top-3 left-5 z-10 font-pixel text-[10px] uppercase tracking-wider ${TONE_LABEL_BG[tone]} px-2 py-1 leading-none panel-shadow-sm`}
+          className={`comic-sticker absolute -top-3 left-5 z-10 font-pixel text-[10px] uppercase tracking-wider ${TONE_LABEL_BG[tone]} px-2 py-1 leading-none panel-shadow-sm`}
           aria-hidden="true"
         >
           {label}

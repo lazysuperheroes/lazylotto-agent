@@ -1406,9 +1406,16 @@ export default function DashboardPage() {
                     every 5 seconds, forever. The only genuine live
                     status in this row is "Checking deposits", which
                     now carries its own scoped aria-live on the span
-                    where it actually belongs. */}
-                <div className="mb-5 flex flex-wrap items-center justify-between gap-x-5 gap-y-2">
-                  {depositsChecking ? (
+                    where it actually belongs.
+
+                    Uses `ml-auto` on the freshness button instead of
+                    `justify-between` + a placeholder empty span. When
+                    only the button renders, it pushes itself to the
+                    right via the auto margin. When both the pulse
+                    and the button render, the button still sits at
+                    the right. Same visual result, no dead-code span. */}
+                <div className="mb-5 flex flex-wrap items-center gap-x-5 gap-y-2">
+                  {depositsChecking && (
                     <span
                       className="label-caps-brand inline-flex items-center gap-1.5"
                       role="status"
@@ -1420,20 +1427,19 @@ export default function DashboardPage() {
                       />
                       Checking deposits
                     </span>
-                  ) : (
-                    <span />
                   )}
-                  {/* Freshness ribbon right-aligned, carrying BOTH
-                      the dashboard refresh time AND the agent's
-                      last-run relative time when available. Not a
-                      live region — the info is ambient, not a status
-                      announcement. Keyboard users get it via normal
-                      tab-to-button + title attribute. */}
+                  {/* Freshness ribbon — right-aligned via ml-auto so
+                      it pushes to the end of the flex row regardless
+                      of whether the deposits-checking pulse is
+                      present. Not a live region — the info is
+                      ambient, not a status announcement. Keyboard
+                      users get it via normal tab-to-button +
+                      title attribute. */}
                   {!depositsChecking && (statusFreshness || lastRunFreshness) && (
                     <button
                       type="button"
                       onClick={() => void handleCheckDeposits()}
-                      className="label-caps -m-2 p-2 text-muted underline-offset-2 transition-colors hover:text-brand hover:underline"
+                      className="label-caps ml-auto -m-2 p-2 text-muted underline-offset-2 transition-colors hover:text-brand hover:underline"
                       title="Click to re-check deposits and refresh balance"
                     >
                       {lastRunFreshness && (

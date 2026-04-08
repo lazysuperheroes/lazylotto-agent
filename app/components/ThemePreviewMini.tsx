@@ -24,10 +24,15 @@ export function ThemePreviewMini({ variant }: { variant: 'comic' | 'calm' }) {
   return (
     <div className={`${wrapperClass} mt-3`} aria-hidden="true">
       <div className="relative">
-        {/* Corner sticker — same shape in both modes, but calm mode
-            softens the shadow and nudges it down 1px via the scoped
-            CSS so it reads as a discreet tag rather than a callout. */}
-        <span className="absolute -top-2 left-3 z-10 border border-brand bg-brand px-1.5 py-0.5 font-pixel text-[8px] uppercase tracking-wider text-background panel-shadow-sm leading-none">
+        {/* Corner sticker — shares the .comic-sticker hook with the
+            real ComicPanel label so calm-mode CSS targets both the
+            real panels AND this preview with a single selector.
+            Uses -top-2 (proportional to the mini's smaller scale)
+            instead of the full panel's -top-3. Font size is 10px
+            to match the project-wide pixel-font floor; the mini
+            previously used text-[8px] which slipped past the
+            round-1 sweep because it was added afterward. */}
+        <span className="comic-sticker absolute -top-2 left-3 z-10 border border-brand bg-brand px-1.5 py-0.5 font-pixel text-[10px] uppercase tracking-wider text-background panel-shadow-sm leading-none">
           ISSUE #001
         </span>
         {/* Panel itself — halftone-dense in comic mode, flat tint in

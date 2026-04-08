@@ -122,8 +122,12 @@ html[data-theme='calm'] .label-caps-destructive {
   }
 }
 /* Corner stickers shrink + soften their shadow in calm mode so they
-   read as a discreet label rather than a shouted callout. */
-html[data-theme='calm'] [class*='-top-3'][class*='font-pixel'] {
+   read as a discreet label rather than a shouted callout. Targets
+   the shared .comic-sticker class on both the real ComicPanel and
+   the ThemePreviewMini. Previously used a fragile attribute selector
+   [class*='-top-3'][class*='font-pixel'] that missed the mini
+   preview because it uses -top-2 for its smaller scale. */
+html[data-theme='calm'] .comic-sticker {
   box-shadow: 2px 2px 0 0 var(--color-ink);
   transform: translateY(1px);
 }
@@ -187,7 +191,7 @@ html[data-theme='calm'] .btn-primary-sm:active:not(:disabled) {
 .theme-preview-calm .label-caps-destructive {
   letter-spacing: 0.12em;
 }
-.theme-preview-calm [class*='-top-3'][class*='font-pixel'] {
+.theme-preview-calm .comic-sticker {
   box-shadow: 2px 2px 0 0 var(--color-ink);
   transform: translateY(1px);
 }
@@ -572,12 +576,19 @@ html[data-theme='calm'] .btn-primary-sm:active:not(:disabled) {
   .mascot-wake:hover {
     transform: scale(1.03) rotate(-1deg);
   }
+}
 
-  /* Touch tap reaction — mobile devices don't have hover, so
-     tapping the mascot frame briefly fires the wake transform
-     via the :active pseudo-class. Same transform as hover, half
-     the duration so the feedback is snappy on touch. Mobile
-     users get the character reactivity the desktop hover provides. */
+/* Touch tap reaction — mobile devices don't have hover, so tapping
+   the mascot frame briefly fires the wake transform via the :active
+   pseudo-class. Same transform as hover, half the duration so the
+   feedback is snappy on touch.
+
+   Scoped to `@media (hover: none)` so desktop mouse clicks DON'T
+   fire this rule — the previous version fired on any :active,
+   including mouse clicks, which caused a visible rotation glitch
+   for desktop users clicking the mascot frame area. Now desktop
+   uses hover only; touch devices get the tap-reaction. */
+@media (hover: none) and (prefers-reduced-motion: no-preference) {
   .mascot-wake:active {
     transform: scale(1.03) rotate(-1deg);
     transition-duration: 0.15s;
