@@ -8,9 +8,7 @@ import {
   HederaJsonRpcMethod,
   HederaSessionEvent,
 } from '@hashgraph/hedera-wallet-connect/dist/lib/shared';
-import Image from 'next/image';
 import { useToast } from '../components/Toast';
-import { GoldConfetti } from '../components/GoldConfetti';
 import { ComicPanel } from '../components/ComicPanel';
 import { CharacterMascot } from './CharacterMascot';
 import {
@@ -29,6 +27,7 @@ import {
   type Network,
 } from './walletConnect';
 import { ConnectingView, ErrorView, LandingView } from './SimpleViews';
+import { CompleteView } from './CompleteView';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -66,7 +65,6 @@ export function AuthFlow() {
   const [locked, setLocked] = useState(false);
   const [locking, setLocking] = useState(false);
   const [lockConfirming, setLockConfirming] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [showJsonConfig, setShowJsonConfig] = useState(false);
   const [isReturning, setIsReturning] = useState(false);
   const [showUrl, setShowUrl] = useState(false);
@@ -645,428 +643,34 @@ export function AuthFlow() {
             />
           )}
 
-          {/* ---- COMPLETE ---- */}
-          {status === 'complete' && (() => {
-            const connectionUrl = `${mcpUrl}?key=${sessionToken}`;
-            const successTagline = pickRandom(character.successLines);
-
-            const relativeExpiry = expiresAt
-              ? (() => {
-                  const diff = new Date(expiresAt).getTime() - Date.now();
-                  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-                  if (days > 1) return `in ${days} days`;
-                  const hours = Math.floor(diff / (1000 * 60 * 60));
-                  if (hours > 1) return `in ${hours} hours`;
-                  return 'soon';
-                })()
-              : '';
-
-            // --- Returning user: compact view ---
-            if (isReturning) {
-              return (
-                <div className="relative flex flex-col gap-8">
-                  {/* Gold confetti celebration */}
-                  <GoldConfetti />
-
-                  {/* Success header */}
-                  <div className="flex flex-col items-center gap-4 text-center">
-                    <CharacterMascot
-                  key={character.name}
-                  character={character}
-                  size="sm"
-                  line={successTagline}
-                  onReroll={rerollCharacter}
-                />
-
-                    <h2 className="font-heading text-xl text-success">
-                      Re-authenticated
-                    </h2>
-
-                    <span className="inline-flex items-center gap-2 rounded-full bg-secondary px-4 py-2 text-sm text-foreground">
-                      <span className="h-2 w-2 rounded-full bg-success" />
-                      {accountId}
-                    </span>
-                  </div>
-
-                  {/* Key status */}
-                  <div className="flex flex-col items-center gap-3 text-center">
-                    <p className="text-sm text-foreground">
-                      Your new key is ready.
-                    </p>
-                    <p className="text-sm text-muted">
-                      Your previous key has been revoked.
-                    </p>
-                  </div>
-
-                  {/* Connection URL */}
-                  <div className="flex flex-col gap-3">
-                    <div className="border-2 border-secondary bg-[var(--color-panel)] px-4 py-3">
-                      <p className="break-all font-mono text-sm text-brand">
-                        {connectionUrl}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await handleCopy(connectionUrl, 'Connection URL');
-                        setCopied(true);
-                        setTimeout(() => setCopied(false), 2000);
-                      }}
-                      className="btn-primary-sm w-full"
-                    >
-                      {copied ? (
-                        <>
-                          <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                          </svg>
-                          Copied!
-                        </>
-                      ) : (
-                        'Copy Connection URL'
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowJsonConfig((prev) => !prev)}
-                      className="text-left text-xs text-brand underline transition-colors hover:text-brand/80"
-                    >
-                      {showJsonConfig ? 'Hide Claude Desktop config' : 'Show Claude Desktop config (JSON)'}
-                    </button>
-                    {showJsonConfig && (
-                      <div className="flex flex-col gap-2">
-                        <div className="relative border-2 border-secondary bg-[var(--color-panel)] p-4">
-                          <pre className="break-all font-mono text-xs text-brand whitespace-pre-wrap">
-                            {claudeConfig}
-                          </pre>
-                          <button
-                            type="button"
-                            onClick={() => void handleCopy(claudeConfig, 'Claude config')}
-                            className="absolute right-2 top-2 rounded border border-secondary px-2 py-1 text-xs text-muted transition-colors hover:text-foreground"
-                          >
-                            Copy
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Session management (compact) */}
-                  <div className="text-center text-sm text-muted">
-                    {locked ? (
-                      <span>
-                        API key is permanent.{' '}
-                        <button
-                          type="button"
-                          onClick={handleDisconnect}
-                          className="text-muted underline transition-colors hover:text-foreground"
-                        >
-                          Disconnect
-                        </button>
-                      </span>
-                    ) : lockConfirming ? (
-                      <div className="flex flex-col items-center gap-2">
-                        <p className="text-xs text-muted">
-                          A permanent key never expires. If compromised, re-authenticate here to revoke it.
-                        </p>
-                        <div className="flex items-center gap-3">
-                          <button
-                            type="button"
-                            onClick={() => void handleLock()}
-                            disabled={locking}
-                            className="btn-primary-sm"
-                          >
-                            {locking ? 'Locking...' : 'Confirm — Make Permanent'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setLockConfirming(false)}
-                            className="text-xs text-muted underline transition-colors hover:text-foreground"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <span>
-                        {expiresAt ? `Session expires ${relativeExpiry}. ` : ''}
-                        <button
-                          type="button"
-                          onClick={() => setLockConfirming(true)}
-                          className="text-brand underline transition-colors hover:text-brand/80"
-                        >
-                          Make permanent
-                        </button>
-                        {' or '}
-                        <button
-                          type="button"
-                          onClick={handleDisconnect}
-                          className="text-muted underline transition-colors hover:text-foreground"
-                        >
-                          Disconnect
-                        </button>
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Go to Dashboard */}
-                  <button
-                    type="button"
-                    onClick={() => router.push(ctaTarget)}
-                    className="btn-primary-sm w-full"
-                  >
-                    {ctaLabel}
-                  </button>
-                </div>
-              );
-            }
-
-            // --- New user: full three-step guide ---
-            return (
-            <div className="relative flex flex-col gap-8">
-              {/* Gold confetti celebration */}
-              <GoldConfetti />
-
-              {/* SECTION 1: Success header */}
-              <div className="flex flex-col items-center gap-4 text-center">
-                <CharacterMascot
-                  key={character.name}
-                  character={character}
-                  size="sm"
-                  line={successTagline}
-                  onReroll={rerollCharacter}
-                />
-
-                <h2 className="font-heading text-xl text-success">
-                  Authenticated
-                </h2>
-
-                <span className="inline-flex items-center gap-2 rounded-full bg-secondary px-4 py-2 text-sm text-foreground">
-                  <span className="h-2 w-2 rounded-full bg-success" />
-                  {accountId}
-                </span>
-              </div>
-
-              {/* SECTION 2: Connect to Claude — step guide */}
-              <div className="flex flex-col gap-6">
-
-                {/* Step 1: Copy connection URL */}
-                <div className="flex gap-3">
-                  <div className="flex flex-col items-center">
-                    <span className="flex h-7 w-7 items-center justify-center border-2 border-brand bg-brand/10 font-pixel text-[9px] text-brand">
-                      1
-                    </span>
-                  </div>
-                  <div className="flex flex-1 flex-col gap-3">
-                    <h3 className="text-sm font-semibold text-foreground">
-                      Copy your connection URL
-                    </h3>
-                    <p className="text-sm text-muted">
-                      This URL connects Claude to your LazyLotto Agent. Use it in
-                      Claude AI, Claude Desktop, or any MCP-compatible client.
-                    </p>
-                    <div className="border-2 border-secondary bg-[var(--color-panel)] px-4 py-3">
-                      <p className="break-all font-mono text-sm text-brand">
-                        {connectionUrl}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await handleCopy(connectionUrl, 'Connection URL');
-                        setCopied(true);
-                        setTimeout(() => setCopied(false), 2000);
-                      }}
-                      className="btn-primary-sm w-full"
-                    >
-                      {copied ? (
-                        <>
-                          <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                          </svg>
-                          Copied!
-                        </>
-                      ) : (
-                        'Copy Connection URL'
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowJsonConfig((prev) => !prev)}
-                      className="text-left text-xs text-brand underline transition-colors hover:text-brand/80"
-                    >
-                      {showJsonConfig ? 'Hide Claude Desktop config' : 'Show Claude Desktop config (JSON)'}
-                    </button>
-                    {showJsonConfig && (
-                      <div className="flex flex-col gap-2">
-                        <div className="relative border-2 border-secondary bg-[var(--color-panel)] p-4">
-                          <pre className="break-all font-mono text-xs text-brand whitespace-pre-wrap">
-                            {claudeConfig}
-                          </pre>
-                          <button
-                            type="button"
-                            onClick={() => void handleCopy(claudeConfig, 'Claude config')}
-                            className="absolute right-2 top-2 rounded border border-secondary px-2 py-1 text-xs text-muted transition-colors hover:text-foreground"
-                          >
-                            Copy
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Step 2: Add to Claude */}
-                <div className="flex gap-3">
-                  <div className="flex flex-col items-center">
-                    <span className="flex h-7 w-7 items-center justify-center border-2 border-brand bg-brand/10 font-pixel text-[9px] text-brand">
-                      2
-                    </span>
-                  </div>
-                  <div className="flex flex-1 flex-col gap-3">
-                    <h3 className="text-sm font-semibold text-foreground">
-                      Add to Claude
-                    </h3>
-                    <p className="text-sm text-muted">
-                      Paste the URL as a custom MCP connector in Claude AI or
-                      Claude Desktop.
-                    </p>
-                    <ul className="flex flex-col gap-1.5 text-sm text-muted">
-                      <li className="flex gap-2">
-                        <span className="text-brand/60" aria-hidden="true">&#8226;</span>
-                        <span>Claude AI: Settings &rarr; Integrations &rarr; Add custom MCP &rarr; paste URL</span>
-                      </li>
-                      <li className="flex gap-2">
-                        <span className="text-brand/60" aria-hidden="true">&#8226;</span>
-                        <span>Claude Desktop: Settings &rarr; MCP Servers &rarr; Add &rarr; paste config</span>
-                      </li>
-                    </ul>
-                    <p className="text-sm">
-                      <a
-                        href="https://claude.ai"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-brand underline transition-colors hover:text-brand/80"
-                      >
-                        Don&apos;t have Claude? Get it at claude.ai
-                      </a>
-                    </p>
-                  </div>
-                </div>
-
-                {/* Step 3: Start playing */}
-                <div className="flex gap-3">
-                  <div className="flex flex-col items-center">
-                    <span className="flex h-7 w-7 items-center justify-center border-2 border-brand bg-brand/10 font-pixel text-[9px] text-brand">
-                      3
-                    </span>
-                  </div>
-                  <div className="flex flex-1 flex-col gap-3">
-                    <h3 className="text-sm font-semibold text-foreground">
-                      Start playing
-                    </h3>
-                    <p className="text-sm text-muted" id="example-commands-label">
-                      Once connected, try these commands:
-                    </p>
-                    <ul
-                      aria-labelledby="example-commands-label"
-                      className="flex flex-wrap gap-2 list-none p-0 m-0"
-                    >
-                      {[
-                        'Register me for LazyLotto',
-                        'Show my deposit info',
-                        'What pools are available?',
-                        'Play a lottery session',
-                        'Check my balance',
-                        'Withdraw 10 HBAR',
-                      ].map((cmd) => (
-                        <li key={cmd}>
-                          <button
-                            type="button"
-                            onClick={() => void handleCopy(cmd, 'Command')}
-                            className="cursor-pointer border border-secondary bg-[var(--color-panel)] px-3 py-1.5 text-left text-sm text-foreground transition-colors hover:border-brand hover:text-brand"
-                            aria-label={`Copy command: ${cmd}`}
-                          >
-                            {cmd}
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                    <p className="text-xs text-muted">
-                      The agent handles everything -- pool selection, entries, prize transfer.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* SECTION 3: Session management (compact) */}
-              <div className="text-center text-sm text-muted">
-                {locked ? (
-                  <span>
-                    API key is permanent.{' '}
-                    <button
-                      type="button"
-                      onClick={handleDisconnect}
-                      className="text-muted underline transition-colors hover:text-foreground"
-                    >
-                      Disconnect
-                    </button>
-                  </span>
-                ) : lockConfirming ? (
-                  <div className="flex flex-col items-center gap-2">
-                    <p className="text-xs text-muted">
-                      A permanent key never expires. If compromised, re-authenticate here to revoke it.
-                    </p>
-                    <div className="flex items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={() => void handleLock()}
-                        disabled={locking}
-                        className="btn-primary-sm"
-                      >
-                        {locking ? 'Locking...' : 'Confirm — Make Permanent'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setLockConfirming(false)}
-                        className="text-xs text-muted underline transition-colors hover:text-foreground"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <span>
-                    {expiresAt ? `Session expires ${relativeExpiry}. ` : ''}
-                    <button
-                      type="button"
-                      onClick={() => setLockConfirming(true)}
-                      className="text-brand underline transition-colors hover:text-brand/80"
-                    >
-                      Make permanent
-                    </button>
-                    {' or '}
-                    <button
-                      type="button"
-                      onClick={handleDisconnect}
-                      className="text-muted underline transition-colors hover:text-foreground"
-                    >
-                      Disconnect
-                    </button>
-                  </span>
-                )}
-              </div>
-
-              {/* SECTION 4: Go to Dashboard */}
-              <button
-                type="button"
-                onClick={() => router.push(ctaTarget)}
-                className="btn-primary-sm w-full"
-              >
-                {ctaLabel}
-              </button>
-            </div>
-            );
-          })()}
+          {/* ---- COMPLETE ----
+              Unified view — both first-time and returning users get
+              the same layout: success header, primary "Go to Dashboard"
+              CTA, Claude integration BEHIND a disclosure, session
+              management footer. See app/auth/CompleteView.tsx for the
+              progressive-disclosure rationale. */}
+          {status === 'complete' && (
+            <CompleteView
+              character={character}
+              successTagline={pickRandom(character.successLines)}
+              rerollCharacter={rerollCharacter}
+              accountId={accountId}
+              isReturning={isReturning}
+              connectionUrl={`${mcpUrl}?key=${sessionToken}`}
+              claudeConfig={claudeConfig}
+              expiresAt={expiresAt}
+              locked={locked}
+              lockConfirming={lockConfirming}
+              setLockConfirming={setLockConfirming}
+              locking={locking}
+              onLock={handleLock}
+              onDisconnect={handleDisconnect}
+              onCopy={handleCopy}
+              ctaTarget={ctaTarget}
+              ctaLabel={ctaLabel}
+              onPrimaryAction={() => router.push(ctaTarget)}
+            />
+          )}
 
           {/* ---- ERROR ---- */}
           {status === 'error' && (
