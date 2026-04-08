@@ -21,9 +21,18 @@ import { SkeletonBox } from '../components/SkeletonBox';
 export function HeroSkeleton() {
   return (
     // Match the ComicPanel shape exactly so the only diff between
-    // skeleton and real is "the inner content arrived". No corner
-    // sticker — that lands when the real ComicPanel mounts.
+    // skeleton and real is "the inner content arrived". Includes a
+    // corner-sticker placeholder so the real ISSUE #001 sticker
+    // doesn't pop in abruptly 50ms after the rest of the hero.
     <div className="relative mb-12">
+      {/* Corner sticker placeholder — same position + rough size as
+          the real ComicPanel label, rendered as an opaque block so
+          the user sees a sticker-shaped gap instead of the sticker
+          popping in. */}
+      <span
+        className="absolute -top-3 left-5 z-10 block h-5 w-20 bg-secondary/70 panel-shadow-sm"
+        aria-hidden="true"
+      />
       <div className="relative border-[3px] border-brand halftone-dense panel-shadow">
         <div className="grid gap-6 p-6 sm:p-8 md:grid-cols-[auto_1fr] md:items-center md:gap-10">
           {/* Mascot frame placeholder — same dimensions as the real

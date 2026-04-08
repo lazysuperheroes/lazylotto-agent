@@ -26,9 +26,12 @@ import type { StatusResponse, TokenBalanceEntry } from './types';
 //     blow past the daily allowance
 //
 // Tone:
-//   - Modal `tone="destructive"` puts a red border on the dialog so
-//     users register that this is a money-moving action — fat-fingering
-//     the wrong amount actually transfers funds out of the agent.
+//   - Modal uses the default brand border, not destructive. The
+//     previous version wore a red border constantly which read as
+//     "everything is angry." The destructive accent now lives ONLY
+//     on the input field when the user enters an amount over the
+//     velocity cap — so the red only appears at the moment of an
+//     actual mistake, not as ambient chrome.
 
 export interface WithdrawModalProps {
   open: boolean;
@@ -74,7 +77,6 @@ export function WithdrawModal({
       open={open}
       onClose={onClose}
       locked={withdrawLoading}
-      tone="destructive"
       title="Cash out"
       description="Funds will be sent to your registered Hedera account."
     >
@@ -111,7 +113,7 @@ export function WithdrawModal({
               type="button"
               onClick={() => setWithdrawAmount(String(maxAmount))}
               disabled={withdrawLoading}
-              className="font-pixel text-[9px] uppercase tracking-wider text-brand transition-colors hover:text-foreground disabled:opacity-50"
+              className="font-pixel text-[10px] uppercase tracking-wider text-brand transition-colors hover:text-foreground disabled:opacity-50"
             >
               Max ({formatAmount(maxAmount)})
             </button>

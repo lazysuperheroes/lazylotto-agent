@@ -90,9 +90,29 @@ export function CharacterMascot({
             type="button"
             onClick={onReroll}
             aria-label="Change mascot"
-            className="absolute -right-2 -top-2 flex h-6 w-6 items-center justify-center border-2 border-brand bg-[var(--color-panel)] text-xs transition-colors hover:bg-brand/20"
+            className="absolute -right-2 -top-2 flex h-6 w-6 items-center justify-center border-2 border-brand bg-[var(--color-panel)] text-brand transition-colors hover:bg-brand/20"
           >
-            <span aria-hidden="true">🎲</span>
+            {/* Inline SVG die — replaces the prior 🎲 emoji. Emoji
+                rendering varies by OS and made the only emoji in the
+                UI visually inconsistent with the all-SVG icon set. */}
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <rect x="2" y="2" width="12" height="12" rx="1.5" />
+              <circle cx="5" cy="5" r="0.75" fill="currentColor" stroke="none" />
+              <circle cx="11" cy="5" r="0.75" fill="currentColor" stroke="none" />
+              <circle cx="8" cy="8" r="0.75" fill="currentColor" stroke="none" />
+              <circle cx="5" cy="11" r="0.75" fill="currentColor" stroke="none" />
+              <circle cx="11" cy="11" r="0.75" fill="currentColor" stroke="none" />
+            </svg>
           </button>
         )}
       </div>

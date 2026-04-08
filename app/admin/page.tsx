@@ -1062,7 +1062,7 @@ export default function AdminPage() {
             <div className="flex items-center justify-between border-b border-secondary px-5 py-4">
               <p className="label-caps">Unprocessed deposits</p>
               {overview && overview.deadLetterCount > 0 && (
-                <span className="border border-destructive bg-destructive/10 px-2 py-0.5 font-pixel text-[9px] uppercase tracking-wider text-destructive">
+                <span className="border border-destructive bg-destructive/10 px-2 py-0.5 font-pixel text-[10px] uppercase tracking-wider text-destructive">
                   {overview.deadLetterCount} stuck
                 </span>
               )}
@@ -1395,7 +1395,7 @@ export default function AdminPage() {
                               type="button"
                               onClick={() => void handleMigrateSchema()}
                               disabled={migrateLoading || reconRunning}
-                              className="border border-brand bg-brand/10 px-3 py-1 font-pixel text-[9px] uppercase tracking-wider text-brand transition-colors hover:bg-brand hover:text-background disabled:cursor-not-allowed disabled:opacity-50"
+                              className="border border-brand bg-brand/10 px-3 py-1 font-pixel text-[10px] uppercase tracking-wider text-brand transition-colors hover:bg-brand hover:text-background disabled:cursor-not-allowed disabled:opacity-50"
                             >
                               {migrateLoading
                                 ? 'Migrating…'

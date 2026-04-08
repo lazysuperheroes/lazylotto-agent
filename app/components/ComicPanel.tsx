@@ -90,7 +90,7 @@ export function ComicPanel({
           sits on top of the border line. */}
       {label && (
         <span
-          className={`absolute -top-3 left-5 z-10 font-pixel text-[9px] uppercase tracking-wider ${TONE_LABEL_BG[tone]} px-2 py-1 leading-none panel-shadow-sm`}
+          className={`absolute -top-3 left-5 z-10 font-pixel text-[10px] uppercase tracking-wider ${TONE_LABEL_BG[tone]} px-2 py-1 leading-none panel-shadow-sm`}
           aria-hidden="true"
         >
           {label}
