@@ -198,6 +198,30 @@ export default function AdminPage() {
   const [deadLetters, setDeadLetters] = useState<DeadLetter[]>([]);
   const [operatorBalances, setOperatorBalances] = useState<OperatorBalanceRow[]>([]);
 
+  // Monitoring panel state — daily aggregates from /api/admin/monitoring.
+  // The endpoint walks the HCS-20 audit topic and bins events by UTC
+  // day, so this is a "real-ish-time" view of activity without
+  // requiring a snapshot table.
+  interface MonitoringDay {
+    date: string;
+    deposits: { count: number; totalHbar: number };
+    plays: { count: number; totalHbar: number };
+    wins: { count: number; totalHbar: number; nftCount: number };
+    activeUsers: number;
+  }
+  interface MonitoringResponse {
+    days: MonitoringDay[];
+    summary: {
+      totalDays: number;
+      activeUsersLast7d: number;
+      activeUsersLast30d: number;
+      depositVelocity7d: number;
+      playVelocity7d: number;
+    } | null;
+  }
+  const [monitoring, setMonitoring] = useState<MonitoringResponse | null>(null);
+  const [monitoringLoading, setMonitoringLoading] = useState(false);
+
   // Reconciliation state
   interface SchemaVersionReport {
     current: number;
@@ -403,6 +427,25 @@ export default function AdminPage() {
         setKillSwitch(data);
       } catch {
         /* silent failure — kill switch card just won't render */
+      }
+    })();
+
+    // Monitoring panel — pulls daily aggregates from the audit
+    // topic. Slower than the other fetches (mirror node walk) so
+    // it's the lowest-priority and renders independently. Failure
+    // is silent — the panel just doesn't appear.
+    void (async () => {
+      setMonitoringLoading(true);
+      try {
+        const res = await authFetch('/api/admin/monitoring');
+        if (cancelled || !res.ok) return;
+        const data: MonitoringResponse = await res.json();
+        if (cancelled) return;
+        setMonitoring(data);
+      } catch {
+        /* silent — monitoring panel just won't render */
+      } finally {
+        if (!cancelled) setMonitoringLoading(false);
       }
     })();
 
@@ -1077,6 +1120,109 @@ export default function AdminPage() {
               </div>
             )}
           </ComicPanel>
+
+          {/* ---- Monitoring Panel ─────────────────────────
+              Daily aggregates from /api/admin/monitoring which
+              walks the HCS-20 audit topic and bins events by
+              UTC day. Shows velocity (deposits/plays per day),
+              active user counts, and a 14-day activity strip.
+              Lightweight — no snapshot tables, just real-ish-
+              time read of the audit topic.
+              -- */}
+          {monitoring && monitoring.summary && monitoring.days.length > 0 && (
+            <ComicPanel label="MONITORING" tone="muted" halftone="none">
+              <div className="px-5 py-5">
+                {/* Top row: rolling summary stats */}
+                <div className="mb-5 grid grid-cols-2 gap-4 sm:grid-cols-4">
+                  <div>
+                    <p className="label-caps mb-1">Active 7d</p>
+                    <p className="num-tabular type-body text-foreground">
+                      {monitoring.summary.activeUsersLast7d}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="label-caps mb-1">Active 30d</p>
+                    <p className="num-tabular type-body text-foreground">
+                      {monitoring.summary.activeUsersLast30d}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="label-caps mb-1">Deposits/day (7d avg)</p>
+                    <p className="num-tabular type-body text-success">
+                      {monitoring.summary.depositVelocity7d}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="label-caps mb-1">Plays/day (7d avg)</p>
+                    <p className="num-tabular type-body text-info">
+                      {monitoring.summary.playVelocity7d}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Last 14 days table */}
+                <div>
+                  <p className="label-caps mb-2">Last 14 days</p>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-secondary text-left text-muted">
+                          <th className="px-2 py-1.5 label-caps">Date</th>
+                          <th className="px-2 py-1.5 label-caps text-right">Deposits</th>
+                          <th className="px-2 py-1.5 label-caps text-right">+HBAR</th>
+                          <th className="px-2 py-1.5 label-caps text-right">Plays</th>
+                          <th className="px-2 py-1.5 label-caps text-right">−HBAR</th>
+                          <th className="px-2 py-1.5 label-caps text-right">Wins</th>
+                          <th className="px-2 py-1.5 label-caps text-right">Active</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {monitoring.days.slice(-14).reverse().map((day) => (
+                          <tr key={day.date} className="border-b border-secondary/30">
+                            <td className="px-2 py-1 font-mono text-foreground/80">{day.date}</td>
+                            <td className="px-2 py-1 text-right num-tabular text-success">
+                              {day.deposits.count || ''}
+                            </td>
+                            <td className="px-2 py-1 text-right num-tabular text-success">
+                              {day.deposits.totalHbar > 0 ? `+${day.deposits.totalHbar}` : ''}
+                            </td>
+                            <td className="px-2 py-1 text-right num-tabular text-info">
+                              {day.plays.count || ''}
+                            </td>
+                            <td className="px-2 py-1 text-right num-tabular text-info">
+                              {day.plays.totalHbar > 0 ? `−${day.plays.totalHbar}` : ''}
+                            </td>
+                            <td className="px-2 py-1 text-right num-tabular text-brand">
+                              {day.wins.count || ''}
+                              {day.wins.nftCount > 0 && (
+                                <span className="text-[10px] text-muted/60"> +{day.wins.nftCount}n</span>
+                              )}
+                            </td>
+                            <td className="px-2 py-1 text-right num-tabular text-foreground">
+                              {day.activeUsers || ''}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className="mt-2 text-[11px] italic text-muted/60">
+                    Data sourced from the HCS-20 audit topic. Cached for 60s.
+                    Days with no activity are omitted.
+                  </p>
+                </div>
+              </div>
+            </ComicPanel>
+          )}
+          {monitoring === null && monitoringLoading && (
+            <ComicPanel label="MONITORING" tone="muted" halftone="none">
+              <div className="px-5 py-5">
+                <p className="text-xs text-muted">
+                  Loading daily aggregates from the audit topic…
+                </p>
+              </div>
+            </ComicPanel>
+          )}
 
           {/* ---- Reconciliation Card (collapsible) ─────── */}
           <ComicPanel label="RECONCILE" tone="muted" halftone="none">

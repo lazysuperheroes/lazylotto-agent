@@ -102,6 +102,7 @@ export default function AccountPage() {
   const [lockLoading, setLockLoading] = useState(false);
   const [lockConfirming, setLockConfirming] = useState(false);
   const [revokeLoading, setRevokeLoading] = useState(false);
+  const [strategyLoading, setStrategyLoading] = useState(false);
 
   // Support target — same env-driven config the dashboard uses for
   // the stuck-deposit "Contact Support" buttons.
@@ -247,6 +248,61 @@ export default function AccountPage() {
     }
   }, [router, sessionToken, toast]);
 
+  const handleStrategyChange = useCallback(
+    async (newStrategy: 'conservative' | 'balanced' | 'aggressive') => {
+      if (!sessionToken || !status) return;
+      if (newStrategy === status.strategyName) return; // no-op
+      setStrategyLoading(true);
+      try {
+        const res = await fetch('/api/user/strategy', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${sessionToken}`,
+          },
+          body: JSON.stringify({ strategy: newStrategy }),
+        });
+        if (res.status === 401) {
+          localStorage.removeItem('lazylotto:sessionToken');
+          localStorage.removeItem('lazylotto:accountId');
+          localStorage.removeItem('lazylotto:tier');
+          router.replace('/auth?expired=1');
+          return;
+        }
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(
+            (body as { error?: string }).error ??
+              `Strategy update failed (${res.status})`,
+          );
+        }
+        const data = (await res.json()) as {
+          status: string;
+          strategyName: string;
+          strategyVersion: string;
+        };
+        // Optimistically update the local status snapshot so the UI
+        // reflects the new strategy without a refetch.
+        setStatus((prev) =>
+          prev
+            ? {
+                ...prev,
+                strategyName: data.strategyName,
+                strategyVersion: data.strategyVersion,
+              }
+            : prev,
+        );
+        toast(`Strategy changed to ${data.strategyName}`);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        toast(`Strategy update failed: ${message}`, { variant: 'error' });
+      } finally {
+        setStrategyLoading(false);
+      }
+    },
+    [router, sessionToken, status, toast],
+  );
+
   const handleRevoke = useCallback(async () => {
     if (!sessionToken) return;
     setRevokeLoading(true);
@@ -320,10 +376,35 @@ export default function AccountPage() {
                   <div>
                     <dt className="label-caps mb-1">Strategy</dt>
                     <dd className="text-sm text-foreground">
-                      {status.strategyName}{' '}
+                      {/* Inline dropdown — change takes effect on the
+                          next play session. The user's reservations
+                          for any in-flight session are unaffected. */}
+                      <select
+                        value={status.strategyName}
+                        onChange={(e) =>
+                          void handleStrategyChange(
+                            e.target.value as
+                              | 'conservative'
+                              | 'balanced'
+                              | 'aggressive',
+                          )
+                        }
+                        disabled={strategyLoading}
+                        aria-label="Strategy"
+                        className="border-2 border-secondary bg-[var(--color-panel)] px-2 py-1 text-sm text-foreground transition-colors focus:border-brand disabled:opacity-50"
+                      >
+                        <option value="conservative">conservative</option>
+                        <option value="balanced">balanced</option>
+                        <option value="aggressive">aggressive</option>
+                      </select>{' '}
                       <span className="text-muted">
                         ({status.strategyVersion})
                       </span>
+                      {strategyLoading && (
+                        <span className="ml-2 text-xs text-muted italic">
+                          updating…
+                        </span>
+                      )}
                     </dd>
                   </div>
                   <div>

@@ -347,6 +347,21 @@ export class MultiUserAgent {
     this.ledger.deregisterUser(userId);
   }
 
+  /**
+   * Switch an existing user to a different strategy preset. Available
+   * presets are defined in NegotiationHandler.AVAILABLE_STRATEGIES.
+   * The user's balances, deposit memo, and registration date are
+   * preserved — only the strategy snapshot changes. Takes effect on
+   * the next play session.
+   */
+  async updateUserStrategy(
+    userId: string,
+    newStrategyName: string,
+  ): Promise<UserAccount> {
+    await assertKillSwitchDisabled();
+    return this.negotiation.updateUserStrategy(userId, newStrategyName);
+  }
+
   // ── Play ───────────────────────────────────────────────────────
 
   /**

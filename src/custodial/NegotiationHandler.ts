@@ -139,6 +139,46 @@ export class NegotiationHandler {
   // ── HCS-10 Messaging ────────────────────────────────────────
 
   /**
+   * Update an existing user's strategy. Validates the new strategy
+   * name, loads the full snapshot, and persists via the store's
+   * saveUser method. Preserves balances, userId, depositMemo,
+   * registration time, and everything else — only strategyName /
+   * strategyVersion / strategySnapshot are touched.
+   *
+   * Per-token reservations during play read from
+   * `user.strategySnapshot.budget.tokenBudgets` — after a strategy
+   * switch, the next play session uses the new budget caps
+   * automatically. No kill-switch-and-migrate required.
+   *
+   * @throws if the user doesn't exist, is deregistered, or the
+   *         strategy name is not in AVAILABLE_STRATEGIES.
+   */
+  async updateUserStrategy(
+    userId: string,
+    newStrategyName: string,
+  ): Promise<UserAccount> {
+    const user = this.store.getUser(userId);
+    if (!user) {
+      throw new Error(`User ${userId} not found`);
+    }
+    if (!user.active) {
+      throw new Error(`User ${userId} is deregistered`);
+    }
+    if (!this.isAvailableStrategy(newStrategyName)) {
+      throw new Error(
+        `Unknown strategy "${newStrategyName}". Available: ${AVAILABLE_STRATEGIES.join(', ')}`,
+      );
+    }
+
+    const newStrategy = this.loadStrategy(newStrategyName);
+    user.strategyName = newStrategy.name;
+    user.strategyVersion = newStrategy.version;
+    user.strategySnapshot = newStrategy;
+    this.store.saveUser(user);
+    return user;
+  }
+
+  /**
    * Send a JSON notification to a user's HCS-10 connection topic.
    *
    * The message is wrapped in the standard HCS-10 envelope:
