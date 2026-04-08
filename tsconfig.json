@@ -8,6 +8,10 @@
       "dom",
       "dom.iterable"
     ],
+    "types": [
+      "node",
+      "@testing-library/jest-dom"
+    ],
     "jsx": "react-jsx",
     "noEmit": true,
     "strict": true,

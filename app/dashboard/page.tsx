@@ -5,249 +5,55 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
 import { useToast } from '../components/Toast';
-import { Modal } from '../components/Modal';
 import { ComicPanel } from '../components/ComicPanel';
 import { SpeechBubble } from '../components/SpeechBubble';
 import { ActionBurst } from '../components/ActionBurst';
 import { GoldConfetti } from '../components/GoldConfetti';
 import { TopUpModal } from '../components/TopUpModal';
-import { SkeletonBox } from '../components/SkeletonBox';
 import {
   PrizeNftCard,
   type PrizeNftRef,
-  type EnrichedPrizeNft,
 } from '../components/PrizeNftCard';
 import { useNftEnrichment } from '../components/useNftEnrichment';
 import {
   LSH_CHARACTERS,
   loadOrPickCharacterIdx,
-  pickLine,
   CHARACTER_CHANGE_EVENT,
   type CharacterChangeDetail,
 } from '../lib/characters';
+import { useFreshness } from '../lib/useFreshness';
+import { clearSession, disconnect } from '../lib/session';
+import { ErrorBoundary } from '../components/ErrorBoundary';
+import { HeroSkeleton, HistorySkeleton } from './skeletons';
+import { WithdrawModal } from './WithdrawModal';
+import {
+  DAPP_CLAIM_URL,
+  formatAmount,
+  formatTimestamp,
+  pickCharacterLine,
+  tokenSymbol,
+} from './helpers';
+import type {
+  HistoryResponse,
+  PlaySession,
+  PrizeStatusResponse,
+  PublicStats,
+  StatusResponse,
+} from './types';
 
 // ---------------------------------------------------------------------------
-// Types -- mapped to real API response shapes
+// Dashboard page
 // ---------------------------------------------------------------------------
-
-interface TokenBalanceEntry {
-  available: number;
-  reserved: number;
-  totalDeposited: number;
-  totalWithdrawn: number;
-  totalRake: number;
-}
-
-interface UserBalances {
-  tokens: Record<string, TokenBalanceEntry>;
-}
-
-interface VelocityState {
-  cap: number | null;
-  usedToday: number;
-  remaining: number | null;
-}
-
-interface StatusResponse {
-  userId: string;
-  hederaAccountId: string;
-  eoaAddress: string;
-  depositMemo: string;
-  strategyName: string;
-  strategyVersion: string;
-  rakePercent: number;
-  balances: UserBalances;
-  active: boolean;
-  registeredAt: string;
-  lastPlayedAt: string | null;
-  agentWallet?: string;
-  /** Per-token 24h withdrawal velocity counters (cap + used + remaining). */
-  velocity?: Record<string, VelocityState>;
-}
-
-interface PrizeDetail {
-  fungibleAmount?: number;
-  fungibleToken?: string;
-  nftCount?: number;
-  /** Raw NFT refs captured at win time — enriched lazily on the client. */
-  nfts?: PrizeNftRef[];
-}
-
-interface PoolResult {
-  poolId: number;
-  poolName: string;
-  entriesBought: number;
-  amountSpent: number;
-  rolled: boolean;
-  wins: number;
-  prizeDetails: PrizeDetail[];
-}
-
-interface PlaySession {
-  sessionId: string;
-  userId: string;
-  timestamp: string;
-  strategyName: string;
-  strategyVersion: string;
-  boostBps: number;
-  poolsEvaluated: number;
-  poolsPlayed: number;
-  poolResults: PoolResult[];
-  totalSpent: number;
-  totalWins: number;
-  totalPrizeValue: number;
-  prizesByToken: Record<string, number>;
-  prizesTransferred: boolean;
-  gasCostHbar: number;
-  amountReserved: number;
-  amountSettled: number;
-  amountReleased: number;
-}
-
-interface HistoryResponse {
-  userId: string;
-  sessions: PlaySession[];
-}
-
-// ---------------------------------------------------------------------------
-// Prize claim status — pulled from /api/user/prize-status which queries the
-// LazyLotto dApp for prizes currently sitting in the contract waiting for the
-// user's EOA to claim them. "Claimed" is derived (totalWon - pending). The
-// agent's internal HBAR/LAZY balance is a SEPARATE concept — that tracks
-// deposits the user made for the agent to spend, and is never incremented
-// by prizes. See the "Pending claim" panel below for the user-facing
-// explanation.
-// ---------------------------------------------------------------------------
-
-type PrizeStatusResponse =
-  | {
-      available: true;
-      pending: {
-        count: number;
-        byToken: Record<string, number>;
-        nftCount: number;
-        nfts: { token: string; hederaId: string; serials: number[] }[];
-      };
-      totalWon: {
-        byToken: Record<string, number>;
-        nftCount: number;
-      };
-      claimed: {
-        byToken: Record<string, number>;
-        nftCount: number;
-      };
-    }
-  | { available: false; reason: string };
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function tokenSymbol(tokenKey: string): string {
-  if (tokenKey.toLowerCase() === 'hbar') return 'HBAR';
-  return tokenKey;
-}
-
-/**
- * Public dApp URL for the user's claim flow. Mainnet vs testnet is
- * decided at build time from NEXT_PUBLIC_HEDERA_NETWORK (set in
- * next.config.mjs from the same env var the agent uses).
- */
-const DAPP_URL =
-  process.env.NEXT_PUBLIC_HEDERA_NETWORK === 'mainnet'
-    ? 'https://dapp.lazysuperheroes.com'
-    : 'https://testnet-dapp.lazysuperheroes.com';
-
-/**
- * Direct deep-link to the user's pending prize list on the dApp.
- * Used by the "Claim on dApp →" CTA on the dashboard Pending
- * Claim panel. The `/lotto/prizes` path lands on the claim UI
- * directly instead of the generic profile page.
- */
-const DAPP_CLAIM_URL = `${DAPP_URL}/lotto/prizes`;
-
-function formatAmount(amount: number): string {
-  return amount.toLocaleString(undefined, {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 4,
-  });
-}
-
-function formatTimestamp(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return iso;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Skeleton — structural placeholder shown while the first payload loads.
-// Mirrors the real dashboard layout so the page doesn't reflow on arrival.
-// SkeletonBox itself lives in components/SkeletonBox.tsx so /account can
-// share the same placeholder treatment.
-// ---------------------------------------------------------------------------
-
-function DashboardSkeleton() {
-  return (
-    <div className="mx-auto w-full max-w-6xl px-4 py-8 lg:px-8">
-      {/* Header */}
-      <div className="mb-8 flex flex-col gap-2">
-        <SkeletonBox className="h-8 w-48" />
-        <SkeletonBox className="h-4 w-64" />
-      </div>
-
-      {/* Hero panel skeleton — mirrors the brave-version layout
-          (mascot + balance + speech bubble + PLAY) so the page
-          doesn't reflow when status arrives. Sharp-corner panel
-          with brand-gold border to match the real ComicPanel. */}
-      <div className="mb-12 border-2 border-brand bg-[var(--color-panel)] panel-shadow">
-        <div className="grid gap-6 p-6 sm:p-8 md:grid-cols-[auto_1fr] md:items-center md:gap-10">
-          <SkeletonBox className="mx-auto h-44 w-44 shrink-0 md:mx-0" />
-          <div>
-            <SkeletonBox className="mb-3 h-3 w-32" />
-            <SkeletonBox className="mb-2 h-20 w-64" />
-            <SkeletonBox className="mb-6 h-5 w-40" />
-            <SkeletonBox className="h-16 w-full" />
-          </div>
-        </div>
-      </div>
-
-      {/* Recent Plays skeleton */}
-      <div className="border-2 border-brand bg-[var(--color-panel)] panel-shadow">
-        <div className="px-5 pt-6 pb-4">
-          <SkeletonBox className="mb-2 h-3 w-24" />
-          <SkeletonBox className="h-6 w-56" />
-        </div>
-        <div className="border-t border-brand/20">
-          {[0, 1, 2].map((i) => (
-            <div key={i} className="border-b border-secondary/50 px-5 py-4">
-              <div className="mb-2 flex items-center justify-between">
-                <SkeletonBox className="h-4 w-32" />
-                <SkeletonBox className="h-4 w-20" />
-              </div>
-              <div className="flex gap-2">
-                <SkeletonBox className="h-5 w-20" />
-                <SkeletonBox className="h-5 w-20" />
-                <SkeletonBox className="h-5 w-20" />
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
+//
+// Most of the previously-inline machinery now lives in adjacent files
+// (extracted during the #212 refactor):
+//   - types.ts        → API response shapes
+//   - helpers.ts      → formatters + character line state machine
+//   - skeletons.tsx   → HeroSkeleton + HistorySkeleton
+//   - WithdrawModal.tsx → the cash-out form
+// What remains here is the page composition — fetch coordination,
+// derived state, render — which is still substantial but no longer
+// owns three layers of unrelated concerns at once.
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -276,6 +82,26 @@ export default function DashboardPage() {
   // to /account where the full list lives. Just the count, not the
   // entries themselves; we don't render details here anymore.
   const [stuckCount, setStuckCount] = useState(0);
+
+  // Per-section "loaded at" timestamps for the freshness ribbon.
+  // useFreshness() turns these into "Updated 3s ago" strings that
+  // tick every 5s, so the user can tell at a glance how stale each
+  // panel's data is. null → no data yet → no freshness shown.
+  const [statusLoadedAt, setStatusLoadedAt] = useState<number | null>(null);
+  const [historyLoadedAt, setHistoryLoadedAt] = useState<number | null>(null);
+  const [prizeStatusLoadedAt, setPrizeStatusLoadedAt] = useState<number | null>(
+    null,
+  );
+  const statusFreshness = useFreshness(statusLoadedAt);
+  const historyFreshness = useFreshness(historyLoadedAt);
+  const prizeFreshness = useFreshness(prizeStatusLoadedAt);
+
+  // Ref on the Prize Claim panel — after a winning play we scroll the
+  // panel into view so first-time winners discover where their prize
+  // actually is (in the dApp contract, not the agent pot). Without
+  // this scroll, the only signal is a 3.5s toast that may scroll
+  // off-screen by the time the user looks down.
+  const prizeClaimRef = useRef<HTMLDivElement>(null);
 
   // Self-serve register + withdraw + play state
   const [registerLoading, setRegisterLoading] = useState(false);
@@ -374,9 +200,7 @@ export default function DashboardPage() {
       try {
         const res = await fetch('/api/user/status', { headers });
         if (res.status === 401) {
-          localStorage.removeItem('lazylotto:sessionToken');
-          localStorage.removeItem('lazylotto:accountId');
-          localStorage.removeItem('lazylotto:tier');
+          clearSession();
           router.replace('/auth?expired=1');
           return;
         }
@@ -394,6 +218,7 @@ export default function DashboardPage() {
         }
         const data: StatusResponse = await res.json();
         setStatus(data);
+        setStatusLoadedAt(Date.now());
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
@@ -426,6 +251,7 @@ export default function DashboardPage() {
         if (!res.ok) return;
         const data = (await res.json()) as PrizeStatusResponse;
         setPrizeStatus(data);
+        setPrizeStatusLoadedAt(Date.now());
       } catch {
         /* silent — non-critical enrichment */
       }
@@ -464,22 +290,25 @@ export default function DashboardPage() {
     // Fire status + history in parallel but treat them as independent.
     // Each section renders as soon as its own fetch resolves — history
     // no longer waits for status (and vice versa).
+    //
+    // Prize-status is chained AFTER status because:
+    //   1. Status hits Redis only (cheap, ~50-200ms warm)
+    //   2. Prize-status hits the dApp MCP (slow, 1-2s cold)
+    //   3. Both eventually want getAgentContext, so chaining them lets
+    //      the getAgentContext init (if any) happen exactly once.
+    // The Pending Claim panel renders nothing until prizeStatus loads,
+    // so the deferred fetch doesn't visibly delay anything — the rest
+    // of the dashboard is already painted by then.
     void (async () => {
       await loadStatus(headers);
+      void loadPrizeStatus(headers);
     })();
-
-    // Prize claim status — independent of status/history. Calls the
-    // dApp MCP, so it's potentially slower, but the result lands in
-    // its own state slot and only affects the Pending Claim panel.
-    void loadPrizeStatus(headers);
 
     void (async () => {
       try {
         const res = await fetch('/api/user/history', { headers });
         if (res.status === 401) {
-          localStorage.removeItem('lazylotto:sessionToken');
-          localStorage.removeItem('lazylotto:accountId');
-          localStorage.removeItem('lazylotto:tier');
+          clearSession();
           router.replace('/auth?expired=1');
           return;
         }
@@ -495,6 +324,7 @@ export default function DashboardPage() {
         }
         const data: HistoryResponse = await res.json();
         setSessions(data.sessions ?? []);
+        setHistoryLoadedAt(Date.now());
       } catch (err) {
         // History failure shouldn't break the whole dashboard — log to console
         // and let the empty state render.
@@ -536,38 +366,56 @@ export default function DashboardPage() {
 
     // Background deposit check — fire-and-forget, updates balance in place.
     // Runs in parallel with status/history so it never blocks initial paint.
-    void (async () => {
-      setDepositsChecking(true);
-      try {
-        const res = await fetch('/api/user/check-deposits', {
-          method: 'POST',
-          headers,
-        });
-        if (!res.ok) return;
-        const data = (await res.json()) as {
-          processed?: number;
-          balances?: StatusResponse['balances'];
-          lastPlayedAt?: string | null;
-        };
-        if (data.processed && data.processed > 0 && data.balances) {
-          // Patch balance + lastPlayedAt into the current status without
-          // refetching the whole thing
-          setStatus((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  balances: data.balances!,
-                  lastPlayedAt: data.lastPlayedAt ?? prev.lastPlayedAt,
-                }
-              : prev,
-          );
+    //
+    // Throttle: only fire if the last check was >30s ago. Without this
+    // gate, every dashboard mount (Dashboard ↔ Account ↔ Audit nav)
+    // burns through the /api/user/check-deposits rate limit (12/min) and
+    // makes a slow mirror-node round-trip even when nothing has changed.
+    // The manual "Check for deposits" button below ignores this gate, so
+    // users can always force a refresh when they're actively waiting.
+    const lastCheckMs = Number(
+      localStorage.getItem('lazylotto:lastDepositCheck') ?? '0',
+    );
+    const elapsedSinceLastCheck = Date.now() - lastCheckMs;
+    const DEPOSIT_CHECK_THROTTLE_MS = 30_000;
+    if (elapsedSinceLastCheck >= DEPOSIT_CHECK_THROTTLE_MS) {
+      void (async () => {
+        setDepositsChecking(true);
+        try {
+          const res = await fetch('/api/user/check-deposits', {
+            method: 'POST',
+            headers,
+          });
+          if (!res.ok) return;
+          const data = (await res.json()) as {
+            processed?: number;
+            balances?: StatusResponse['balances'];
+            lastPlayedAt?: string | null;
+          };
+          // Record the timestamp regardless of whether anything was
+          // processed — the gate is "did we check recently", not "did
+          // we find new deposits".
+          localStorage.setItem('lazylotto:lastDepositCheck', String(Date.now()));
+          if (data.processed && data.processed > 0 && data.balances) {
+            // Patch balance + lastPlayedAt into the current status without
+            // refetching the whole thing
+            setStatus((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    balances: data.balances!,
+                    lastPlayedAt: data.lastPlayedAt ?? prev.lastPlayedAt,
+                  }
+                : prev,
+            );
+          }
+        } catch {
+          /* Silent failure — user can refresh manually */
+        } finally {
+          setDepositsChecking(false);
         }
-      } catch {
-        /* Silent failure — user can refresh manually */
-      } finally {
-        setDepositsChecking(false);
-      }
-    })();
+      })();
+    }
   }, [loadStatus, router]);
 
   const handleCopy = useCallback(
@@ -607,28 +455,58 @@ export default function DashboardPage() {
         balances?: StatusResponse['balances'];
         lastPlayedAt?: string | null;
       };
+      // Refresh the throttle timestamp so the next page-mount auto-check
+      // doesn't run immediately on top of this manual check.
+      localStorage.setItem('lazylotto:lastDepositCheck', String(Date.now()));
+      // Bump the freshness ribbon — even if no new deposits arrived,
+      // we just verified the data is current.
+      setStatusLoadedAt(Date.now());
       const processed = data.processed ?? 0;
       if (processed > 0 && data.balances) {
-        // Patch the status in place so the hero balance updates
-        // immediately without a full refetch.
-        setStatus((prev) =>
-          prev
+        // Compute the per-token deposit diff so the toast can name the
+        // amount and token. The user explicitly wants to see "Found
+        // +50 HBAR" — generic "Found 1 new deposit" leaves them
+        // wondering whether it was THEIR deposit or someone else's.
+        // We compare totalDeposited fields between the previous status
+        // snapshot and the new one. Multi-token diffs are joined with
+        // " + " so a HBAR + LAZY pair shows as "+10 HBAR + 100 LAZY".
+        const diffs: string[] = [];
+        setStatus((prev) => {
+          if (prev) {
+            for (const [tokenKey, newEntry] of Object.entries(data.balances!.tokens)) {
+              const oldEntry = prev.balances.tokens[tokenKey];
+              const oldDeposited = oldEntry?.totalDeposited ?? 0;
+              const delta = newEntry.totalDeposited - oldDeposited;
+              if (delta > 0) {
+                diffs.push(`+${formatAmount(delta)} ${tokenSymbol(tokenKey)}`);
+              }
+            }
+          }
+          return prev
             ? {
                 ...prev,
                 balances: data.balances!,
                 lastPlayedAt: data.lastPlayedAt ?? prev.lastPlayedAt,
               }
-            : prev,
-        );
-        toast(
-          processed === 1
-            ? 'Found 1 new deposit'
-            : `Found ${processed} new deposits`,
-        );
-      } else {
-        toast('No new deposits yet — try again in a few seconds', {
-          variant: 'info',
+            : prev;
         });
+        // Use the diff message when we computed one, otherwise fall back
+        // to the count (e.g. first-ever deposit on a fresh status snapshot
+        // where there's no "previous" to diff against).
+        if (diffs.length > 0) {
+          toast(`Deposit confirmed: ${diffs.join(' + ')}`);
+        } else {
+          toast(
+            processed === 1
+              ? 'Found 1 new deposit'
+              : `Found ${processed} new deposits`,
+          );
+        }
+      } else {
+        toast(
+          'No new deposits yet — Hedera takes ~10 seconds to confirm. Make sure you included the deposit memo and try again.',
+          { variant: 'info' },
+        );
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -709,6 +587,7 @@ export default function DashboardPage() {
       // Update balance in place
       if (balances) {
         setStatus((prev) => (prev ? { ...prev, balances } : prev));
+        setStatusLoadedAt(Date.now());
       }
       setWithdrawOpen(false);
       setWithdrawAmount('');
@@ -789,7 +668,25 @@ export default function DashboardPage() {
               : 'WIN!';
         setWinCelebration(label);
         window.setTimeout(() => setWinCelebration(null), 3500);
-        toast(`${label} ${session.totalWins} win(s) across ${session.poolsPlayed} pool(s)`);
+        // Toast tells the user where the prize is. The Pending Claim
+        // panel below explains the agent-pot vs dApp-contract
+        // distinction in detail; the toast is the immediate hint that
+        // there's an action to take. The trailing arrow signals "look
+        // down" — the panel will be scrolled into view momentarily.
+        toast(`${label} ${session.totalWins} prize(s) — claim on the dApp ↓`);
+        // Scroll the Pending Claim panel into view after the prize-status
+        // refetch lands. Wait ~800ms so the dApp MCP query has a chance
+        // to refresh first; otherwise the panel still shows stale state
+        // when the user lands on it. Smooth scroll into the centre so
+        // the panel becomes the visual focal point. First-time winners
+        // need to discover that prizes live in the dApp contract, not
+        // the agent pot — this is the moment they're paying attention.
+        window.setTimeout(() => {
+          prizeClaimRef.current?.scrollIntoView({
+            behavior: 'smooth',
+            block: 'center',
+          });
+        }, 800);
       } else {
         toast(
           `Played ${session.poolsPlayed} pool(s), no wins this round`,
@@ -800,6 +697,7 @@ export default function DashboardPage() {
       // Update balance in place so the user sees the effect immediately
       if (balances) {
         setStatus((prev) => (prev ? { ...prev, balances } : prev));
+        setStatusLoadedAt(Date.now());
       }
       // Refetch history so the new session shows up in the list. Fire
       // and forget — failure is silent; the session is already persisted.
@@ -811,6 +709,7 @@ export default function DashboardPage() {
           if (hres.ok) {
             const data = (await hres.json()) as { sessions?: PlaySession[] };
             setSessions(data.sessions ?? []);
+            setHistoryLoadedAt(Date.now());
           }
         } catch {
           /* silent */
@@ -878,12 +777,14 @@ export default function DashboardPage() {
   // the play history row, not as an icon next to the hero balance.
 
   // --- Loading state ---
-  // Show full-page skeleton while the critical section (status/balance) is
-  // still loading. Once status resolves, the dashboard renders; the play
-  // history section has its own inline skeleton if it's still in-flight.
-  if (statusLoading && !notRegistered) {
-    return <DashboardSkeleton />;
-  }
+  // The dashboard no longer blocks on a full-page skeleton. We render the
+  // shell immediately and each section paints its own skeleton until its
+  // own fetch resolves. This means history shows up as soon as it lands
+  // (typically before status, since it doesn't go through getAgentContext)
+  // and the user gets an immediate sense that the page is alive.
+  //
+  // The auth wall and notRegistered wall remain full-page redirects below
+  // — those are discrete states, not loading states.
 
   // --- No auth token ---
   if (!sessionToken) {
@@ -999,22 +900,16 @@ export default function DashboardPage() {
     !!status && sessions.length === 0 && !hasPlayableBalance;
   // Pick a character line deterministically per session so the same
   // page refresh shows the same quip (but different sessions rotate).
-  // While a play is in flight, override with a playing line so the
-  // character keeps "talking" during the wait — the user previously
-  // had a static speech bubble while the backend churned for 5-15s.
-  const characterLine = status
-    ? playLoading
-      ? pickLine(character.playingLines, status.userId + '-play')
-      : agentClosed
-        ? pickLine(character.nappingLines, status.userId)
-        : isFirstRun
-          ? pickLine(character.introLines, status.userId)
-          : hasPlayableBalance && sessions.length === 0
-            ? pickLine(character.readyLines, status.userId)
-            : hasPlayableBalance
-              ? pickLine(character.lazyLines, status.userId)
-              : pickLine(character.taglines, status.userId)
-    : '';
+  // The state-machine logic lives in pickCharacterLine() above this
+  // component so the render path stays flat.
+  const characterLine = pickCharacterLine(character, {
+    status,
+    playLoading,
+    agentClosed,
+    isFirstRun,
+    hasPlayableBalance,
+    sessionsLength: sessions.length,
+  });
 
   // ── Play progress phase derivation ─────────────────────────
   // The /api/user/play POST takes 5-15s typically (deposit poll +
@@ -1124,16 +1019,7 @@ export default function DashboardPage() {
           {status?.hederaAccountId && (
             <button
               type="button"
-              onClick={() => {
-                localStorage.removeItem('lazylotto:sessionToken');
-                localStorage.removeItem('lazylotto:accountId');
-                localStorage.removeItem('lazylotto:tier');
-                localStorage.removeItem('lazylotto:expiresAt');
-                localStorage.removeItem('lazylotto:locked');
-                // router.replace (not push) so /dashboard isn't in the
-                // back history — accidental disconnect can't be backed out.
-                router.replace('/auth');
-              }}
+              onClick={() => disconnect((path) => router.replace(path))}
               aria-label={`Disconnect ${status.hederaAccountId}`}
               className="group hidden min-h-[44px] items-center gap-2 border-2 border-secondary bg-[var(--color-panel)] px-3 py-2 transition-colors hover:border-destructive sm:inline-flex"
             >
@@ -1213,8 +1099,15 @@ export default function DashboardPage() {
             so it spans the full width of the page and becomes the
             unambiguous primary moment. Everything else (deposit card,
             stuck deposits, history, trust panel) demotes beneath it.
+
+            Three states: loading (HeroSkeleton), loaded (the real
+            ComicPanel), and error (handled by the inline error block
+            below). Loading is independent of history loading so the
+            two sections paint at their own pace.
             ══════════════════════════════════════════════════════════ */}
+        {!status && statusLoading && <HeroSkeleton />}
         {status && (
+          <ErrorBoundary label="Hero balance" onReset={retryStatus}>
           <ComicPanel label="ISSUE #001" halftone="dense" className="mb-12">
             <div className="grid gap-6 p-6 sm:p-8 md:grid-cols-[auto_1fr] md:items-center md:gap-10">
               {/* Mascot slot — comic-panel frame matching the sidebar
@@ -1279,6 +1172,20 @@ export default function DashboardPage() {
                       />
                       Checking deposits
                     </span>
+                  )}
+                  {/* Freshness ribbon — clickable refresh that bypasses
+                      the 30s throttle on the mount-time auto-check.
+                      Shows a relative timestamp that ticks every 5s so
+                      users always know how stale their balance is. */}
+                  {!depositsChecking && statusFreshness && (
+                    <button
+                      type="button"
+                      onClick={() => void handleCheckDeposits()}
+                      className="label-caps text-muted/70 underline-offset-2 transition-colors hover:text-brand hover:underline"
+                      title="Click to re-check deposits and refresh balance"
+                    >
+                      updated {statusFreshness} · refresh
+                    </button>
                   )}
                 </div>
 
@@ -1567,6 +1474,7 @@ export default function DashboardPage() {
               </div>
             )}
           </ComicPanel>
+          </ErrorBoundary>
         )}
 
         {/* Inline hero error — shown only when /api/user/status failed
@@ -1628,13 +1536,22 @@ export default function DashboardPage() {
             (prizeStatus.pending.count > 0 ||
               Object.keys(prizeStatus.claimed.byToken).length > 0 ||
               prizeStatus.claimed.nftCount > 0) && (
+            <ErrorBoundary label="Pending claim">
+            <div ref={prizeClaimRef}>
             <ComicPanel label="PRIZE CLAIM" halftone="none">
               <div className="px-5 pt-6 pb-5">
                 <div className="flex flex-wrap items-start justify-between gap-4">
                   <div>
-                    <p className="label-caps-brand-lg mb-2">
-                      Pending claim
-                    </p>
+                    <div className="mb-2 flex items-baseline gap-3">
+                      <p className="label-caps-brand-lg">
+                        Pending claim
+                      </p>
+                      {prizeFreshness && (
+                        <span className="label-caps text-muted/70">
+                          updated {prizeFreshness}
+                        </span>
+                      )}
+                    </div>
                     <h2 className="heading-1 text-foreground">
                       {prizeStatus.pending.count > 0
                         ? 'Waiting for you on the dApp'
@@ -1718,6 +1635,8 @@ export default function DashboardPage() {
                 )}
               </div>
             </ComicPanel>
+            </div>
+            </ErrorBoundary>
           )}
 
           {/* ---- Play History — wrapped as a ComicPanel so the
@@ -1727,6 +1646,7 @@ export default function DashboardPage() {
                "RECENT PLAYS" corner sticker echoes the ISSUE #001
                label on the hero so the two panels feel like a
                continuous run. --- */}
+          <ErrorBoundary label="Recent plays">
           <ComicPanel label="RECENT PLAYS" halftone="none">
             {/* NFT enrichment error banner — toast-adjacent alert
                 inside the panel header area */}
@@ -1748,7 +1668,14 @@ export default function DashboardPage() {
             {/* ---- Header + P&L strip ---- */}
             <div className="flex flex-wrap items-end justify-between gap-4 px-5 pb-4 pt-6">
               <div>
-                <p className="label-caps-lg mb-2">Play log</p>
+                <div className="mb-2 flex items-baseline gap-3">
+                  <p className="label-caps-lg">Play log</p>
+                  {historyFreshness && (
+                    <span className="label-caps text-muted/70">
+                      updated {historyFreshness}
+                    </span>
+                  )}
+                </div>
                 <h2 className="heading-1 text-foreground">
                   Recent agent sessions
                 </h2>
@@ -1785,21 +1712,7 @@ export default function DashboardPage() {
             {/* ---- Timeline ---- */}
             <div className="border-t border-brand/20">
               {historyLoading ? (
-                <div className="divide-y divide-secondary/50">
-                  {[0, 1, 2].map((i) => (
-                    <div key={i} className="px-5 py-4">
-                      <div className="mb-3 flex items-center justify-between">
-                        <SkeletonBox className="h-4 w-32" />
-                        <SkeletonBox className="h-4 w-16" />
-                      </div>
-                      <div className="flex gap-2">
-                        <SkeletonBox className="h-6 w-20" />
-                        <SkeletonBox className="h-6 w-20" />
-                        <SkeletonBox className="h-6 w-20" />
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                <HistorySkeleton />
               ) : sessions.length > 0 ? (
                 <>
                   <ol className="divide-y divide-secondary/50">
@@ -1988,6 +1901,7 @@ export default function DashboardPage() {
               )}
             </div>
           </ComicPanel>
+          </ErrorBoundary>
         </div>
 
         {/* ── Page footer ────────────────────────────────────
@@ -2033,139 +1947,23 @@ export default function DashboardPage() {
         checking={depositsChecking}
       />
 
-      {/* ── Withdraw modal ───────────────────────────────────── */}
-      <Modal
+      {/* ── Withdraw modal ─────────────────────────────────────
+          Self-contained component (extracted to ./WithdrawModal.tsx
+          during the #212 refactor). The dashboard owns the form
+          state because the post-submit balance patch lives in
+          handleWithdraw, not the modal. */}
+      <WithdrawModal
         open={withdrawOpen}
         onClose={() => setWithdrawOpen(false)}
-        locked={withdrawLoading}
-        title="Cash out"
-        description="Funds will be sent to your registered Hedera account."
-      >
-        {(() => {
-          // Per-token velocity state — shows "remaining today" counter
-          // so users know the daily cap before they hit submit.
-          const velocity = status?.velocity?.[withdrawToken];
-          const amountNum = Number(withdrawAmount);
-          const overCap =
-            velocity?.remaining != null &&
-            Number.isFinite(amountNum) &&
-            amountNum > 0 &&
-            amountNum > velocity.remaining;
-          return (
-            <>
-              <div className="mb-5">
-                <label htmlFor="withdraw-token" className="label-caps mb-2 block">
-                  Token
-                </label>
-                <select
-                  id="withdraw-token"
-                  value={withdrawToken}
-                  onChange={(e) => setWithdrawToken(e.target.value)}
-                  disabled={withdrawLoading}
-                  className="w-full border-2 border-secondary bg-[var(--color-panel)] px-4 py-3 text-sm text-foreground transition-colors focus:border-brand disabled:opacity-50"
-                >
-                  {balanceEntries.map(([key, entry]) => (
-                    <option key={key} value={key}>
-                      {tokenSymbol(key)} (available: {formatAmount(entry.available)})
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="mb-3">
-                <div className="mb-2 flex items-baseline justify-between gap-3">
-                  <label htmlFor="withdraw-amount" className="label-caps">
-                    Amount
-                  </label>
-                  {/* Max button — fills in the full available balance,
-                      respecting the daily velocity cap if one is set.
-                      Standard dApp convention; reduces fat-finger
-                      precision errors when withdrawing the full pot. */}
-                  {(() => {
-                    const entry = balanceEntries.find(([k]) => k === withdrawToken);
-                    const available = entry?.[1].available ?? 0;
-                    const cap = velocity?.remaining;
-                    const maxAmount = cap != null ? Math.min(available, cap) : available;
-                    if (maxAmount <= 0) return null;
-                    return (
-                      <button
-                        type="button"
-                        onClick={() => setWithdrawAmount(String(maxAmount))}
-                        disabled={withdrawLoading}
-                        className="font-pixel text-[9px] uppercase tracking-wider text-brand transition-colors hover:text-foreground disabled:opacity-50"
-                      >
-                        Max ({formatAmount(maxAmount)})
-                      </button>
-                    );
-                  })()}
-                </div>
-                <input
-                  id="withdraw-amount"
-                  type="number"
-                  min="0"
-                  step="any"
-                  inputMode="decimal"
-                  autoComplete="off"
-                  value={withdrawAmount}
-                  onChange={(e) => setWithdrawAmount(e.target.value)}
-                  disabled={withdrawLoading}
-                  placeholder="0.00"
-                  aria-invalid={overCap || undefined}
-                  aria-describedby={velocity?.cap != null ? 'withdraw-velocity' : undefined}
-                  className={`w-full border-2 px-4 py-3 font-mono text-sm text-foreground placeholder:text-muted transition-colors disabled:opacity-50 ${
-                    overCap
-                      ? 'border-destructive bg-destructive/10 focus:border-destructive'
-                      : 'border-secondary bg-[var(--color-panel)] focus:border-brand'
-                  }`}
-                />
-              </div>
-
-              {/* Daily velocity cap counter — shown only when a cap is set */}
-              {velocity?.cap != null && (
-                <p
-                  id="withdraw-velocity"
-                  className={`mb-5 type-caption ${overCap ? 'text-destructive' : ''}`}
-                >
-                  Daily limit: {formatAmount(velocity.usedToday)} /{' '}
-                  {formatAmount(velocity.cap)} {tokenSymbol(withdrawToken)} used
-                  {velocity.remaining != null && (
-                    <>
-                      {' '}
-                      — <span className="text-foreground num-tabular">{formatAmount(velocity.remaining)}</span> remaining today
-                    </>
-                  )}
-                </p>
-              )}
-
-              {overCap && (
-                <p className="mb-5 border-l-2 border-destructive bg-destructive/10 px-4 py-3 text-xs text-destructive">
-                  Amount exceeds your remaining daily limit. Try a smaller
-                  amount or wait for the 24-hour rolling window to refresh.
-                </p>
-              )}
-
-              <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setWithdrawOpen(false)}
-                  disabled={withdrawLoading}
-                  className="btn-ghost-sm"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleWithdraw}
-                  disabled={withdrawLoading || !withdrawAmount || overCap}
-                  className="btn-primary-sm"
-                >
-                  {withdrawLoading ? 'Withdrawing…' : 'Confirm withdraw'}
-                </button>
-              </div>
-            </>
-          );
-        })()}
-      </Modal>
+        status={status}
+        withdrawToken={withdrawToken}
+        setWithdrawToken={setWithdrawToken}
+        withdrawAmount={withdrawAmount}
+        setWithdrawAmount={setWithdrawAmount}
+        withdrawLoading={withdrawLoading}
+        onSubmit={handleWithdraw}
+        balanceEntries={balanceEntries}
+      />
     </div>
   );
 }
