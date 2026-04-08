@@ -454,9 +454,11 @@ export default function DashboardPage() {
   // don't hammer the API for users who left the tab open in the
   // background. Visibility change events re-trigger an immediate
   // refresh so the data is fresh the moment the user returns.
+  const lastVisibilityRefreshRef = useRef(0);
   useEffect(() => {
     if (!sessionToken || notRegistered) return;
     const REFRESH_INTERVAL_MS = 60_000;
+    const VISIBILITY_REFRESH_THROTTLE_MS = 30_000;
 
     const quietRefresh = async () => {
       if (document.visibilityState !== 'visible') return;
@@ -487,10 +489,23 @@ export default function DashboardPage() {
     // Also refresh when the tab becomes visible again after being
     // hidden — users returning from another tab see fresh data
     // immediately instead of waiting for the next interval tick.
+    //
+    // THROTTLED: iOS Safari fires visibilitychange on keyboard
+    // open/close, share-sheet dismiss, and several other transient
+    // events. Without a throttle, a user typing into the Withdraw
+    // modal's amount input would trigger 4-8 refreshes per
+    // withdrawal session as the keyboard opens and closes. Skip
+    // the refetch if it's fired within the last 30 seconds — the
+    // 60s interval still catches genuine tab-return moments, and
+    // the user's active flow isn't interrupted by background work.
     const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        void quietRefresh();
+      if (document.visibilityState !== 'visible') return;
+      const now = Date.now();
+      if (now - lastVisibilityRefreshRef.current < VISIBILITY_REFRESH_THROTTLE_MS) {
+        return;
       }
+      lastVisibilityRefreshRef.current = now;
+      void quietRefresh();
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
@@ -1080,6 +1095,91 @@ export default function DashboardPage() {
     Number.isFinite(lastPlayedAtMs) ? lastPlayedAtMs : null,
   );
 
+  // ── Narrative headline memoization ──────────────────────────
+  //
+  // Build the hero headline text ONCE per meaningful state change
+  // instead of on every render. Previously the headline's IIFE ran
+  // inside the JSX on every render, which meant the 5-second
+  // freshness ribbon tick (via useFreshness) cascaded into a full
+  // headline rebuild every 5s even though none of the headline's
+  // actual inputs had changed. The audit flagged this as M4.
+  //
+  // The `character.name` is known at build time on the text prefix
+  // so we split it here too; the JSX layer just renders the
+  // name in brand-gold + the rest in foreground.
+  const narrativeHeadline = useMemo(() => {
+    if (!status) return null;
+
+    let headlineState:
+      | 'first-run'
+      | 'ready'
+      | 'playing'
+      | 'closed'
+      | 'has-history';
+    if (playLoading) headlineState = 'playing';
+    else if (agentClosed) headlineState = 'closed';
+    else if (isFirstRun) headlineState = 'first-run';
+    // Edge case: lastPlayedAt is set but the sessions array hasn't
+    // loaded yet (rare race during a fresh history fetch). Treat as
+    // 'ready' so the headline doesn't fall into has-history with
+    // no data.
+    else if (hasPlayableBalance && sessions.length === 0) headlineState = 'ready';
+    else headlineState = 'has-history';
+
+    const mood = deriveAgentMood(sessions);
+    const last = latestSession;
+    const lastOutcome: 'win' | 'loss' | 'no-play' | undefined = last
+      ? last.totalWins > 0
+        ? 'win'
+        : last.totalSpent > 0
+          ? 'loss'
+          : 'no-play'
+      : undefined;
+
+    // Primary won token — pick the first non-zero entry from
+    // prizesByToken so HBAR + LAZY wins both render correctly.
+    let lastWonToken = 'HBAR';
+    let lastWonAmount = last?.totalPrizeValue ?? 0;
+    if (last?.prizesByToken) {
+      for (const [tok, amt] of Object.entries(last.prizesByToken)) {
+        if (amt > 0) {
+          lastWonToken = tok.toUpperCase();
+          lastWonAmount = amt;
+          break;
+        }
+      }
+    }
+
+    const headlineText = buildNarrativeHeadline({
+      character,
+      state: headlineState,
+      lastOutcome,
+      mood,
+      lastWonAmount,
+      lastWonToken,
+      lastSpentAmount: last?.totalSpent,
+      lastPoolsPlayed: last?.poolsPlayed,
+      hasPendingClaim,
+    });
+
+    const namePrefix = character.name;
+    const rest = headlineText.startsWith(namePrefix)
+      ? headlineText.slice(namePrefix.length)
+      : ` ${headlineText}`;
+
+    return { namePrefix, rest };
+  }, [
+    status,
+    playLoading,
+    agentClosed,
+    isFirstRun,
+    hasPlayableBalance,
+    sessions,
+    latestSession,
+    character,
+    hasPendingClaim,
+  ]);
+
   // --- Dashboard ---
   return (
     <div className="relative w-full px-4 py-10 sm:px-6 lg:px-10">
@@ -1362,87 +1462,15 @@ export default function DashboardPage() {
                     builder output by splitting on the known name
                     prefix so the visual treatment stays at the JSX
                     layer while the builder stays pure text. */}
-                {(() => {
-                  // The enclosing `{status && (...)}` guard means this
-                  // IIFE only runs with a truthy status. Previous dead
-                  // `!status` branch dropped — it was unreachable AND
-                  // contained a duplicate h1 that static analysers would
-                  // have flagged.
-                  //
-                  // Figure out which state slot to feed the builder.
-                  let headlineState:
-                    | 'first-run'
-                    | 'ready'
-                    | 'playing'
-                    | 'closed'
-                    | 'has-history';
-                  if (playLoading) headlineState = 'playing';
-                  else if (agentClosed) headlineState = 'closed';
-                  else if (isFirstRun) headlineState = 'first-run';
-                  // Edge case: lastPlayedAt is set but the sessions
-                  // array hasn't loaded yet (rare race during a fresh
-                  // history fetch). Treat as 'ready' so the headline
-                  // doesn't fall into has-history with no data — the
-                  // headline just says "X is loaded and ready" until
-                  // history lands and the state transitions correctly.
-                  else if (hasPlayableBalance && sessions.length === 0)
-                    headlineState = 'ready';
-                  else headlineState = 'has-history';
-
-                  const mood = deriveAgentMood(sessions);
-                  const last = latestSession;
-                  const lastOutcome: 'win' | 'loss' | 'no-play' | undefined = last
-                    ? last.totalWins > 0
-                      ? 'win'
-                      : last.totalSpent > 0
-                        ? 'loss'
-                        : 'no-play'
-                    : undefined;
-
-                  // Primary won token — pick the first non-zero entry from
-                  // prizesByToken so HBAR + LAZY wins both render correctly.
-                  let lastWonToken = 'HBAR';
-                  let lastWonAmount = last?.totalPrizeValue ?? 0;
-                  if (last?.prizesByToken) {
-                    for (const [tok, amt] of Object.entries(last.prizesByToken)) {
-                      if (amt > 0) {
-                        lastWonToken = tok.toUpperCase();
-                        lastWonAmount = amt;
-                        break;
-                      }
-                    }
-                  }
-
-                  const headlineText = buildNarrativeHeadline({
-                    character,
-                    state: headlineState,
-                    lastOutcome,
-                    mood,
-                    lastWonAmount,
-                    lastWonToken,
-                    lastSpentAmount: last?.totalSpent,
-                    lastPoolsPlayed: last?.poolsPlayed,
-                    hasPendingClaim,
-                  });
-
-                  // Wrap the character's name in brand-gold. The name is
-                  // always at the start of the string because every
-                  // template begins with ${name}.
-                  const namePrefix = character.name;
-                  const rest = headlineText.startsWith(namePrefix)
-                    ? headlineText.slice(namePrefix.length)
-                    : ` ${headlineText}`;
-
-                  return (
-                    <h1
-                      className="heading-1 mb-3 text-foreground"
-                      aria-live="polite"
-                    >
-                      <span className="text-brand">{namePrefix}</span>
-                      {rest}
-                    </h1>
-                  );
-                })()}
+                {narrativeHeadline && (
+                  <h1
+                    className="heading-1 mb-3 text-foreground"
+                    aria-live="polite"
+                  >
+                    <span className="text-brand">{narrativeHeadline.namePrefix}</span>
+                    {narrativeHeadline.rest}
+                  </h1>
+                )}
 
                 {/* Supporting balance line — demoted from display-xl
                     but with a thin brand-gold left border that acts as

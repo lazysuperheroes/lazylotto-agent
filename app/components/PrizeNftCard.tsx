@@ -169,6 +169,14 @@ export function PrizeNftCard({ raw, enriched, loading, size = 'regular' }: Prize
             height={imagePx}
             className="h-full w-full object-cover"
             onError={() => setImageError(true)}
+            // NFT images come from external IPFS gateways so
+            // Next.js optimization is a no-op (unoptimized). But
+            // loading="lazy" still helps — below-the-fold prize
+            // cards on the audit page + multi-session dashboards
+            // defer their image requests until scroll. No impact
+            // on the hero — prize cards only render inside the
+            // Pending Claim panel and Recent Plays rows.
+            loading="lazy"
             unoptimized
           />
         ) : (

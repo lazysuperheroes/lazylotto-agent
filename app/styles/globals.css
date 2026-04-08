@@ -886,9 +886,14 @@ html[data-theme='calm'] .btn-primary-sm:active:not(:disabled) {
    for the animation itself, only for the phase message rotation.
 
    Plus a thin progress bar that fills up over an estimated
-   duration, then loops. Width-based animation rather than
-   transform because we want the bar to actually feel like it's
-   filling rather than sliding.
+   duration, then loops. Uses `transform: scaleX()` rather than
+   `width` so the animation is COMPOSITED on the GPU instead of
+   triggering layout on every frame. The previous width-based
+   animation was doing ~720 layout passes per play session (60fps
+   × 12s) on the button-internal progress, which the audit
+   flagged as a performance issue. Visually identical — scaling
+   from a left-anchored transform-origin looks the same as a
+   width fill, but costs zero layout work.
 
    Both wrapped in prefers-reduced-motion guards so vestibular
    sensitivity users get a static "working" state instead.
@@ -905,18 +910,22 @@ html[data-theme='calm'] .btn-primary-sm:active:not(:disabled) {
 
 @keyframes playProgress {
   0% {
-    width: 5%;
+    transform: scaleX(0.05);
   }
   100% {
-    width: 100%;
+    transform: scaleX(1);
   }
 }
 
 /* Indeterminate sweep for plays that run past the estimated
    12s duration. The fill bar becomes a moving gradient that
    sweeps left-to-right continuously — "still working" instead
-   of "stuck at 100%". Kicks in via the .play-progress-overflow
-   modifier the dashboard adds after playElapsedMs > 12000. */
+   of "stuck at 100%". Uses background-position which is a
+   paint-only operation (no layout), so it's safe to leave as-is
+   — transform wouldn't work here because we're moving the
+   gradient INSIDE the element, not the element itself. Kicks
+   in via the data-overflow="true" modifier the dashboard adds
+   after playElapsedMs > 12000. */
 @keyframes playProgressSweep {
   0% {
     background-position: -200% 0;
@@ -966,8 +975,11 @@ html[data-theme='calm'] .btn-primary-sm:active:not(:disabled) {
   top: 0;
   left: 0;
   height: 100%;
+  width: 100%;
   background-color: var(--color-brand);
-  width: 5%;
+  transform: scaleX(0.05);
+  transform-origin: left center;
+  will-change: transform;
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -979,9 +991,11 @@ html[data-theme='calm'] .btn-primary-sm:active:not(:disabled) {
      12 seconds. Swap the fill animation for a continuous gradient
      sweep so the bar keeps moving instead of sticking at 100%.
      The dashboard toggles data-overflow="true" on the bar after
-     playElapsedMs > 12000. */
+     playElapsedMs > 12000. The sweep still uses background-position
+     (paint-only, no layout) but we have to reset transform to
+     identity so the scaleX from the fill animation doesn't interact. */
   .play-progress-bar[data-overflow='true'] > .play-progress-fill {
-    width: 100%;
+    transform: scaleX(1);
     background: linear-gradient(
       90deg,
       rgba(229, 168, 0, 0.25) 0%,
