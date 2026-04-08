@@ -1,4 +1,5 @@
 import type { Strategy } from '../config/strategy.js';
+import { matchesFeeTokenFilter } from '../config/strategy.js';
 import type { PoolSummary, EvCalculation } from '../mcp/client.js';
 
 export interface ScoredPool {
@@ -20,7 +21,10 @@ export class StrategyEngine {
       if (p.paused || p.closed) return false;
       if (f.minWinRate !== undefined && p.winRatePercent < f.minWinRate) return false;
       if (f.maxEntryFee !== undefined && p.entryFee > f.maxEntryFee) return false;
-      if (f.feeToken !== 'any' && p.feeTokenSymbol !== f.feeToken) return false;
+      // feeToken supports three shapes: 'any', single symbol, or
+      // array of symbols (see FeeTokenFilterSchema). The helper
+      // handles all three uniformly.
+      if (!matchesFeeTokenFilter(f.feeToken, p.feeTokenSymbol)) return false;
       if (p.prizeCount < f.minPrizeCount) return false;
       return true;
     });

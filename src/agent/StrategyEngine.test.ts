@@ -117,6 +117,49 @@ describe('StrategyEngine', () => {
       assert.equal(result[0].poolId, 2);
     });
 
+    it('filters by feeToken array (multi-token allow-list)', () => {
+      // Array form: ['HBAR', 'LAZY'] means both are allowed.
+      // Used by MultiUserAgent.playForUser when the user has
+      // positive balance in multiple tokens — tighter than 'any'
+      // because it explicitly excludes everything else (future
+      // token additions get rejected by default).
+      const engine = new StrategyEngine(
+        makeStrategy({
+          poolFilter: {
+            type: 'all',
+            feeToken: ['HBAR', 'LAZY'],
+            minPrizeCount: 1,
+          },
+        }),
+      );
+      const pools = [
+        makePool({ poolId: 1, feeTokenSymbol: 'LAZY' }),
+        makePool({ poolId: 2, feeTokenSymbol: 'HBAR' }),
+      ];
+      const result = engine.filterPools(pools);
+      assert.equal(result.length, 2);
+    });
+
+    it('feeToken array with only HBAR behaves like single HBAR filter', () => {
+      // The array form degenerates to the single-value form when
+      // only one symbol is in the array. This is the shape
+      // MultiUserAgent.playForUser emits for a user with HBAR-only
+      // balance — 'HBAR' direct is still used, but the array
+      // fallback should also work.
+      const engine = new StrategyEngine(
+        makeStrategy({
+          poolFilter: { type: 'all', feeToken: ['HBAR'], minPrizeCount: 1 },
+        }),
+      );
+      const pools = [
+        makePool({ poolId: 1, feeTokenSymbol: 'LAZY' }),
+        makePool({ poolId: 2, feeTokenSymbol: 'HBAR' }),
+      ];
+      const result = engine.filterPools(pools);
+      assert.equal(result.length, 1);
+      assert.equal(result[0].poolId, 2);
+    });
+
     it('filters by minPrizeCount', () => {
       const engine = new StrategyEngine(
         makeStrategy({ poolFilter: { type: 'all', feeToken: 'any', minPrizeCount: 3 } })

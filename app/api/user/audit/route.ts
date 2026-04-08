@@ -431,17 +431,30 @@ export async function GET(request: Request) {
       console.warn('[user/audit] v2 reader failed:', parseErr);
     }
 
-    // Reassign totalBurned from the parsed sessions instead of the
-    // in-loop op-name switch. The reader unifies v1 batch + v2
-    // sequence into NormalizedSession[].totalSpentByToken, so we
-    // pull HBAR spending out of there. The single-number
-    // `totalBurned` field is preserved for backward compat with
-    // the audit page summary bar, but it now correctly reflects
-    // v2 plays going forward.
+    // Aggregate per-token totals from the reader's normalized
+    // sessions. See the matching block in
+    // app/api/admin/audit/route.ts for the full rationale.
+    const spentByToken: Record<string, number> = {};
+    const wonByToken: Record<string, number> = {};
+    let totalNftWins = 0;
     for (const session of v2Sessions) {
-      const hbarSpent = session.totalSpentByToken['HBAR'] ?? 0;
-      const hbarLowerSpent = session.totalSpentByToken['hbar'] ?? 0;
-      totalBurned += hbarSpent + hbarLowerSpent;
+      for (const [rawToken, amt] of Object.entries(session.totalSpentByToken)) {
+        const token = rawToken === 'hbar' ? 'HBAR' : rawToken;
+        spentByToken[token] = (spentByToken[token] ?? 0) + amt;
+      }
+      for (const [rawToken, amt] of Object.entries(session.totalPrizeValueByToken)) {
+        const token = rawToken === 'hbar' ? 'HBAR' : rawToken;
+        wonByToken[token] = (wonByToken[token] ?? 0) + amt;
+      }
+      totalNftWins += session.totalNftCount;
+    }
+    totalBurned = spentByToken['HBAR'] ?? 0;
+    totalWon = wonByToken['HBAR'] ?? 0;
+    for (const token of Object.keys(spentByToken)) {
+      spentByToken[token] = Math.round(spentByToken[token]! * 10000) / 10000;
+    }
+    for (const token of Object.keys(wonByToken)) {
+      wonByToken[token] = Math.round(wonByToken[token]! * 10000) / 10000;
     }
 
     // `balanceLeft` is the user's remaining play money in the agent's
@@ -471,6 +484,9 @@ export async function GET(request: Request) {
           totalWithdrawn: Math.round(totalWithdrawn * 100) / 100,
           totalWon: Math.round(totalWon * 100) / 100,
           balanceLeft: Math.round(balanceLeft * 100) / 100,
+          spentByToken,
+          wonByToken,
+          totalNftWins,
           // Legacy field for any consumer that hasn't been updated.
           netBalance: Math.round(balanceLeft * 100) / 100,
         },

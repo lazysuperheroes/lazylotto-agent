@@ -498,23 +498,48 @@ export async function GET(request: Request) {
       console.warn('[admin/audit] v2 reader failed:', parseErr);
     }
 
-    // Reassign totalBurned from the parsed sessions instead of the
-    // in-loop op-name switch. The reader unifies v1 batch + v2
-    // sequence into NormalizedSession[].totalSpentByToken, so we
-    // pull HBAR spending out of there. The single-number
-    // `totalBurned` field is preserved for backward compat with
-    // the audit page summary bar, but it now correctly reflects
-    // v2 plays going forward.
+    // Aggregate per-token totals from the reader's normalized
+    // sessions. This replaces the old approach of rolling
+    // everything into a single HBAR-only number. The summary bar
+    // on the audit page now shows a row per token for both spent
+    // and won, so LAZY plays will appear correctly once they
+    // exist. Legacy single-number totalBurned and totalWon fields
+    // are kept for backward compat with any client that hasn't
+    // been updated, and are computed as the HBAR slice.
     //
-    // Note: totalSpentByToken keys are whatever the writer set in
-    // play_pool_result.spentToken, normalized via
-    // poolFeeTokenForAudit() in MultiUserAgent — "HBAR" for native,
-    // a token id for FTs. The reader's v1 fallback hardcodes "HBAR"
-    // because v1 batch only ever recorded HBAR plays.
+    // Token key normalization: NormalizedSession.totalSpentByToken
+    // is keyed by whatever the v2 writer set in
+    // play_pool_result.spentToken (via poolFeeTokenForAudit:
+    // "HBAR" for native, Hedera token id for FTs). v1 batch
+    // sessions hardcode "HBAR" in the reader's v1 fallback, so
+    // legacy sessions bucket into "HBAR" cleanly. We ONLY merge
+    // "hbar" → "HBAR" to handle any case-inconsistent writer
+    // output.
+    const spentByToken: Record<string, number> = {};
+    const wonByToken: Record<string, number> = {};
+    let totalNftWins = 0;
     for (const session of v2Sessions) {
-      const hbarSpent = session.totalSpentByToken['HBAR'] ?? 0;
-      const hbarLowerSpent = session.totalSpentByToken['hbar'] ?? 0;
-      totalBurned += hbarSpent + hbarLowerSpent;
+      for (const [rawToken, amt] of Object.entries(session.totalSpentByToken)) {
+        const token = rawToken === 'hbar' ? 'HBAR' : rawToken;
+        spentByToken[token] = (spentByToken[token] ?? 0) + amt;
+      }
+      for (const [rawToken, amt] of Object.entries(session.totalPrizeValueByToken)) {
+        const token = rawToken === 'hbar' ? 'HBAR' : rawToken;
+        wonByToken[token] = (wonByToken[token] ?? 0) + amt;
+      }
+      totalNftWins += session.totalNftCount;
+    }
+    // Legacy single-number totals are the HBAR slice of the per-
+    // token maps. Kept for backward compat with consumers that
+    // haven't cut over to the maps yet.
+    totalBurned = spentByToken['HBAR'] ?? 0;
+    totalWon = wonByToken['HBAR'] ?? 0;
+    // Round each per-token value to 4 decimals for stable display
+    for (const token of Object.keys(spentByToken)) {
+      spentByToken[token] = Math.round(spentByToken[token]! * 10000) / 10000;
+    }
+    for (const token of Object.keys(wonByToken)) {
+      wonByToken[token] = Math.round(wonByToken[token]! * 10000) / 10000;
     }
 
     // `balanceLeft` is the user's remaining play money in the agent's
@@ -550,6 +575,13 @@ export async function GET(request: Request) {
           totalWithdrawn: Math.round(totalWithdrawn * 100) / 100,
           totalWon: Math.round(totalWon * 100) / 100,
           balanceLeft: Math.round(balanceLeft * 100) / 100,
+          // Per-token breakdowns from the reader (new). spentByToken
+          // and wonByToken replace the legacy single-number summary
+          // fields for any client that wants a proper breakdown.
+          // totalNftWins is an informational aggregate count.
+          spentByToken,
+          wonByToken,
+          totalNftWins,
           // Legacy field for any consumer that hasn't been updated.
           // Removed in a future PR after the dashboard cuts over.
           netBalance: Math.round(balanceLeft * 100) / 100,

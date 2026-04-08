@@ -484,25 +484,25 @@ export class MultiUserAgent {
         };
       }
 
-      // Pool filter override (Stage 1 carried forward into Stage 2):
-      // restrict to tokens the user has reservations in. The schema
-      // only allows 'HBAR' | 'LAZY' | 'any', so when the user has
-      // reservations in BOTH (HBAR + LAZY), we leave the filter as
-      // 'any' — the cappedBudgets above already prevents the play
-      // loop from spending tokens we didn't reserve. When the user
-      // has reservations in EXACTLY ONE of HBAR/LAZY, we tighten
-      // the filter to that token so discovery doesn't even consider
-      // the other one (saves MCP roundtrips and avoids any chance
-      // of leaking spend to operator funds).
+      // Pool filter override: restrict to tokens the user has
+      // reservations in. Uses the v2 FeeTokenFilterSchema which
+      // supports an array form, so mixed-balance users (both HBAR
+      // and LAZY) get a precise allow-list instead of falling back
+      // to 'any'. Prevents any chance of the play loop considering
+      // pools in tokens the user can't afford.
       const lazyTokenId = process.env.LAZY_TOKEN_ID;
       const hasHbarReservation = tokenReservations.has(HBAR_TOKEN_KEY);
       const hasLazyReservation = lazyTokenId ? tokenReservations.has(lazyTokenId) : false;
-      let restrictedFeeToken: 'HBAR' | 'LAZY' | 'any';
-      if (hasHbarReservation && !hasLazyReservation) {
+      let restrictedFeeToken: 'HBAR' | 'LAZY' | 'any' | ('HBAR' | 'LAZY')[];
+      if (hasHbarReservation && hasLazyReservation) {
+        // Both funded — use the array form for a precise allow-list
+        restrictedFeeToken = ['HBAR', 'LAZY'];
+      } else if (hasHbarReservation) {
         restrictedFeeToken = 'HBAR';
-      } else if (hasLazyReservation && !hasHbarReservation) {
+      } else if (hasLazyReservation) {
         restrictedFeeToken = 'LAZY';
       } else {
+        // Neither funded — would have errored above but defensive
         restrictedFeeToken = 'any';
       }
       if (restrictedFeeToken !== user.strategySnapshot.poolFilter.feeToken) {

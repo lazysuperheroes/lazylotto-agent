@@ -84,6 +84,17 @@ interface AuditSummary {
    * the user's EOA via the contract's transferPendingPrizes call.
    */
   balanceLeft?: number;
+  /**
+   * Per-token breakdowns computed from the v2 reader's
+   * NormalizedSession[].totalSpentByToken / totalPrizeValueByToken.
+   * Keys are normalized to "HBAR" for native HBAR, or a Hedera
+   * token id (e.g. "0.0.8011209") for FTs. The legacy single-
+   * number totalBurned / totalWon fields above are the HBAR slice
+   * of these maps.
+   */
+  spentByToken?: Record<string, number>;
+  wonByToken?: Record<string, number>;
+  totalNftWins?: number;
   /** Legacy alias for balanceLeft. Will be removed in a future PR. */
   netBalance: number;
 }
@@ -904,6 +915,55 @@ export default function AuditPage() {
               </span>
             </span>
           </div>
+          {/* Per-token breakdown: only shown when there's
+              spending or winning in a token OTHER than HBAR,
+              otherwise the single-number totals above are
+              sufficient and this row would be redundant.
+              Once LAZY pools are played, this row lights up
+              with a LAZY column. Future: support any FT. */}
+          {(() => {
+            const spent = summary.spentByToken ?? {};
+            const won = summary.wonByToken ?? {};
+            const spentTokens = Object.keys(spent).filter((k) => spent[k]! > 0);
+            const wonTokens = Object.keys(won).filter((k) => won[k]! > 0);
+            const nonHbarSpent = spentTokens.filter((k) => k !== 'HBAR');
+            const nonHbarWon = wonTokens.filter((k) => k !== 'HBAR');
+            // If there's only HBAR activity, skip the per-token row
+            // (the single-number fields above already say it all)
+            if (nonHbarSpent.length === 0 && nonHbarWon.length === 0 &&
+                !(summary.totalNftWins && summary.totalNftWins > 0)) {
+              return null;
+            }
+            return (
+              <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-secondary/40 pt-1 mt-1">
+                <span className="label-caps text-muted/80">Per token:</span>
+                {spentTokens.map((token) => (
+                  <span key={`spent-${token}`}>
+                    Spent{' '}
+                    <span className="num-tabular text-info">
+                      {formatAmount(spent[token]!)} {displayToken(token)}
+                    </span>
+                  </span>
+                ))}
+                {wonTokens.map((token) => (
+                  <span key={`won-${token}`}>
+                    Won{' '}
+                    <span className="num-tabular text-brand">
+                      +{formatAmount(won[token]!)} {displayToken(token)}
+                    </span>
+                  </span>
+                ))}
+                {summary.totalNftWins != null && summary.totalNftWins > 0 && (
+                  <span>
+                    +{' '}
+                    <span className="num-tabular text-brand">
+                      {summary.totalNftWins} NFT{summary.totalNftWins === 1 ? '' : 's'}
+                    </span>
+                  </span>
+                )}
+              </div>
+            );
+          })()}
           {summary.totalWon != null && summary.totalWon > 0 && (
             <div className="flex flex-wrap gap-x-4 gap-y-1">
               <span>

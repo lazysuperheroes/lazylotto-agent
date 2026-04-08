@@ -28,15 +28,48 @@ export const BudgetSchema = z
 
 // ── Pool Filter ───────────────────────────────────────────────
 
+/**
+ * Pool fee-token filter. Three forms:
+ *   - `'any'` — match any pool regardless of fee token (default)
+ *   - `'HBAR'` / `'LAZY'` — single-token filter, backward compat
+ *   - `['HBAR', 'LAZY']` — explicit allow-list, both allowed
+ *
+ * The array form is used when a user has positive balance in
+ * multiple tokens and wants the play loop to consider pools in
+ * any of them. `MultiUserAgent.playForUser` builds this dynamically
+ * from the user's actual token balances. Writing the array form
+ * to a strategy JSON file is also valid.
+ */
+export const FeeTokenFilterSchema = z.union([
+  z.enum(['HBAR', 'LAZY', 'any']),
+  z.array(z.enum(['HBAR', 'LAZY'])).min(1),
+]);
+
 export const PoolFilterSchema = z.object({
   type: z.enum(['all', 'global', 'community']).default('all'),
   minWinRate: z.number().min(0).max(100).optional(),
   maxEntryFee: z.number().positive().optional(),
   /** Filter by fee token symbol for pool discovery. Symbols are fine here
-   *  since this is a pre-filter on MCP data (which returns symbols). */
-  feeToken: z.enum(['HBAR', 'LAZY', 'any']).default('any'),
+   *  since this is a pre-filter on MCP data (which returns symbols).
+   *  See FeeTokenFilterSchema for the supported shapes. */
+  feeToken: FeeTokenFilterSchema.default('any'),
   minPrizeCount: z.number().int().nonnegative().default(1),
 });
+
+/**
+ * Check whether a pool's fee token symbol matches a feeToken filter
+ * value. Handles all three shapes: 'any', single symbol, and array.
+ */
+export function matchesFeeTokenFilter(
+  filter: 'HBAR' | 'LAZY' | 'any' | ('HBAR' | 'LAZY')[],
+  poolFeeTokenSymbol: string,
+): boolean {
+  if (filter === 'any') return true;
+  if (Array.isArray(filter)) {
+    return filter.includes(poolFeeTokenSymbol as 'HBAR' | 'LAZY');
+  }
+  return poolFeeTokenSymbol === filter;
+}
 
 // ── Play Style ────────────────────────────────────────────────
 
@@ -82,6 +115,7 @@ export const StrategySchema = z.object({
 
 export type Strategy = z.infer<typeof StrategySchema>;
 export type PoolFilter = z.infer<typeof PoolFilterSchema>;
+export type FeeTokenFilter = z.infer<typeof FeeTokenFilterSchema>;
 export type Budget = z.infer<typeof BudgetSchema>;
 export type TokenBudget = z.infer<typeof TokenBudgetSchema>;
 export type PlayStyle = z.infer<typeof PlayStyleSchema>;
