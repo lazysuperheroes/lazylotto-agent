@@ -9,6 +9,7 @@ import {
 import { useNftEnrichment } from '../components/useNftEnrichment';
 import { ComicPanel } from '../components/ComicPanel';
 import { SkeletonBox } from '../components/SkeletonBox';
+import { clearSession } from '../lib/session';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -617,8 +618,7 @@ export default function AuditPage() {
       }
 
       if (res.status === 401) {
-        localStorage.removeItem('lazylotto:sessionToken');
-        localStorage.removeItem('lazylotto:accountId');
+        clearSession();
         router.replace('/auth?expired=1');
         return null;
       }
@@ -637,8 +637,7 @@ export default function AuditPage() {
     const res = await fetch('/api/user/audit', { headers });
 
     if (res.status === 401) {
-      localStorage.removeItem('lazylotto:sessionToken');
-      localStorage.removeItem('lazylotto:accountId');
+      clearSession();
       router.replace('/auth?expired=1');
       return null;
     }

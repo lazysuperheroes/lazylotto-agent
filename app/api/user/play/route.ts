@@ -64,17 +64,11 @@ export const POST = withStore(async (request: Request) => {
       );
     }
 
-    // Pick up any pending deposits before locking — the user might
-    // have just funded and hit Play, and we want that balance to count.
-    try {
-      const { multiUser: mu } = await getAgentContext();
-      await mu.pollDepositsOnce();
-    } catch {
-      /* non-critical — proceed with whatever balance we have */
-    }
-
     // Distributed lock so two concurrent /api/user/play calls (or a
-    // play + withdraw) can't interleave on the same user.
+    // play + withdraw) can't interleave on the same user. Acquired
+    // BEFORE the deposit poll so two racing plays can't both poll
+    // (and each see the deposit, leading to duplicate work) — only
+    // the lock holder runs the critical section.
     const lockToken = await acquireUserLock(user.userId);
     if (!lockToken) {
       return NextResponse.json(
@@ -84,7 +78,22 @@ export const POST = withStore(async (request: Request) => {
     }
 
     try {
+      // Single getAgentContext() call for the whole critical section.
+      // The previous version called it twice (once for the unlocked
+      // poll, once for play) — same cached context, but sloppy and
+      // forced ordering implications. One call, one binding.
       const { multiUser } = await getAgentContext();
+
+      // Pick up any pending deposits before playing — the user might
+      // have just funded and hit Play, and we want that balance to count.
+      // Non-critical: failure here just means the play runs against
+      // whatever balance was already credited.
+      try {
+        await multiUser.pollDepositsOnce();
+      } catch {
+        /* proceed with whatever balance we have */
+      }
+
       const session = await multiUser.playForUser(user.userId);
 
       // Refresh user so the response carries the post-session balance

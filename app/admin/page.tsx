@@ -6,6 +6,7 @@ import { useToast } from '../components/Toast';
 import { Modal } from '../components/Modal';
 import { ComicPanel } from '../components/ComicPanel';
 import { SkeletonBox } from '../components/SkeletonBox';
+import { clearSession } from '../lib/session';
 
 // ---------------------------------------------------------------------------
 // Types -- shaped to match actual API responses
@@ -334,8 +335,7 @@ export default function AdminPage() {
       });
 
       if (res.status === 401) {
-        localStorage.removeItem('lazylotto:sessionToken');
-        localStorage.removeItem('lazylotto:accountId');
+        clearSession();
         router.replace('/auth?expired=1');
         return new Promise(() => {});
       }
@@ -784,11 +784,7 @@ export default function AdminPage() {
               <button
                 type="button"
                 onClick={() => {
-                  localStorage.removeItem('lazylotto:sessionToken');
-                  localStorage.removeItem('lazylotto:accountId');
-                  localStorage.removeItem('lazylotto:tier');
-                  localStorage.removeItem('lazylotto:expiresAt');
-                  localStorage.removeItem('lazylotto:locked');
+                  clearSession();
                   router.replace('/auth');
                 }}
                 className="btn-primary-sm"

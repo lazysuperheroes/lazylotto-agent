@@ -10,6 +10,7 @@ import {
   persistCharacterIdx,
   randomCharacterIdx,
 } from '../lib/characters';
+import { disconnect } from '../lib/session';
 
 // ---------------------------------------------------------------------------
 // Inline SVG icons (16x16)
@@ -151,14 +152,10 @@ function UserContext() {
   }, []);
 
   const handleDisconnect = useCallback(() => {
-    localStorage.removeItem('lazylotto:sessionToken');
-    localStorage.removeItem('lazylotto:accountId');
-    localStorage.removeItem('lazylotto:tier');
-    localStorage.removeItem('lazylotto:expiresAt');
-    localStorage.removeItem('lazylotto:locked');
-    // router.replace removes /dashboard from the back history so an
-    // accidental disconnect can't be backed out into a stale page.
-    router.replace('/auth');
+    // Single source of truth — see app/lib/session.ts. Adding a new
+    // session key only requires updating SESSION_KEYS there, not
+    // every disconnect handler.
+    disconnect((path) => router.replace(path));
   }, [router]);
 
   const networkName =

@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useToast } from '../components/Toast';
 import { ComicPanel } from '../components/ComicPanel';
 import { SkeletonBox } from '../components/SkeletonBox';
+import { clearSession } from '../lib/session';
 
 // ---------------------------------------------------------------------------
 // /account — the "everything that's not the lottery" page
@@ -156,9 +157,7 @@ export default function AccountPage() {
       try {
         const res = await fetch('/api/user/status', { headers });
         if (res.status === 401) {
-          localStorage.removeItem('lazylotto:sessionToken');
-          localStorage.removeItem('lazylotto:accountId');
-          localStorage.removeItem('lazylotto:tier');
+          clearSession();
           router.replace('/auth?expired=1');
           return;
         }
@@ -224,9 +223,7 @@ export default function AccountPage() {
         body: JSON.stringify({ sessionToken }),
       });
       if (res.status === 401) {
-        localStorage.removeItem('lazylotto:sessionToken');
-        localStorage.removeItem('lazylotto:accountId');
-        localStorage.removeItem('lazylotto:tier');
+        clearSession();
         router.replace('/auth?expired=1');
         return;
       }
@@ -263,9 +260,7 @@ export default function AccountPage() {
           body: JSON.stringify({ strategy: newStrategy }),
         });
         if (res.status === 401) {
-          localStorage.removeItem('lazylotto:sessionToken');
-          localStorage.removeItem('lazylotto:accountId');
-          localStorage.removeItem('lazylotto:tier');
+          clearSession();
           router.replace('/auth?expired=1');
           return;
         }
@@ -318,11 +313,7 @@ export default function AccountPage() {
     } catch (err: unknown) {
       console.warn('Revoke request failed:', err);
     } finally {
-      localStorage.removeItem('lazylotto:sessionToken');
-      localStorage.removeItem('lazylotto:accountId');
-      localStorage.removeItem('lazylotto:tier');
-      localStorage.removeItem('lazylotto:expiresAt');
-      localStorage.removeItem('lazylotto:locked');
+      clearSession();
       router.replace('/auth');
     }
   }, [sessionToken, router]);
