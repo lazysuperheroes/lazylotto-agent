@@ -3,7 +3,7 @@ dist/
 .next/
 next-env.d.ts
 .env
-.agent-config.json
+.agent-config.*
 .custodial-data/
 .session-history/
 *.tsbuildinfo
