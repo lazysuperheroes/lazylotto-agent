@@ -14,15 +14,23 @@ import {
   PrizeNftCard,
   type PrizeNftRef,
 } from '../components/PrizeNftCard';
+import { CharacterMascot } from '../auth/CharacterMascot';
 import { useNftEnrichment } from '../components/useNftEnrichment';
 import {
   LSH_CHARACTERS,
   loadOrPickCharacterIdx,
   CHARACTER_CHANGE_EVENT,
+  buildNarrativeHeadline,
+  deriveAgentMood,
   type CharacterChangeDetail,
 } from '../lib/characters';
 import { useFreshness } from '../lib/useFreshness';
-import { clearSession, disconnect } from '../lib/session';
+import { clearSession } from '../lib/session';
+import {
+  bumpVisitCount,
+  markSpoken,
+  shouldMascotSpeak,
+} from '../lib/mascotRarity';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { HeroSkeleton, HistorySkeleton } from './skeletons';
 import { WithdrawModal } from './WithdrawModal';
@@ -168,9 +176,16 @@ export default function DashboardPage() {
     retry: retryEnrichment,
   } = useNftEnrichment(rawNftRefs);
 
-  // Set page title
+  // Set page title + bump the visit counter that gates mascot rarity.
+  // The counter drives shouldMascotSpeak() — early visits always show
+  // the speech bubble so new users meet the character, later visits
+  // go quiet until a 24h window elapses OR a functional moment
+  // (play-in-flight, kill switch, pending claim) makes the bubble
+  // load-bearing again. Bumped ONCE per mount, not per render.
+  const [visitCount, setVisitCount] = useState(0);
   useEffect(() => {
     document.title = 'Dashboard | LazyLotto Agent';
+    setVisitCount(bumpVisitCount());
   }, []);
 
   // Listen for mascot reroll from the sidebar. Same-tab CustomEvent —
@@ -417,6 +432,72 @@ export default function DashboardPage() {
       })();
     }
   }, [loadStatus, router]);
+
+  // ── Quiet background refresh ────────────────────────────────
+  //
+  // The agent is (or will be) running autonomously on a schedule,
+  // but the dashboard is a static snapshot — the user has to click
+  // refresh to see updated data. This interval silently refetches
+  // status + history every 60 seconds so the hero's "last run"
+  // freshness ribbon and activity summary update without the user
+  // having to do anything. The critique called this "smooth the
+  // real-time hero" — it's not truly real-time (no websocket, no
+  // server-push), but 60s tick cadence is enough for the agent
+  // to FEEL alive rather than frozen.
+  //
+  // Runs only when the user is authenticated, has a registered
+  // profile, and hasn't manually triggered a recent refresh (we
+  // rely on the existing loadStatus + /history fetch paths which
+  // update statusLoadedAt + historyLoadedAt on success).
+  //
+  // Only fires when document.visibilityState is 'visible' so we
+  // don't hammer the API for users who left the tab open in the
+  // background. Visibility change events re-trigger an immediate
+  // refresh so the data is fresh the moment the user returns.
+  useEffect(() => {
+    if (!sessionToken || notRegistered) return;
+    const REFRESH_INTERVAL_MS = 60_000;
+
+    const quietRefresh = async () => {
+      if (document.visibilityState !== 'visible') return;
+      const token = localStorage.getItem('lazylotto:sessionToken');
+      if (!token) return;
+      const headers = { Authorization: `Bearer ${token}` };
+      // Fire both in parallel — they're independent and both land
+      // in their own state slots. Silent on failure — this is a
+      // best-effort background poll, not a critical path.
+      try {
+        await loadStatus(headers);
+      } catch {
+        /* silent */
+      }
+      try {
+        const res = await fetch('/api/user/history', { headers });
+        if (res.ok) {
+          const data = (await res.json()) as { sessions?: PlaySession[] };
+          setSessions(data.sessions ?? []);
+          setHistoryLoadedAt(Date.now());
+        }
+      } catch {
+        /* silent */
+      }
+    };
+
+    const interval = window.setInterval(quietRefresh, REFRESH_INTERVAL_MS);
+    // Also refresh when the tab becomes visible again after being
+    // hidden — users returning from another tab see fresh data
+    // immediately instead of waiting for the next interval tick.
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void quietRefresh();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [sessionToken, notRegistered, loadStatus]);
 
   const handleCopy = useCallback(
     (text: string, label?: string) => {
@@ -788,18 +869,26 @@ export default function DashboardPage() {
 
   // --- No auth token ---
   if (!sessionToken) {
+    // The previous version of this state was a generic muted "Sign in
+    // required / Welcome back / Authenticate with your Hedera wallet"
+    // card — indistinguishable from every crypto wallet auth gate. Now
+    // the persistent mascot sits front and centre with a character-
+    // voiced prompt, picked from the same roster the user will see
+    // on /auth and everywhere else. The first-time visitor meets the
+    // brand before they're even signed in.
+    const character = LSH_CHARACTERS[characterIdx] ?? LSH_CHARACTERS[0]!;
     return (
       <div className="flex flex-1 items-center justify-center px-4 py-12">
         <div className="w-full max-w-md">
           <ComicPanel label="LOCKED" tone="muted" halftone="none">
-            <div className="p-8 text-center">
-              <p className="label-caps-lg mb-3">Sign in required</p>
-              <h1 className="display-md mb-3 text-foreground">
-                Welcome back
-              </h1>
-              <p className="type-body mb-6 text-muted">
-                Authenticate with your Hedera wallet to open the dashboard.
-              </p>
+            <div className="flex flex-col items-center gap-5 p-8 text-center">
+              <CharacterMascot
+                key={character.name}
+                character={character}
+                size="sm"
+                line="You're not signed in. Tap Sign In and I'll start the engine."
+              />
+              <h1 className="display-md text-foreground">Welcome back</h1>
               <a
                 href="/auth"
                 className="inline-block border-2 border-brand bg-brand px-6 py-3 font-pixel text-[10px] uppercase tracking-wider text-background panel-shadow-sm transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-[6px_6px_0_0_var(--color-ink)]"
@@ -898,18 +987,39 @@ export default function DashboardPage() {
   // switch overrides everything.
   const isFirstRun =
     !!status && sessions.length === 0 && !hasPlayableBalance;
-  // Pick a character line deterministically per session so the same
-  // page refresh shows the same quip (but different sessions rotate).
-  // The state-machine logic lives in pickCharacterLine() above this
-  // component so the render path stays flat.
-  const characterLine = pickCharacterLine(character, {
-    status,
-    playLoading,
-    agentClosed,
+  const hasPendingClaim =
+    !!prizeStatus && prizeStatus.available && prizeStatus.pending.count > 0;
+
+  // Mascot rarity: the character is mostly silent, speaking only at
+  // MEANINGFUL moments. The narrative headline absorbs the functional
+  // states (play-in-flight, agent-closed, pending-claim) so the bubble
+  // is now reserved strictly for first-run teaching + the 24h
+  // quiet-window welcome-back. The critique flagged redundancy when
+  // both the headline and the bubble carried the same information.
+  const mascotShouldSpeak = shouldMascotSpeak({
     isFirstRun,
-    hasPlayableBalance,
-    sessionsLength: sessions.length,
+    visitCount,
   });
+  const characterLine = mascotShouldSpeak
+    ? pickCharacterLine(character, {
+        status,
+        playLoading,
+        agentClosed,
+        isFirstRun,
+        hasPlayableBalance,
+        sessionsLength: sessions.length,
+      })
+    : '';
+
+  // Stamp the speech moment once the bubble actually renders — gated
+  // on the line being non-empty so a no-speak render doesn't burn the
+  // quiet-window budget. Runs after paint, not during render, so a
+  // unmount before paint doesn't consume the budget either.
+  useEffect(() => {
+    if (characterLine) {
+      markSpoken();
+    }
+  }, [characterLine]);
 
   // ── Play progress phase derivation ─────────────────────────
   // The /api/user/play POST takes 5-15s typically (deposit poll +
@@ -948,6 +1058,28 @@ export default function DashboardPage() {
   // Sessions to display (capped at 10 unless expanded)
   const displayedSessions = showAll ? sessions : sessions.slice(0, 10);
 
+  // ── Latest session + freshness ───────────────────────────────
+  //
+  // The latest session feeds the narrative headline builder, which
+  // replaced the old "last ran 2h ago" literal + activity summary
+  // with a character-voiced one-liner. The headline no longer
+  // prefixes a timestamp — the freshness ribbon up top carries
+  // "updated 3s ago" and the relative time of the last run is
+  // communicated through the character's phrasing instead.
+  //
+  // getPlaySessionsForUser returns oldest→newest; the history API
+  // reverses for us, so sessions[0] is the most recent session.
+  const latestSession = sessions[0];
+  // Relative time of the last run — shown in the freshness ribbon
+  // next to "updated 3s ago" so users can see both the agent's
+  // activity cadence AND when the dashboard was last refreshed.
+  const lastPlayedAtMs = status?.lastPlayedAt
+    ? new Date(status.lastPlayedAt).getTime()
+    : null;
+  const lastRunFreshness = useFreshness(
+    Number.isFinite(lastPlayedAtMs) ? lastPlayedAtMs : null,
+  );
+
   // --- Dashboard ---
   return (
     <div className="relative w-full px-4 py-10 sm:px-6 lg:px-10">
@@ -956,11 +1088,13 @@ export default function DashboardPage() {
           Renders the GoldConfetti rain plus a centred ActionBurst
           stamped with the win label ("WIN!", "BIG WIN!", "JACKPOT!").
           Auto-clears after 3.5s via the timeout in handlePlay.
-          Sits at z-30 so it floats over the hero panel but below
-          the toast container (z-50).  */}
+          Sits at z-[60] — ABOVE the toast container's z-50 — so
+          the celebration owns the moment and can't be occluded by
+          a simultaneous toast. The toast still announces the win
+          for screen readers via its own aria-live region. */}
       {winCelebration && (
         <div
-          className="pointer-events-none fixed inset-0 z-30 flex items-center justify-center"
+          className="pointer-events-none fixed inset-0 z-[60] flex items-center justify-center"
           role="status"
           aria-live="polite"
         >
@@ -1009,22 +1143,23 @@ export default function DashboardPage() {
               <span aria-hidden="true">→</span>
             </Link>
           )}
-          {/* Account chip — shows the user's Hedera account ID and
-              acts as the disconnect button. Standard dApp convention:
-              your address is in the corner, click to sign out. No
-              confirm dialog: signing back in is one click and the
-              native window.confirm() is jarring against the comic
-              vocabulary. The Sidebar Disconnect button uses the
-              identical flow. */}
+          {/* Account identity chip — READ-ONLY greeting, no longer a
+              disconnect button. Previously the header had a
+              clickable account chip that duplicated the Sidebar's
+              Disconnect button: same action in two places, different
+              affordances on mobile vs desktop, exactly the kind of
+              drift the gap report flagged. The Sidebar is now the
+              canonical disconnect site (persistent across every
+              page), so the header chip becomes a simple greeting
+              with no action. Hidden on mobile where the sidebar is
+              the dominant identity surface anyway. */}
           {status?.hederaAccountId && (
-            <button
-              type="button"
-              onClick={() => disconnect((path) => router.replace(path))}
-              aria-label={`Disconnect ${status.hederaAccountId}`}
-              className="group hidden min-h-[44px] items-center gap-2 border-2 border-secondary bg-[var(--color-panel)] px-3 py-2 transition-colors hover:border-destructive sm:inline-flex"
+            <div
+              className="hidden items-center gap-2 border-2 border-secondary bg-[var(--color-panel)] px-3 py-2 sm:inline-flex"
+              aria-label={`Signed in as ${status.hederaAccountId}`}
             >
               <span
-                className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-success transition-colors group-hover:bg-destructive"
+                className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-success"
                 aria-hidden="true"
               />
               <code className="font-mono text-xs text-foreground">
@@ -1032,13 +1167,7 @@ export default function DashboardPage() {
                   ? `${status.hederaAccountId.slice(0, 7)}…${status.hederaAccountId.slice(-4)}`
                   : status.hederaAccountId}
               </code>
-              <span
-                className="text-xs text-muted transition-colors group-hover:text-destructive"
-                aria-hidden="true"
-              >
-                ↗
-              </span>
-            </button>
+            </div>
           )}
         </header>
 
@@ -1151,20 +1280,31 @@ export default function DashboardPage() {
                     placement. Two name labels was redundant. */}
               </div>
 
-              {/* Hero content */}
+              {/* Hero content — narrative-first hierarchy.
+                  Old: display-xl number owned the eye and the speech
+                  bubble floated decoratively below.
+                  New: the ACTIVITY NARRATIVE is the hero focal moment.
+                  Headline reads "{character} last ran {relative}" in
+                  heading-1 scale, followed by a one-line session
+                  summary. The balance becomes a supporting detail
+                  inline below the headline, not a display-xl hero
+                  number. This honours the watching-first framing:
+                  the user is here to see what the agent did, not
+                  stare at a balance. */}
               <div className="min-w-0">
-                {/* Eyebrow row — single label + the optional checking-
-                    deposits pulse. Strategy and rake percent moved into
-                    the bottom metadata strip; they're reference info,
-                    not hero-row context. The fewer chips above the
-                    display number, the faster the eye reaches the pot. */}
+                {/* Eyebrow row — deposits-checking pulse on the left
+                    (only when active), freshness ribbon on the right.
+                    The "Your agent" label was redundant with the
+                    narrative headline that immediately follows. When
+                    deposits-checking is inactive AND freshness has no
+                    data, the whole row collapses via flex-wrap to zero
+                    height. */}
                 <div
-                  className="mb-5 flex flex-wrap items-center gap-x-5 gap-y-2"
+                  className="mb-5 flex flex-wrap items-center justify-between gap-x-5 gap-y-2"
                   aria-live="polite"
                   aria-atomic="true"
                 >
-                  <span className="label-caps-lg">Your agent</span>
-                  {depositsChecking && (
+                  {depositsChecking ? (
                     <span className="label-caps-brand inline-flex items-center gap-1.5">
                       <span
                         className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-brand"
@@ -1172,100 +1312,184 @@ export default function DashboardPage() {
                       />
                       Checking deposits
                     </span>
+                  ) : (
+                    <span />
                   )}
-                  {/* Freshness ribbon — clickable refresh that bypasses
-                      the 30s throttle on the mount-time auto-check.
-                      Shows a relative timestamp that ticks every 5s so
-                      users always know how stale their balance is. */}
-                  {!depositsChecking && statusFreshness && (
+                  {/* Freshness ribbon right-aligned, carrying BOTH
+                      the dashboard refresh time AND the agent's
+                      last-run relative time when available. The
+                      refresh button expands the tap target to the
+                      WCAG 44×44 minimum via invisible -m-2 p-2
+                      padding so mobile users can hit it easily. */}
+                  {!depositsChecking && (statusFreshness || lastRunFreshness) && (
                     <button
                       type="button"
                       onClick={() => void handleCheckDeposits()}
-                      className="label-caps text-muted/70 underline-offset-2 transition-colors hover:text-brand hover:underline"
+                      className="label-caps -m-2 p-2 text-muted/70 underline-offset-2 transition-colors hover:text-brand hover:underline"
                       title="Click to re-check deposits and refresh balance"
                     >
-                      updated {statusFreshness} · refresh
+                      {lastRunFreshness && (
+                        <span className="mr-3">last run {lastRunFreshness}</span>
+                      )}
+                      {statusFreshness && <>updated {statusFreshness} · refresh</>}
                     </button>
                   )}
                 </div>
 
-                {/* Display number — the hero moment. Always renders so
-                    the hero feels committed instead of broken when the
-                    user has no balance yet. Uses the formal .display-xl
-                    scale utility — the ONE place in the app that uses
-                    this size, no accidental duplication elsewhere.
-                    "Pot" label stays the same in both states (instead of
-                    "Empty" / "Pot") so the empty state reads as "the pot
-                    is currently zero" rather than as an accusation. */}
+                {/* ═══════════════════════════════════════════════
+                    Narrative headline — THE hero focal moment.
+                    ═══════════════════════════════════════════════
+                    Built via buildNarrativeHeadline() from the
+                    character's voice block + current state + mood
+                    derived from the last 3 sessions. Each character
+                    renders a state in their own vocabulary ("Gordo
+                    bagged 150 HBAR — go grab it on the dApp, boss"
+                    vs "Nobody quietly handled 5 pools"). The
+                    freshness ribbon up top carries the absolute
+                    timestamp so the headline can stay in voice
+                    without prefixing a literal "2h ago."
+
+                    The headline string is rendered with the character
+                    name wrapped in a brand-gold span — we parse the
+                    builder output by splitting on the known name
+                    prefix so the visual treatment stays at the JSX
+                    layer while the builder stays pure text. */}
                 {(() => {
-                  const displayAvailable = primaryBalanceEntry?.[1].available ?? 0;
+                  if (!status) {
+                    return (
+                      <h1 className="heading-1 mb-3 text-muted" aria-live="polite">
+                        Loading&hellip;
+                      </h1>
+                    );
+                  }
+                  // Figure out which state slot to feed the builder.
+                  let headlineState:
+                    | 'first-run'
+                    | 'ready'
+                    | 'playing'
+                    | 'closed'
+                    | 'has-history';
+                  if (playLoading) headlineState = 'playing';
+                  else if (agentClosed) headlineState = 'closed';
+                  else if (isFirstRun) headlineState = 'first-run';
+                  // Edge case: lastPlayedAt is set but the sessions
+                  // array hasn't loaded yet (rare race during a fresh
+                  // history fetch). Treat as 'ready' so the headline
+                  // doesn't fall into has-history with no data — the
+                  // headline just says "X is loaded and ready" until
+                  // history lands and the state transitions correctly.
+                  else if (hasPlayableBalance && sessions.length === 0)
+                    headlineState = 'ready';
+                  else headlineState = 'has-history';
+
+                  const mood = deriveAgentMood(sessions);
+                  const last = latestSession;
+                  const lastOutcome: 'win' | 'loss' | 'no-play' | undefined = last
+                    ? last.totalWins > 0
+                      ? 'win'
+                      : last.totalSpent > 0
+                        ? 'loss'
+                        : 'no-play'
+                    : undefined;
+
+                  // Primary won token — pick the first non-zero entry from
+                  // prizesByToken so HBAR + LAZY wins both render correctly.
+                  let lastWonToken = 'HBAR';
+                  let lastWonAmount = last?.totalPrizeValue ?? 0;
+                  if (last?.prizesByToken) {
+                    for (const [tok, amt] of Object.entries(last.prizesByToken)) {
+                      if (amt > 0) {
+                        lastWonToken = tok.toUpperCase();
+                        lastWonAmount = amt;
+                        break;
+                      }
+                    }
+                  }
+
+                  const headlineText = buildNarrativeHeadline({
+                    character,
+                    state: headlineState,
+                    lastOutcome,
+                    mood,
+                    lastWonAmount,
+                    lastWonToken,
+                    lastSpentAmount: last?.totalSpent,
+                    lastPoolsPlayed: last?.poolsPlayed,
+                    hasPendingClaim,
+                  });
+
+                  // Wrap the character's name in brand-gold. The name is
+                  // always at the start of the string because every
+                  // template begins with ${name}.
+                  const namePrefix = character.name;
+                  const rest = headlineText.startsWith(namePrefix)
+                    ? headlineText.slice(namePrefix.length)
+                    : ` ${headlineText}`;
+
+                  return (
+                    <h1
+                      className="heading-1 mb-3 text-foreground"
+                      aria-live="polite"
+                    >
+                      <span className="text-brand">{namePrefix}</span>
+                      {rest}
+                    </h1>
+                  );
+                })()}
+
+                {/* Supporting balance line — demoted from display-xl
+                    but with a thin brand-gold left border that acts as
+                    a visual anchor. Eye can find the balance on a
+                    second-pass scan without the line shouting. The
+                    "Available" prefix is now foreground-tinted (not
+                    muted) so it doesn't read as caption-level info —
+                    it's a label, not a footnote. */}
+                {(() => {
                   const displayReserved = primaryBalanceEntry?.[1].reserved ?? 0;
                   const displayToken = primaryBalanceEntry
                     ? tokenSymbol(primaryBalanceEntry[0])
                     : 'HBAR';
-                  const isEmpty = displayAvailable === 0 && displayReserved === 0;
+                  // Collected token parts for the one-line format:
+                  // ["285 HBAR", "100 LAZY"] → "285 HBAR · 100 LAZY"
+                  const tokenParts: string[] = [];
+                  if (primaryBalanceEntry) {
+                    tokenParts.push(
+                      `${formatAmount(primaryBalanceEntry[1].available)} ${displayToken}`,
+                    );
+                  } else {
+                    tokenParts.push(`0 HBAR`);
+                  }
+                  for (const [k, e] of secondaryBalanceEntries) {
+                    if (e.available > 0) {
+                      tokenParts.push(`${formatAmount(e.available)} ${tokenSymbol(k)}`);
+                    }
+                  }
                   return (
-                    <div className="mb-2">
-                      <p className="label-caps-lg mb-2">Pot</p>
-                      <p
-                        className={`display-xl ${
-                          isEmpty ? 'text-muted/70' : 'text-brand'
-                        }`}
-                        aria-label={
-                          isEmpty
-                            ? `Pot is currently empty`
-                            : `Primary balance ${formatAmount(displayAvailable)} ${displayToken}`
-                        }
-                      >
-                        {formatAmount(displayAvailable)}
-                      </p>
-                      <p
-                        className={`heading-1 mt-2 ${
-                          isEmpty ? 'text-muted/70' : 'text-foreground'
-                        }`}
-                      >
-                        {displayToken}
-                      </p>
-                      {/* Reserved-amount annotation moved to its own
-                          line with an "(in play)" label so users don't
-                          read it as part of the token symbol. Only
-                          shown when something's actually reserved. */}
+                    <p
+                      className="num-tabular type-body-lg mb-5 border-l-2 border-brand/40 pl-3 text-brand"
+                      aria-label={`Available balance: ${tokenParts.join(', ')}`}
+                    >
+                      <span className="label-caps mr-2 text-foreground">Available</span>
+                      {tokenParts.join(' · ')}
                       {displayReserved > 0 && (
-                        <p className="type-caption num-tabular mt-2">
-                          {formatAmount(displayReserved)} {displayToken}{' '}
-                          <span className="label-caps ml-1">in play</span>
-                        </p>
+                        <span className="ml-3 type-caption">
+                          ({formatAmount(displayReserved)} {displayToken} in play)
+                        </span>
                       )}
-                    </div>
+                    </p>
                   );
                 })()}
 
-                {/* Secondary token pills — only shown when multi-token */}
-                {secondaryBalanceEntries.length > 0 && (
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {secondaryBalanceEntries.map(([tokenKey, entry]) => (
-                      <span
-                        key={tokenKey}
-                        className="label-caps border border-brand/30 px-2.5 py-1.5 text-muted"
-                      >
-                        <span className="text-foreground num-tabular">
-                          {formatAmount(entry.available)}
-                        </span>{' '}
-                        {tokenSymbol(tokenKey)}
-                      </span>
-                    ))}
-                  </div>
-                )}
-
-                {/* Character quip — comic-book speech bubble with a
-                    left-pointing tail directed at the mascot. Speech
-                    text is muted (overheard / quoted feel) so it sits
-                    quietly under the display number rather than
-                    competing with it for attention. The cite line
-                    keeps the brand gold to mark the speaker. */}
+                {/* Character speech bubble — gated by mascot rarity.
+                    Only renders at qualifying moments (play in flight,
+                    agent closed, first run, pending claim, early
+                    visits 1-3, or the 24h quiet window has elapsed).
+                    The headline above already carries the character's
+                    voice; the bubble is reserved for SPECIAL moments
+                    when the character has something new to say. */}
                 {characterLine && (
-                  <SpeechBubble tailPosition="left" className="prose-width mt-6 ml-2">
-                    <p className="type-body italic text-muted">
+                  <SpeechBubble tailPosition="left" className="prose-width mb-6 ml-2">
+                    <p className="type-body text-muted">
                       {characterLine}
                     </p>
                     <p className="label-caps-brand mt-3">
@@ -1274,10 +1498,36 @@ export default function DashboardPage() {
                   </SpeechBubble>
                 )}
 
-                {/* ── Primary action: PLAY ─────────────────────────── */}
+                {/* ── Nudge the agent — watching-first framing ───────
+                    The Play action is NOT the primary path (the agent
+                    runs autonomously on a schedule, or via MCP calls
+                    from Claude). These buttons are escape hatches for
+                    users who want to nudge the agent manually — most
+                    commonly mobile users without a Claude subscription
+                    who don't have an MCP endpoint to talk to.
+                    "Nudge the agent" frames the interaction gently —
+                    the character is doing its thing, you're giving
+                    it a poke. Previous "MANUAL OVERRIDES" phrasing
+                    was industrial-control-panel cold; "Nudge" matches
+                    the character-voiced hero above.
+
+                    Both buttons carry inline SVG icons (refresh + arrow)
+                    so they're visually distinctive from the generic
+                    two-ghost-buttons pattern. Run now also hosts the
+                    play progress as a background fill during a session —
+                    the button IS the progress indicator. */}
                 {hasPlayableBalance ? (
-                  <div className="mt-6">
-                    <div className="relative">
+                  <div className="mt-6 border-t border-secondary/40 pt-5">
+                    {/* Nudge label — plain label-caps (muted), not
+                        label-caps-brand, to visually differentiate
+                        from the first-run "Get started" label which
+                        is brand-gold. The state transition from
+                        funding → playing is subtle but visible:
+                        first-run shouts the Get Started heading in
+                        gold, funded state whispers Nudge in muted
+                        caps because the action is now optional. */}
+                    <p className="label-caps mb-3">Nudge the agent</p>
+                    <div className="flex flex-wrap gap-3">
                       <button
                         type="button"
                         onClick={handlePlay}
@@ -1290,40 +1540,85 @@ export default function DashboardPage() {
                               ? 'play-progress-status'
                               : undefined
                         }
-                        className="btn-primary"
+                        className="btn-ghost-sm-brand relative overflow-hidden panel-shadow-sm"
                         title={
                           agentClosed
                             ? 'Agent is temporarily closed to new plays'
-                            : 'Run a play session now'
+                            : 'Nudge the agent to run a session now'
                         }
                       >
-                        {playLoading && currentPlayPhase
-                          ? currentPlayPhase.label
-                          : 'Play'}
-                        {/* Shimmer overlay — pure CSS sweep across the
-                            button surface during play. Only renders when
-                            actively playing so the static state stays calm. */}
+                        {/* Progress fill — absolute, z-0, behind the
+                            label. During a play, grows from 5% to 100%
+                            via the same .play-progress-fill keyframe
+                            that used to animate the bar below. After
+                            12s data-overflow="true" swaps to the
+                            continuous sweep. The button IS the progress. */}
                         {playLoading && (
                           <span
-                            className="play-shimmer"
+                            className="play-progress-bar absolute inset-0 h-full border-0"
+                            data-overflow={playElapsedMs > 12000 ? 'true' : undefined}
                             aria-hidden="true"
-                          />
+                          >
+                            <span className="play-progress-fill" />
+                          </span>
                         )}
+                        {/* SVG refresh icon — distinctive, non-generic */}
+                        {!playLoading && (
+                          <svg
+                            width="12"
+                            height="12"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            className="relative z-10"
+                            aria-hidden="true"
+                          >
+                            <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
+                            <polyline points="13.5 2 13.5 5 10.5 5" />
+                          </svg>
+                        )}
+                        <span className="relative z-10">
+                          {playLoading && currentPlayPhase
+                            ? currentPlayPhase.label
+                            : 'Run now'}
+                        </span>
                       </button>
-                      {/* Progress bar — a thin gold fill below the button
-                          that animates from 5% to 100% over an estimated
-                          12s, then sticks at 100% if the play takes
-                          longer. Visual motion + concrete time signal. */}
-                      {playLoading && (
-                        <div className="play-progress-bar" aria-hidden="true">
-                          <span className="play-progress-fill" />
-                        </div>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => setWithdrawOpen(true)}
+                        disabled={playLoading}
+                        className="btn-ghost-sm panel-shadow-sm"
+                      >
+                        <svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 16 16"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <line x1="3" y1="8" x2="13" y2="8" />
+                          <polyline points="9 4 13 8 9 12" />
+                        </svg>
+                        Cash out
+                      </button>
                     </div>
-                    {playLoading ? (
+
+                    {/* Phase status — live announcement of what the
+                        agent is doing. Kept as a screen-reader
+                        status line even though the button now carries
+                        the visual progress. Matches aria-describedby
+                        on the Run now button. */}
+                    {playLoading && (
                       <p
                         id="play-progress-status"
-                        className="mt-3 text-center font-pixel text-[9px] uppercase tracking-wider text-brand"
+                        className="mt-3 font-pixel text-[10px] uppercase tracking-wider text-brand"
                         role="status"
                         aria-live="polite"
                         aria-atomic="true"
@@ -1333,148 +1628,149 @@ export default function DashboardPage() {
                           · {playElapsedSec}s elapsed
                         </span>
                       </p>
-                    ) : (
-                      <p className="mt-3 text-center font-pixel text-[9px] uppercase tracking-wider text-muted">
-                        Let the agent work. You can go back to doing nothing.
-                      </p>
                     )}
-                    <div className="mt-4 flex justify-center">
-                      <button
-                        type="button"
-                        onClick={() => setWithdrawOpen(true)}
-                        disabled={playLoading}
-                        className="label-caps transition-colors hover:text-brand disabled:opacity-50"
-                      >
-                        ← Or withdraw funds
-                      </button>
-                    </div>
                   </div>
                 ) : (
-                  // Zero-balance state — the 3-step ribbon teaches the
-                  // loop. Step 01 (Fund) is both active AND clickable —
-                  // it opens the TopUpModal directly. Steps 02 + 03 are
-                  // disabled previews so users see what's coming. No
-                  // separate "↓ Start by funding below" arrow because
-                  // the active button IS the call to action; an arrow
-                  // pointing at a section that no longer exists would
-                  // be a left-over teaching layer. One mechanism, not
-                  // four. */}
-                  <div className="mt-6 border-t-2 border-brand/30 pt-5">
-                    <p className="label-caps-brand mb-3">The loop</p>
-                    <ol className="flex items-center gap-1 sm:gap-3">
-                      {[
-                        {
-                          n: '01',
-                          label: 'Fund',
-                          active: true,
-                          onClick: () => setTopUpOpen(true),
-                        },
-                        { n: '02', label: 'Play', active: false },
-                        { n: '03', label: 'Withdraw', active: false },
-                      ].map((step, i, arr) => (
-                        <li
-                          key={step.n}
-                          className="flex flex-1 items-center gap-1 sm:gap-3"
-                        >
-                          {step.active ? (
+                  // First-run state — character-driven teaching.
+                  //
+                  // The previous version used a three-step numbered
+                  // ribbon (Fund → Play → Withdraw) which was
+                  // structurally identical to every fintech
+                  // onboarding stepper and didn't lean on the
+                  // character system at all. Now the mascot is the
+                  // primary teacher: the speech bubble above the
+                  // hero headline carries the character's introLine,
+                  // and this slot contains the ONE concrete action
+                  // the user needs to take — send HBAR with their
+                  // memo to the agent wallet.
+                  //
+                  // The deposit-detection throttle in the mount
+                  // effect will auto-check every 30s, and the "Check
+                  // for deposits" button inside TopUpModal lets
+                  // users force an immediate refresh. When a deposit
+                  // lands, the hero transitions to the funded state
+                  // automatically on the next status refresh.
+                  <div className="mt-6 border-t border-secondary/40 pt-5">
+                    <p className="label-caps-brand mb-3">Get started</p>
+                    <div className="space-y-4">
+                      {/* Concrete inline action block — agent wallet
+                          + deposit memo + copy buttons. Same data as
+                          TopUpModal but rendered inline so first-run
+                          users see the action AT the hero instead of
+                          behind a modal. TopUpModal stays available
+                          via the Top up link in the details strip
+                          and the "Open top-up panel" button below. */}
+                      <div className="border-2 border-brand/40 bg-brand/5 p-4">
+                        <p className="label-caps mb-2 text-brand">
+                          Send HBAR to this wallet
+                        </p>
+                        <div className="mb-3 flex items-center gap-2">
+                          <code className="flex-1 break-all font-mono text-sm text-foreground">
+                            {agentWallet || '—'}
+                          </code>
+                          {agentWallet && (
                             <button
                               type="button"
-                              onClick={step.onClick}
-                              aria-current="step"
-                              aria-label={`Step ${step.n}: ${step.label} — open the top-up panel`}
-                              className="group flex min-h-[44px] min-w-0 flex-1 items-center gap-2 border-2 border-brand bg-brand/10 px-3 py-2 panel-shadow-sm transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:bg-brand/20 hover:shadow-[6px_6px_0_0_var(--color-ink)]"
+                              onClick={() => handleCopy(agentWallet, 'Agent wallet')}
+                              className="shrink-0 border border-secondary px-2 py-1 label-caps transition-colors hover:border-brand hover:text-brand"
                             >
-                              <span className="font-pixel text-[9px] text-brand">
-                                {step.n}
-                              </span>
-                              <span className="font-heading text-sm font-extrabold uppercase tracking-wider text-foreground">
-                                {step.label}
-                              </span>
-                              <span
-                                className="ml-auto font-pixel text-[10px] text-brand transition-transform group-hover:translate-x-0.5"
-                                aria-hidden="true"
-                              >
-                                →
-                              </span>
+                              Copy
                             </button>
-                          ) : (
-                            <div
-                              aria-disabled="true"
-                              className="flex min-h-[44px] min-w-0 flex-1 items-center gap-2 border-2 border-dashed border-secondary bg-[var(--color-panel)] px-3 py-2"
-                            >
-                              <span className="font-pixel text-[9px] text-muted/60">
-                                {step.n}
-                              </span>
-                              <span className="font-heading text-sm font-extrabold uppercase tracking-wider text-muted">
-                                {step.label}
-                              </span>
-                            </div>
                           )}
-                          {i < arr.length - 1 && (
-                            <span
-                              className="hidden font-pixel text-[10px] text-brand/40 sm:inline"
-                              aria-hidden="true"
+                        </div>
+                        <p className="label-caps mb-2 text-brand">
+                          With this memo
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <code className="flex-1 break-all font-mono text-sm text-foreground">
+                            {status?.depositMemo || '—'}
+                          </code>
+                          {status?.depositMemo && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleCopy(status.depositMemo, 'Deposit memo')
+                              }
+                              className="shrink-0 border border-secondary px-2 py-1 label-caps transition-colors hover:border-brand hover:text-brand"
                             >
-                              ▸
-                            </span>
+                              Copy
+                            </button>
                           )}
-                        </li>
-                      ))}
-                    </ol>
+                        </div>
+                      </div>
+
+                      <p className="type-caption">
+                        The memo is how the agent matches the deposit to
+                        your account. Deposits are usually credited within
+                        10 seconds — you can force a re-check anytime from
+                        the freshness ribbon above.{' '}
+                        <button
+                          type="button"
+                          onClick={() => setTopUpOpen(true)}
+                          className="text-brand underline-offset-2 hover:underline"
+                        >
+                          Open the full top-up panel
+                        </button>{' '}
+                        for wallet-specific instructions.
+                      </p>
+
+                      {/* What happens after — mental model breadcrumb.
+                          The old 3-step stepper taught "Fund → Play →
+                          Withdraw" at a glance. Replacing it with just
+                          the Get Started block lost that structural
+                          teaching. This line restores it in narrative
+                          form: the user learns the loop from one
+                          sentence instead of a numbered ribbon. */}
+                      <p className="border-t border-secondary/40 pt-3 type-caption text-muted">
+                        <span className="label-caps mr-2">What&apos;s next</span>
+                        Once funded, the agent starts playing on its own
+                        schedule. Wins land in the Pending Claim panel
+                        below for you to collect on the dApp. You can
+                        cash out your balance or manually nudge a play
+                        anytime.
+                      </p>
+                    </div>
                   </div>
                 )}
               </div>
             </div>
 
-            {/* Metadata strip — runs across the bottom of the panel.
-                Holds the reference info (strategy, rake percent,
-                deposited, rake paid) plus the inline "Top up" action
-                so users can add funds without leaving the page. The
-                old Fund Your Account collapsible is gone — its
-                content lives in TopUpModal now, which the link below
-                opens. */}
-            {status && hasPlayableBalance && (
-              <div className="border-t-2 border-brand/30 px-6 py-4 sm:px-8">
-                <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-                  <div>
-                    <p className="label-caps mb-0.5">Strategy</p>
-                    <p className="text-sm text-foreground">
-                      {status.strategyName}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="label-caps mb-0.5">Rake</p>
-                    <p className="text-sm text-foreground num-tabular">
-                      {status.rakePercent}%
-                    </p>
-                  </div>
-                  <div>
-                    <p className="label-caps mb-0.5">Deposited</p>
-                    <p className="text-sm text-foreground num-tabular">
-                      {totalDeposited}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="label-caps mb-0.5">Rake paid</p>
-                    <p className="text-sm text-foreground num-tabular">
-                      {totalRakePaid}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setTopUpOpen(true)}
-                    className="ml-auto inline-flex items-center gap-2 border-2 border-brand bg-brand/10 px-4 py-2 font-pixel text-[9px] uppercase tracking-wider text-brand transition-colors hover:bg-brand hover:text-background"
-                  >
-                    Top up <span aria-hidden="true">+</span>
-                  </button>
-                </div>
-                <p className="mt-3 text-[11px] italic text-muted">
-                  We take a rake to cover all gas and infrastructure costs.
-                </p>
-              </div>
-            )}
           </ComicPanel>
           </ErrorBoundary>
+        )}
+
+        {/* ---- Agent details — inline narrative line ─────────
+            Previously this was a four-metric grid (Strategy / Rake
+            / Deposited / Rake paid) that had become the exact
+            "SaaS metrics bar" anti-pattern I'd just removed from
+            the hero. Collapsed to an inline caption-style line
+            that reads like a footnote rather than a dashboard
+            row. Same information, zero metric-grid shape.
+            The Top up link is inline too, not a chip. */}
+        {status && hasPlayableBalance && (
+          <div className="mb-12 border-t border-secondary/40 pt-4 sm:px-2">
+            <p className="type-caption num-tabular leading-relaxed">
+              <span className="label-caps mr-2">Agent</span>
+              <span className="text-foreground">{status.strategyName}</span>
+              {' strategy · '}
+              <span className="text-foreground">{status.rakePercent}%</span>
+              {' rake · '}
+              <span className="text-foreground">{totalDeposited}</span>
+              {' deposited lifetime · '}
+              <span className="text-foreground">{totalRakePaid}</span>
+              {' paid in rake · '}
+              <button
+                type="button"
+                onClick={() => setTopUpOpen(true)}
+                className="text-brand underline-offset-2 transition-colors hover:text-foreground hover:underline"
+              >
+                Top up ↗
+              </button>
+            </p>
+            <p className="mt-1 type-caption text-muted">
+              Rake covers gas and infrastructure. The agent plays autonomously on a schedule — you can also nudge it manually from the hero above.
+            </p>
+          </div>
         )}
 
         {/* Inline hero error — shown only when /api/user/status failed
@@ -1645,7 +1941,18 @@ export default function DashboardPage() {
                textured background would compete with the rows. The
                "RECENT PLAYS" corner sticker echoes the ISSUE #001
                label on the hero so the two panels feel like a
-               continuous run. --- */}
+               continuous run.
+
+               FUTURE WORK (tracked in the design critique): once
+               users accumulate ~50+ sessions, the log view becomes
+               unwieldy and a SUMMARY view becomes more useful —
+               cumulative spent/won/net over rolling windows (week,
+               month, lifetime), win-rate sparklines, strategy-change
+               markers, best/worst session callouts. The P&L strip
+               at the top already computes totals across all sessions;
+               a future pass would split this panel into a toggleable
+               "Summary | Log" tab pair, with Summary as the default
+               for users with >50 sessions. ---- */}
           <ErrorBoundary label="Recent plays">
           <ComicPanel label="RECENT PLAYS" halftone="none">
             {/* NFT enrichment error banner — toast-adjacent alert
@@ -1665,47 +1972,59 @@ export default function DashboardPage() {
               </div>
             )}
 
-            {/* ---- Header + P&L strip ---- */}
-            <div className="flex flex-wrap items-end justify-between gap-4 px-5 pb-4 pt-6">
-              <div>
-                <div className="mb-2 flex items-baseline gap-3">
-                  <p className="label-caps-lg">Play log</p>
-                  {historyFreshness && (
-                    <span className="label-caps text-muted/70">
-                      updated {historyFreshness}
-                    </span>
-                  )}
-                </div>
-                <h2 className="heading-1 text-foreground">
-                  Recent agent sessions
-                </h2>
+            {/* ---- Header + narrative P&L ----
+                The P&L strip used to be a three-metric grid (Spent /
+                Won / Net) that was the last metric-grid anti-pattern
+                left in the dashboard after the hero reform. Collapsed
+                to a narrative sentence — same information, no grid
+                shape. The net amount keeps its semantic colour
+                (success/destructive) as an inline span so users can
+                spot whether they're up or down at a glance.
+                Future work: at >50 sessions, split this panel into
+                a Summary / Log tab pair with cumulative rolling
+                windows + win-rate sparklines (noted above the panel). */}
+            <div className="px-5 pb-4 pt-6">
+              <div className="mb-2 flex items-baseline gap-3">
+                <p className="label-caps-lg">Play log</p>
+                {historyFreshness && (
+                  <span className="label-caps text-muted/70">
+                    updated {historyFreshness}
+                  </span>
+                )}
               </div>
-              {perfSummary && (
-                <div className="flex flex-wrap items-end gap-5">
-                  <div>
-                    <p className="label-caps mb-1">Spent</p>
-                    <p className="num-tabular type-body text-foreground">
-                      {formatAmount(perfSummary.totalSpentAll)} {perfSummary.primaryToken}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="label-caps mb-1">Won</p>
-                    <p className="num-tabular type-body text-foreground">
-                      {formatAmount(perfSummary.totalWonAll)} {perfSummary.primaryToken}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="label-caps mb-1">Net</p>
-                    <p
-                      className={`num-tabular type-body font-semibold ${
-                        perfSummary.net >= 0 ? 'text-success' : 'text-destructive'
-                      }`}
-                    >
-                      {perfSummary.net >= 0 ? '+' : ''}
-                      {formatAmount(perfSummary.net)} {perfSummary.primaryToken}
-                    </p>
-                  </div>
-                </div>
+              <h2 className="heading-1 mb-3 text-foreground">
+                Recent agent sessions
+              </h2>
+              {perfSummary && sessions.length > 0 && (
+                <p className="type-body text-muted">
+                  Across {sessions.length} session{sessions.length === 1 ? '' : 's'}:{' '}
+                  spent{' '}
+                  <span className="num-tabular text-foreground">
+                    {formatAmount(perfSummary.totalSpentAll)} {perfSummary.primaryToken}
+                  </span>
+                  , won{' '}
+                  <span className="num-tabular text-foreground">
+                    {formatAmount(perfSummary.totalWonAll)} {perfSummary.primaryToken}
+                  </span>
+                  .{' '}
+                  {perfSummary.net >= 0 ? (
+                    <>
+                      Up{' '}
+                      <span className="num-tabular font-semibold text-success">
+                        {formatAmount(perfSummary.net)} {perfSummary.primaryToken}
+                      </span>
+                      .
+                    </>
+                  ) : (
+                    <>
+                      Down{' '}
+                      <span className="num-tabular font-semibold text-destructive">
+                        {formatAmount(Math.abs(perfSummary.net))} {perfSummary.primaryToken}
+                      </span>
+                      .
+                    </>
+                  )}
+                </p>
               )}
             </div>
 
@@ -1738,7 +2057,7 @@ export default function DashboardPage() {
                               "claim on dApp" subtitle so the user knows the prize is
                               waiting for them in the contract, not in their pot. */}
                           <div className="mb-2 flex items-start justify-between gap-3">
-                            <span className="font-pixel text-[9px] uppercase tracking-wider text-muted">
+                            <span className="font-pixel text-[10px] uppercase tracking-wider text-muted">
                               {formatTimestamp(s.timestamp)}
                             </span>
                             <div className="flex flex-col items-end">
@@ -1752,7 +2071,7 @@ export default function DashboardPage() {
                                   : `${formatAmount(s.totalSpent)} spent`}
                               </span>
                               {isWin && (
-                                <span className="font-pixel text-[8px] uppercase tracking-wider text-muted">
+                                <span className="font-pixel text-[10px] uppercase tracking-wider text-muted">
                                   claim on dApp
                                 </span>
                               )}
@@ -1764,7 +2083,7 @@ export default function DashboardPage() {
                             {s.poolResults.map((pr) => (
                               <span
                                 key={pr.poolId}
-                                className="border border-secondary bg-[var(--color-panel)] px-2 py-0.5 font-pixel text-[8px] uppercase tracking-wider text-muted"
+                                className="border border-secondary bg-[var(--color-panel)] px-2 py-0.5 font-pixel text-[10px] uppercase tracking-wider text-muted"
                               >
                                 {pr.poolName}
                               </span>

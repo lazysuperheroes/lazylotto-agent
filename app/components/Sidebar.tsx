@@ -205,12 +205,31 @@ function UserContext() {
               }}
               aria-label="Change mascot"
               title="Change mascot"
-              className="absolute -right-2 -top-2 flex h-6 w-6 items-center justify-center border-2 border-brand bg-background text-[11px] transition-transform hover:rotate-12 hover:bg-brand/20 focus-visible:rotate-12"
+              className="absolute -right-2 -top-2 flex h-6 w-6 items-center justify-center border-2 border-brand bg-background text-brand transition-transform hover:rotate-12 hover:bg-brand/20 focus-visible:rotate-12"
             >
-              <span aria-hidden="true">🎲</span>
+              {/* Inline SVG die — replaces the prior 🎲 emoji.
+                  Consistent with all-SVG icon set across the app. */}
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="2" y="2" width="12" height="12" rx="1.5" />
+                <circle cx="5" cy="5" r="0.75" fill="currentColor" stroke="none" />
+                <circle cx="11" cy="5" r="0.75" fill="currentColor" stroke="none" />
+                <circle cx="8" cy="8" r="0.75" fill="currentColor" stroke="none" />
+                <circle cx="5" cy="11" r="0.75" fill="currentColor" stroke="none" />
+                <circle cx="11" cy="11" r="0.75" fill="currentColor" stroke="none" />
+              </svg>
             </button>
           </div>
-          <p className="mt-1 font-pixel text-[8px] uppercase tracking-wider text-brand">
+          <p className="mt-1 font-pixel text-[10px] uppercase tracking-wider text-brand">
             {character.name}
           </p>
         </div>
@@ -225,7 +244,7 @@ function UserContext() {
           other). Account sits under it in a mono readout. */}
       <div className="px-3 py-3">
         <div
-          className={`mb-2 border-2 px-2 py-1 text-center font-pixel text-[9px] uppercase tracking-wider ${
+          className={`mb-2 border-2 px-2 py-1 text-center font-pixel text-[10px] uppercase tracking-wider ${
             isMainnet
               ? 'border-brand bg-brand text-background'
               : 'border-brand/40 bg-brand/10 text-brand'
@@ -258,7 +277,7 @@ function UserContext() {
           <button
             type="button"
             onClick={handleDisconnect}
-            className="w-full border border-secondary px-2 py-1.5 font-pixel text-[8px] uppercase tracking-wider text-muted transition-colors hover:border-destructive hover:text-destructive"
+            className="w-full border border-secondary px-2 py-1.5 font-pixel text-[10px] uppercase tracking-wider text-muted transition-colors hover:border-destructive hover:text-destructive"
           >
             Disconnect
           </button>
@@ -269,7 +288,7 @@ function UserContext() {
           Now in pixel font so it reads as an "imprint" — the
           corner of a comic book cover, not dead fine print. */}
       <div className="border-t border-brand/20 px-3 py-2 text-center">
-        <p className="font-pixel text-[8px] uppercase tracking-wider text-brand/60">
+        <p className="font-pixel text-[10px] uppercase tracking-wider text-brand/60">
           LazyLotto · v{version}
         </p>
       </div>
@@ -286,6 +305,12 @@ export function Sidebar() {
   const [open, setOpen] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
+  // Stuck deposit count surfaced as a badge on the Account nav
+  // item. Previously the ONLY surfacing was a destructive chip in
+  // the dashboard header — users who never noticed it had no way
+  // to discover the refund flow until they went digging. Now the
+  // sidebar shows the count next to Account on every page.
+  const [stuckCount, setStuckCount] = useState(0);
 
   // Check auth state + admin status for conditional nav
   useEffect(() => {
@@ -295,6 +320,35 @@ export function Sidebar() {
     const tier = localStorage.getItem('lazylotto:tier') ?? '';
     setIsAdmin(hasToken && (tier === 'admin' || tier === 'operator'));
   }, [pathname]); // Re-check on route change
+
+  // Fetch stuck deposit count when authenticated. Lives here rather
+  // than on /dashboard so the badge updates regardless of which page
+  // the user landed on first. Only fires when the user is signed in,
+  // re-fires on route change as a cheap refresh signal.
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setStuckCount(0);
+      return;
+    }
+    const token = localStorage.getItem('lazylotto:sessionToken');
+    if (!token) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch('/api/user/dead-letters', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as { deadLetters?: unknown[] };
+        if (!cancelled) setStuckCount(data.deadLetters?.length ?? 0);
+      } catch {
+        /* silent — badge is informational only */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, pathname]);
 
   // Close sidebar on route change (mobile)
   useEffect(() => {
@@ -316,11 +370,21 @@ export function Sidebar() {
 
   return (
     <>
-      {/* ---- Mobile hamburger button ---- */}
+      {/* ---- Mobile hamburger button ----
+          On mobile the sidebar collapses behind this button, which
+          means the stuck-deposit badge on the Account nav item is
+          invisible until the user opens the nav. Mirror the badge
+          as a tiny destructive dot on the hamburger itself so users
+          on mobile discover stuck deposits without having to open
+          the nav first. */}
       <button
         type="button"
         onClick={toggle}
-        aria-label="Toggle navigation"
+        aria-label={
+          stuckCount > 0
+            ? `Toggle navigation — ${stuckCount} stuck deposit${stuckCount === 1 ? '' : 's'} need attention`
+            : 'Toggle navigation'
+        }
         className="fixed left-4 top-4 z-50 flex h-10 w-10 items-center justify-center rounded-lg border border-[#27272a] bg-[#09090b] text-[#a1a1aa] transition-colors hover:text-[#fafafa] md:hidden"
       >
         {open ? (
@@ -336,6 +400,14 @@ export function Sidebar() {
             <line x1="3" y1="10" x2="17" y2="10" />
             <line x1="3" y1="15" x2="17" y2="15" />
           </svg>
+        )}
+        {/* Stuck-deposit indicator dot — absolute positioned so it
+            sits on the top-right corner of the hamburger button. */}
+        {stuckCount > 0 && !open && (
+          <span
+            className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border border-background bg-destructive"
+            aria-hidden="true"
+          />
         )}
       </button>
 
@@ -385,6 +457,12 @@ export function Sidebar() {
             return true;
           }).map((item) => {
             const isActive = pathname === item.href;
+            // Surface stuck-deposit count as a destructive badge on
+            // the Account item. The full list lives on /account but
+            // the badge is how users DISCOVER that there's something
+            // to deal with, before they go looking for a support
+            // option.
+            const showStuckBadge = item.href === '/account' && stuckCount > 0;
             return (
               <Link
                 key={item.href}
@@ -405,6 +483,14 @@ export function Sidebar() {
                 <span className="flex-1">
                   {isAuthenticated && item.labelAuth ? item.labelAuth : item.label}
                 </span>
+                {showStuckBadge && (
+                  <span
+                    className="flex h-5 min-w-[20px] items-center justify-center border border-destructive bg-destructive/15 px-1 font-pixel text-[10px] leading-none text-destructive"
+                    aria-label={`${stuckCount} stuck deposit${stuckCount === 1 ? '' : 's'} need attention`}
+                  >
+                    {stuckCount}
+                  </span>
+                )}
               </Link>
             );
           })}

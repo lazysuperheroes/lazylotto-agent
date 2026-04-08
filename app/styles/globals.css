@@ -526,6 +526,16 @@ html[data-theme='calm'] [class*='-top-3'][class*='font-pixel'] {
   .mascot-wake:hover {
     transform: scale(1.03) rotate(-1deg);
   }
+
+  /* Touch tap reaction — mobile devices don't have hover, so
+     tapping the mascot frame briefly fires the wake transform
+     via the :active pseudo-class. Same transform as hover, half
+     the duration so the feedback is snappy on touch. Mobile
+     users get the character reactivity the desktop hover provides. */
+  .mascot-wake:active {
+    transform: scale(1.03) rotate(-1deg);
+    transition-duration: 0.15s;
+  }
 }
 
 /* Sleep "Z" indicator — small animated stack of letters that
@@ -856,6 +866,20 @@ html[data-theme='calm'] [class*='-top-3'][class*='font-pixel'] {
   }
 }
 
+/* Indeterminate sweep for plays that run past the estimated
+   12s duration. The fill bar becomes a moving gradient that
+   sweeps left-to-right continuously — "still working" instead
+   of "stuck at 100%". Kicks in via the .play-progress-overflow
+   modifier the dashboard adds after playElapsedMs > 12000. */
+@keyframes playProgressSweep {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
 .play-shimmer {
   position: absolute;
   inset: 0;
@@ -903,6 +927,24 @@ html[data-theme='calm'] [class*='-top-3'][class*='font-pixel'] {
 @media (prefers-reduced-motion: no-preference) {
   .play-progress-bar > .play-progress-fill {
     animation: playProgress 12s cubic-bezier(0.15, 0.9, 0.25, 1) forwards;
+  }
+
+  /* Overflow state — the play is taking longer than the estimated
+     12 seconds. Swap the fill animation for a continuous gradient
+     sweep so the bar keeps moving instead of sticking at 100%.
+     The dashboard toggles data-overflow="true" on the bar after
+     playElapsedMs > 12000. */
+  .play-progress-bar[data-overflow='true'] > .play-progress-fill {
+    width: 100%;
+    background: linear-gradient(
+      90deg,
+      rgba(229, 168, 0, 0.25) 0%,
+      var(--color-brand) 40%,
+      var(--color-brand) 60%,
+      rgba(229, 168, 0, 0.25) 100%
+    );
+    background-size: 200% 100%;
+    animation: playProgressSweep 1.6s linear infinite;
   }
 }
 
