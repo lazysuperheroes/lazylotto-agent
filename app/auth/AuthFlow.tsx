@@ -10,6 +10,7 @@ import {
 } from '@hashgraph/hedera-wallet-connect/dist/lib/shared';
 import { useToast } from '../components/Toast';
 import { ComicPanel } from '../components/ComicPanel';
+import { LoadingMascot } from '../components/LoadingMascot';
 import { CharacterMascot } from './CharacterMascot';
 import {
   LSH_CHARACTERS,
@@ -443,11 +444,22 @@ export function AuthFlow() {
           halftone={status === 'already-auth' ? 'none' : 'dense'}
         >
           <div className="p-8">
-          {/* ---- LOADING ---- */}
+          {/* ---- LOADING ----
+              Initial session check — runs for ~200-500ms on mount
+              while we read localStorage to decide if the user is
+              already authenticated, needs to land on /landing, or
+              has an expired session. Previously a generic
+              animate-spin ring; now shows the user's persistent
+              mascot with a character-voiced loading line so the
+              first impression is distinctive instead of template. */}
           {status === 'loading' && (
-            <div className="flex items-center justify-center py-12">
-              <div className="h-8 w-8 animate-spin rounded-full border-2 border-muted border-t-brand" />
-            </div>
+            <LoadingMascot
+              lines={[
+                'Checking your session…',
+                'One moment — looking for your key.',
+                'Hold on — checking the vault.',
+              ]}
+            />
           )}
 
           {/* ---- ALREADY AUTHENTICATED ---- */}

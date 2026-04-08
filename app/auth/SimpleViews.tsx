@@ -2,6 +2,7 @@
 
 import Image from 'next/image';
 import { CharacterMascot } from './CharacterMascot';
+import { LoadingMascot } from '../components/LoadingMascot';
 import { networkLabel, pickRandom, type Network } from './walletConnect';
 import type { LshCharacter } from '../lib/characters';
 
@@ -97,6 +98,24 @@ export interface ConnectingViewProps {
 }
 
 export function ConnectingView({ phase, accountId }: ConnectingViewProps) {
+  // Two phase pools — connecting is "nudging the wallet awake",
+  // signing is "waiting for you to confirm". Both use the shared
+  // LoadingMascot so the character is the loading indicator
+  // instead of a generic spinner. The copy is product-specific,
+  // not AI-filler ("Herding pixels" et al).
+  const phaseLines =
+    phase === 'connecting'
+      ? [
+          'Waking your wallet up…',
+          'Shaking hands with your wallet…',
+          'Talking to your wallet…',
+        ]
+      : [
+          'Waiting on your signature…',
+          'One signature, please — approve in your wallet.',
+          'Your wallet is asking — tap approve when you see it.',
+        ];
+
   return (
     <div className="flex flex-col items-center gap-6 text-center">
       <Image
@@ -119,18 +138,11 @@ export function ConnectingView({ phase, accountId }: ConnectingViewProps) {
         </span>
       )}
 
-      <div className="flex items-center gap-3">
-        <div className="h-5 w-5 animate-spin rounded-full border-2 border-muted border-t-brand" />
-        <span className="text-sm text-foreground">
-          {phase === 'connecting'
-            ? 'Connecting wallet...'
-            : 'Requesting signature...'}
-        </span>
-      </div>
-
-      <p className="text-sm text-muted">
-        Please approve the signing request in your wallet.
-      </p>
+      {/* LoadingMascot absorbs the previous spinner + phase text +
+          "Please approve" help line into one character-voiced
+          moment. The line pool is phase-aware so 'connecting' and
+          'signing' get different copy, but the shape stays the same. */}
+      <LoadingMascot lines={phaseLines} />
     </div>
   );
 }

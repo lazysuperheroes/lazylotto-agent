@@ -861,7 +861,17 @@ export default function AuditPage() {
               ))}
             </select>
             {filterLoading && (
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-muted border-t-brand" />
+              // Sharp-cornered pulse instead of the generic rounded
+              // spinner ring — the critique flagged the ring as
+              // AI-slop and LoadingMascot is overkill for a 4x4
+              // inline indicator next to a select dropdown. Simple
+              // brand-gold square with an opacity pulse does the
+              // job without breaking the comic vocabulary.
+              <div
+                className="h-3 w-3 animate-pulse bg-brand"
+                role="status"
+                aria-label="Filtering…"
+              />
             )}
           </div>
         )}
