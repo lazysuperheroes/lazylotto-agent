@@ -104,8 +104,14 @@ export class UserLedger {
     });
 
     // 7. Fire HCS-20 accounting (non-blocking)
+    //
+    // Pass the underlying token (HBAR / LAZY / token id) so the on-chain
+    // record carries the asset identity. Without it, the audit reader
+    // would have to fall back to a LLCRED→HBAR heuristic and lose all
+    // LAZY deposits — see the v1 message types section in
+    // docs/hcs20-v2-schema.md for the rationale.
     try {
-      await this.accounting.recordDeposit(user.hederaAccountId, netAmount, txId);
+      await this.accounting.recordDeposit(user.hederaAccountId, netAmount, txId, token);
     } catch (err) {
       console.warn(
         `[UserLedger] HCS-20 recordDeposit failed for user ${userId}, txId ${txId}:`,
@@ -114,7 +120,7 @@ export class UserLedger {
     }
 
     try {
-      await this.accounting.recordRake(user.hederaAccountId, this.agentAccountId, rakeAmount);
+      await this.accounting.recordRake(user.hederaAccountId, this.agentAccountId, rakeAmount, token);
     } catch (err) {
       console.warn(
         `[UserLedger] HCS-20 recordRake failed for user ${userId}, txId ${txId}:`,

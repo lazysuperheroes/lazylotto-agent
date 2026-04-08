@@ -511,3 +511,140 @@ describe('hcs20-reader: multi-session interleaving', () => {
     assert.equal(sB.totalSpent, 10);
   });
 });
+
+// ── v1 token attribution ──────────────────────────────────────
+//
+// Locks in the contract from task #220: every v1 mint/transfer/burn
+// op MUST honour the explicit `token` field when present and fall
+// back to LLCRED→HBAR for legacy messages on existing topics. The
+// reader is the single source of truth for this resolution; both the
+// audit page (server-side) and verify-audit (CLI) consume the
+// reader's normalized output, so a regression here would cascade.
+
+describe('hcs20-reader: v1 token attribution', () => {
+  it('mint with explicit token=LAZY produces a LAZY deposit event', async () => {
+    const messages: RawTopicMessage[] = [
+      {
+        sequence: 1,
+        timestamp: T0,
+        payload: {
+          p: 'hcs-20',
+          op: 'mint',
+          tick: 'LLCRED',
+          token: 'LAZY',
+          amt: '100',
+          to: USER,
+          memo: 'deposit:0.0.X@1775596937.272650838',
+        },
+      },
+    ];
+    const result = await parseAuditTopic(messages, NOW);
+    const deposit = result.events.find((e) => e.type === 'deposit');
+    assert.ok(deposit, 'deposit event missing');
+    assert.equal(deposit!.type, 'deposit');
+    if (deposit!.type === 'deposit') {
+      assert.equal(deposit!.token, 'LAZY');
+      assert.equal(deposit!.amount, 100);
+      assert.equal(deposit!.user, USER);
+    }
+  });
+
+  it('legacy mint with only tick=LLCRED falls back to HBAR', async () => {
+    const messages: RawTopicMessage[] = [
+      {
+        sequence: 1,
+        timestamp: T0,
+        payload: {
+          p: 'hcs-20',
+          op: 'mint',
+          tick: 'LLCRED',
+          // no `token` field — pre-fix legacy message
+          amt: '50',
+          to: USER,
+        },
+      },
+    ];
+    const result = await parseAuditTopic(messages, NOW);
+    const deposit = result.events.find((e) => e.type === 'deposit');
+    assert.ok(deposit, 'deposit event missing');
+    if (deposit!.type === 'deposit') {
+      assert.equal(deposit!.token, 'HBAR', 'LLCRED should fall back to HBAR');
+    }
+  });
+
+  it('rake transfer respects explicit token field', async () => {
+    const messages: RawTopicMessage[] = [
+      {
+        sequence: 1,
+        timestamp: T0,
+        payload: {
+          p: 'hcs-20',
+          op: 'transfer',
+          tick: 'LLCRED',
+          token: 'LAZY',
+          amt: '5',
+          from: USER,
+          to: AGENT,
+          memo: 'rake',
+        },
+      },
+    ];
+    const result = await parseAuditTopic(messages, NOW);
+    const rake = result.events.find((e) => e.type === 'rake');
+    assert.ok(rake, 'rake event missing');
+    if (rake!.type === 'rake') {
+      assert.equal(rake!.token, 'LAZY');
+      assert.equal(rake!.amount, 5);
+    }
+  });
+
+  it('user withdrawal burn respects explicit token field', async () => {
+    const messages: RawTopicMessage[] = [
+      {
+        sequence: 1,
+        timestamp: T0,
+        payload: {
+          p: 'hcs-20',
+          op: 'burn',
+          tick: 'LLCRED',
+          token: 'LAZY',
+          amt: '25',
+          from: USER,
+          memo: 'withdrawal',
+        },
+      },
+    ];
+    const result = await parseAuditTopic(messages, NOW);
+    const withdrawal = result.events.find((e) => e.type === 'withdrawal');
+    assert.ok(withdrawal, 'withdrawal event missing');
+    if (withdrawal!.type === 'withdrawal') {
+      assert.equal(withdrawal!.token, 'LAZY');
+      assert.equal(withdrawal!.amount, 25);
+    }
+  });
+
+  it('operator withdrawal burn respects explicit token field', async () => {
+    const messages: RawTopicMessage[] = [
+      {
+        sequence: 1,
+        timestamp: T0,
+        payload: {
+          p: 'hcs-20',
+          op: 'burn',
+          tick: 'LLCRED',
+          token: 'LAZY',
+          amt: '15',
+          from: AGENT,
+          memo: 'operator_withdrawal',
+        },
+      },
+    ];
+    const result = await parseAuditTopic(messages, NOW);
+    const opWith = result.events.find((e) => e.type === 'operator_withdrawal');
+    assert.ok(opWith, 'operator_withdrawal event missing');
+    if (opWith!.type === 'operator_withdrawal') {
+      assert.equal(opWith!.token, 'LAZY');
+      assert.equal(opWith!.amount, 15);
+    }
+  });
+});

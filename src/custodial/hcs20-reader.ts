@@ -687,6 +687,41 @@ async function reconstructSession(
 }
 
 // ── v1 message parsers ─────────────────────────────────────────
+//
+// All v1 ops now use resolveTokenField() which prefers the explicit
+// `token` field if the writer stamped one, and falls back to the
+// LLCRED→HBAR heuristic for legacy messages on existing topics.
+// New messages from the current writer always carry `token` so the
+// reader doesn't have to guess. See docs/hcs20-v2-schema.md for the
+// rationale and the audit-deposit-discrepancy script for the bug
+// this prevents.
+
+/**
+ * Resolve the underlying token for a v1 mint/transfer/burn/refund.
+ *
+ * Priority:
+ *   1. `payload.token` — set by the current writer, unambiguous
+ *   2. `payload.tick` mapped via the legacy heuristic — only for
+ *      pre-fix messages on existing topics. The historical convention
+ *      was that all amounts were HBAR-denominated and `tick: LLCRED`
+ *      was just the credit ledger label.
+ *
+ * Returns "HBAR" as the safest default when neither field tells us
+ * anything useful.
+ */
+function resolveTokenField(payload: Record<string, unknown>): string {
+  const explicit = payload.token;
+  if (typeof explicit === 'string' && explicit.length > 0) {
+    return explicit;
+  }
+  const tick = payload.tick;
+  if (typeof tick === 'string' && tick.length > 0 && tick !== 'LLCRED' && tick !== 'llcred') {
+    return tick;
+  }
+  // Legacy LLCRED → HBAR fallback. Mirrors src/scripts/verify-audit.ts
+  // normalizeLegacyToken() so both readers agree.
+  return 'HBAR';
+}
 
 function parseV1Mint(msg: RawTopicMessage): NormalizedDepositEvent | null {
   const to = String(msg.payload.to ?? '');
@@ -698,7 +733,7 @@ function parseV1Mint(msg: RawTopicMessage): NormalizedDepositEvent | null {
     type: 'deposit',
     user: to,
     amount: amt,
-    token: String(msg.payload.tick ?? 'LLCRED'),
+    token: resolveTokenField(msg.payload),
     ...(msg.payload.memo ? { memo: String(msg.payload.memo) } : {}),
   };
 }
@@ -720,7 +755,7 @@ function parseV1Transfer(
       user: from,
       agent: to,
       amount: amt,
-      token: String(msg.payload.tick ?? 'LLCRED'),
+      token: resolveTokenField(msg.payload),
     };
   }
 
@@ -732,7 +767,7 @@ function parseV1Transfer(
     user: from,
     agent: to,
     amount: amt,
-    token: String(msg.payload.tick ?? 'LLCRED'),
+    token: resolveTokenField(msg.payload),
   };
 }
 
@@ -751,7 +786,7 @@ function parseV1Burn(
       type: 'operator_withdrawal',
       agent: from,
       amount: amt,
-      token: String(msg.payload.tick ?? 'LLCRED'),
+      token: resolveTokenField(msg.payload),
     };
   }
 
@@ -762,7 +797,7 @@ function parseV1Burn(
       type: 'withdrawal',
       user: from,
       amount: amt,
-      token: String(msg.payload.tick ?? 'LLCRED'),
+      token: resolveTokenField(msg.payload),
     };
   }
 
@@ -773,7 +808,7 @@ function parseV1Burn(
     type: 'withdrawal',
     user: from,
     amount: amt,
-    token: String(msg.payload.tick ?? 'LLCRED'),
+    token: resolveTokenField(msg.payload),
   };
 }
 
@@ -791,7 +826,7 @@ function parseRefund(msg: RawTopicMessage): NormalizedRefundEvent | null {
     agent: from,
     user: to,
     amount: amt,
-    token: String(msg.payload.tick ?? 'LLCRED'),
+    token: resolveTokenField(msg.payload),
     originalDepositTxId,
     refundTxId,
     reason: String(msg.payload.reason ?? ''),

@@ -122,6 +122,41 @@ export class AccountingService {
 
   // ── Individual Operations ────────────────────────────────
 
+  // ── About the `token` field ──────────────────────────────
+  //
+  // HCS-20's `tick` is the credit ledger label (always "LLCRED" in
+  // our deployment). It does NOT identify the underlying asset that
+  // was actually deposited/withdrawn. A 50 HBAR deposit and a 50 LAZY
+  // deposit both wrote `tick: LLCRED, amt: "50"` historically — the
+  // reader had to guess from the memo or fall back to a LLCRED→HBAR
+  // heuristic, which is how the verify-audit forensic walk got the
+  // wrong totals when LAZY users showed up.
+  //
+  // We now stamp every balance-affecting v1 op with an explicit
+  // `token` field ("HBAR", "LAZY", or a token id like "0.0.1183558")
+  // alongside the legacy `tick`. The reader prefers `token` when
+  // present and falls back to the LLCRED heuristic only for
+  // pre-fix legacy messages on existing topics. New topics get
+  // unambiguous per-op token attribution from day one.
+  //
+  // The `token` field is OPTIONAL on the writer side so callers
+  // that don't yet have a token in scope (we shouldn't have any —
+  // every call site has been updated) won't break, but the field
+  // is documented as required for new readers in the v2 schema doc.
+
+  /**
+   * Normalize a token symbol or ID for the HCS-20 `token` field.
+   *
+   * - Hedera token IDs (0.0.X) pass through unchanged
+   * - 'hbar' / 'HBAR' → 'HBAR' (canonical uppercase)
+   * - everything else upper-cased so symbol names are consistent
+   */
+  private normalizeTokenField(token: string): string {
+    if (!token) return 'HBAR';
+    if (token.startsWith('0.0.')) return token;
+    return token.toUpperCase();
+  }
+
   /**
    * Record a user deposit as an HCS-20 mint.
    *
@@ -132,11 +167,13 @@ export class AccountingService {
     userAccountId: string,
     amount: number,
     depositTxId: string,
+    token: string = 'HBAR',
   ): Promise<void> {
     await this.submitMessage({
       p: 'hcs-20',
       op: 'mint',
       tick: this.tick,
+      token: this.normalizeTokenField(token),
       amt: String(amount),
       to: userAccountId,
       memo: `deposit:${depositTxId}`,
@@ -150,11 +187,13 @@ export class AccountingService {
     userAccountId: string,
     agentAccountId: string,
     amount: number,
+    token: string = 'HBAR',
   ): Promise<void> {
     await this.submitMessage({
       p: 'hcs-20',
       op: 'transfer',
       tick: this.tick,
+      token: this.normalizeTokenField(token),
       amt: String(amount),
       from: userAccountId,
       to: agentAccountId,
@@ -168,11 +207,13 @@ export class AccountingService {
   async recordWithdrawal(
     userAccountId: string,
     amount: number,
+    token: string = 'HBAR',
   ): Promise<void> {
     await this.submitMessage({
       p: 'hcs-20',
       op: 'burn',
       tick: this.tick,
+      token: this.normalizeTokenField(token),
       amt: String(amount),
       from: userAccountId,
       memo: 'withdrawal',
@@ -188,11 +229,13 @@ export class AccountingService {
   async recordOperatorWithdrawal(
     agentAccountId: string,
     amount: number,
+    token: string = 'HBAR',
   ): Promise<void> {
     await this.submitMessage({
       p: 'hcs-20',
       op: 'burn',
       tick: this.tick,
+      token: this.normalizeTokenField(token),
       amt: String(amount),
       from: agentAccountId,
       memo: 'operator_withdrawal',

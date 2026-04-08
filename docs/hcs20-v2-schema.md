@@ -99,6 +99,7 @@ user.
   "p": "hcs-20",
   "op": "mint",
   "tick": "LLCRED",
+  "token": "HBAR",
   "amt": "285",
   "to": "0.0.7349994",
   "memo": "deposit:0.0.X@1775596937.272650838"
@@ -108,8 +109,12 @@ user.
 - `amt` is the **net** deposit amount (after rake), in the
   underlying token's display units (HBAR for HBAR deposits, LAZY
   for LAZY deposits, etc.). The `tick: LLCRED` is the credit
-  ledger label — it does NOT mean the amount is in some abstract
-  credit unit.
+  ledger label — it does NOT identify the underlying asset.
+- `token` (added 2026-04 — see "Token attribution" below) is the
+  unambiguous underlying asset: `"HBAR"`, `"LAZY"`, or a Hedera
+  token ID like `"0.0.1183558"`. **New readers should branch on
+  `token` and treat its absence as the legacy "all amounts are
+  HBAR" convention.**
 - `to` is the user's Hedera account ID
 - `memo` includes the original on-chain deposit transaction ID
   for cross-reference
@@ -125,6 +130,7 @@ sequence number).
   "p": "hcs-20",
   "op": "transfer",
   "tick": "LLCRED",
+  "token": "HBAR",
   "amt": "15",
   "from": "0.0.7349994",
   "to": "0.0.8456987",
@@ -135,6 +141,7 @@ sequence number).
 - `from` is the user, `to` is the agent operator account
 - `memo: "rake"` is the canonical marker
 - `amt` in token display units
+- `token` carries the same meaning as on `mint` (see above)
 
 ### `op: "burn"` (withdrawal)
 
@@ -145,6 +152,7 @@ A user withdrew funds back to their Hedera account.
   "p": "hcs-20",
   "op": "burn",
   "tick": "LLCRED",
+  "token": "HBAR",
   "amt": "50",
   "from": "0.0.7349994",
   "memo": "withdrawal"
@@ -153,12 +161,44 @@ A user withdrew funds back to their Hedera account.
 
 The reader uses `memo` starting with `"withdraw"` (case-insensitive)
 to classify; anything else is treated as a play burn (legacy).
+The `token` field carries the underlying asset; see "Token
+attribution" below for the legacy fallback.
 
 ### `op: "burn"` (operator withdrawal)
 
 Operator withdrew accumulated rake. Same shape as user withdrawal
 but `from` is the operator account and `memo` starts with
-`"operator_withdrawal"` or `"operator-withdrawal"`.
+`"operator_withdrawal"` or `"operator-withdrawal"`. Same `token`
+field semantics as the user withdrawal.
+
+### Token attribution on v1 ops
+
+Historically, every v1 mint/transfer/burn op was written with
+`tick: "LLCRED"` and no other token identifier. The credit ledger
+label was the only attribution, leaving the reader to guess what
+asset was actually moving — a HBAR deposit and a LAZY deposit
+both wrote `tick: LLCRED, amt: "50"`. In practice, every audited
+historical record was HBAR, and the verify-audit script papered
+over the gap with a LLCRED→HBAR heuristic.
+
+The current writer (`AccountingService.normalizeTokenField`) now
+stamps an explicit `token` field on **every** v1 mint, transfer,
+and burn message. The reader (`hcs20-reader.resolveTokenField`)
+prefers `token` when present and falls back to the LLCRED→HBAR
+heuristic only for pre-fix messages on existing topics.
+
+External auditors building a fresh reader against a topic with
+mixed pre-fix and post-fix messages should:
+
+1. Check `payload.token` first. If non-empty, trust it.
+2. Otherwise, if `payload.tick` is present and not `"LLCRED"` or
+   `"llcred"`, use it as the token name (defensive — we never
+   wrote anything else, but tolerant).
+3. Otherwise, default to `"HBAR"` and flag the entry as a
+   legacy-attributed event.
+
+A topic where every balance-affecting op carries `token` is in
+"clean" state and the heuristic never fires.
 
 ### `op: "batch"` (legacy v1 play session)
 

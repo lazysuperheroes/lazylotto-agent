@@ -396,23 +396,19 @@ function formatTokenMap(map: Record<string, number>): string {
 }
 
 /**
- * Stop-gap: legacy v1 mint/transfer/burn ops record `tick: LLCRED`
- * (the credit ledger label) instead of the underlying token (HBAR
- * or a Hedera token ID). The reader propagates `tick` as `token`,
- * which is correct for v2 messages but ambiguous for v1.
+ * Defensive normalizer for any token string that survives the
+ * reader's own resolveTokenField() pass.
  *
- * Until the writer is updated to record an explicit `token` field
- * on legacy ops, we map "LLCRED" → "HBAR" because 100% of historical
- * deposits in our test data were HBAR (LAZY in the agent wallet was
- * operator bootstrap, never credited as a user deposit). This
- * heuristic will be wrong the day a real LAZY deposit happens, at
- * which point we need the schema fix.
+ * Since the AccountingService writer now stamps an explicit `token`
+ * field on every v1 mint/transfer/burn (and the reader prefers it
+ * over `tick: LLCRED`), the only way "LLCRED" reaches this script
+ * is via a pre-fix legacy message on an existing topic — and even
+ * those go through the reader's LLCRED→HBAR fallback first. This
+ * helper is kept as a belt-and-braces guard rather than a load-
+ * bearing fix; it's a no-op against any modern reader output.
  *
- * v2 messages (`play_pool_result.spentToken`, `refund.tick`) and
- * non-v1 entries pass through unchanged.
- *
- * Tracked as a follow-up: extend the writer to add an explicit
- * `token` field on mint/transfer/burn alongside `tick`.
+ * See docs/hcs20-v2-schema.md and AccountingService.normalizeTokenField
+ * for the writer side of the contract.
  */
 function normalizeLegacyToken(token: string): string {
   if (token === 'LLCRED' || token === 'llcred') return 'HBAR';

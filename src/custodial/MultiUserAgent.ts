@@ -993,9 +993,11 @@ export class MultiUserAgent {
       // Flush immediately — critical for crash safety (prevents double-withdraw)
       await this.store.flush();
 
-      // Record via HCS-20 (non-blocking)
+      // Record via HCS-20 (non-blocking) — pass token so the on-chain
+      // record carries the underlying asset identity. The audit reader
+      // prefers the explicit token over the legacy tick heuristic.
       try {
-        await this.accounting.recordWithdrawal(user.hederaAccountId, amount);
+        await this.accounting.recordWithdrawal(user.hederaAccountId, amount, withdrawToken);
       } catch {
         /* accounting failure is not blocking */
       }
@@ -1127,11 +1129,14 @@ export class MultiUserAgent {
       totalWithdrawnByOperator: { ...op.totalWithdrawnByOperator, [tokenKey]: (op.totalWithdrawnByOperator[tokenKey] ?? 0) + amount },
     }));
 
-    // Record via HCS-20 accounting (non-blocking)
+    // Record via HCS-20 accounting (non-blocking) — pass the token so
+    // the on-chain record can be correctly attributed when the operator
+    // is withdrawing non-HBAR rake (e.g. LAZY platform fees).
     try {
       await this.accounting.recordOperatorWithdrawal(
         getOperatorAccountId(this.client),
         amount,
+        token,
       );
     } catch (e) {
       console.warn(
