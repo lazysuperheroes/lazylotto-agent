@@ -67,7 +67,7 @@ curl -s -X POST https://testnet-agent.lazysuperheroes.com/api/mcp \
   -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"uat","version":"1.0"}},"id":1}'
 ```
 
-- [ ] Returns `serverInfo` with `name: lazylotto-agent`
+- [X] Returns `serverInfo` with `name: lazylotto-agent`
 
 ```bash
 # List tools

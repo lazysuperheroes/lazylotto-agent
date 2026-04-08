@@ -158,6 +158,14 @@ const DAPP_URL =
     ? 'https://dapp.lazysuperheroes.com'
     : 'https://testnet-dapp.lazysuperheroes.com';
 
+/**
+ * Direct deep-link to the user's pending prize list on the dApp.
+ * Used by the "Claim on dApp →" CTA on the dashboard Pending
+ * Claim panel. The `/lotto/prizes` path lands on the claim UI
+ * directly instead of the generic profile page.
+ */
+const DAPP_CLAIM_URL = `${DAPP_URL}/lotto/prizes`;
+
 function formatAmount(amount: number): string {
   return amount.toLocaleString(undefined, {
     minimumFractionDigits: 0,
@@ -1643,7 +1651,7 @@ export default function DashboardPage() {
                   </div>
                   {prizeStatus.pending.count > 0 && (
                     <a
-                      href={`${DAPP_URL}/profile`}
+                      href={DAPP_CLAIM_URL}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="btn-primary-sm shrink-0"

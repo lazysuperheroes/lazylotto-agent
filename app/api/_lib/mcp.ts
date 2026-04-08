@@ -43,7 +43,15 @@ import type { Client } from '@hashgraph/sdk';
 type McpGlobals = { __lazylottoContextPromise__?: Promise<AgentContext> | null };
 const globalForMcp = globalThis as unknown as McpGlobals;
 
-const AGENT_VERSION = '0.1.13';
+// Single source of truth for the agent version surfaced in MCP
+// serverInfo. Reads NEXT_PUBLIC_APP_VERSION which next.config.mjs
+// injects from package.json at build time (npm_package_version is
+// only present when launched via `npm run`, so it's the wrong
+// source in production).
+const AGENT_VERSION =
+  process.env.NEXT_PUBLIC_APP_VERSION ??
+  process.env.npm_package_version ??
+  '0.1.0';
 
 // ── Helpers ─────────────────────────────────────────────────────
 

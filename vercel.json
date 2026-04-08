@@ -1,4 +1,10 @@
 {
   "buildCommand": "npm run build:web",
-  "outputDirectory": ".next"
+  "outputDirectory": ".next",
+  "crons": [
+    {
+      "path": "/api/cron/reconcile",
+      "schedule": "0 * * * *"
+    }
+  ]
 }
