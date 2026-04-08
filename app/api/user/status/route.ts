@@ -12,10 +12,10 @@ import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
 import { getClient } from '../../_lib/hedera';
-import { getAgentContext } from '../../_lib/mcp';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { getOperatorAccountId } from '~/hedera/wallet';
 import { withChecksum } from '~/utils/checksum';
+import { readVelocityStates } from '~/custodial/velocity';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -77,17 +77,22 @@ export async function GET(request: Request) {
     // Withdrawal velocity counters per token. Surfaces "remaining today"
     // in the Withdraw modal so users don't get a raw backend error at
     // submit time when they'd exceed the daily cap.
+    //
+    // The previous version called getAgentContext() (which spins up the
+    // full MultiUserAgent — config load, deposit watcher wiring, ledger
+    // setup) just to read counters from Redis, AND it awaited each token
+    // sequentially. Now we call readVelocityStates() directly: zero
+    // MultiUserAgent dependency, parallel Redis fan-out via Promise.all.
     // Skip on any failure — counters are informational, not load-bearing.
-    const velocity: Record<string, { cap: number | null; usedToday: number; remaining: number | null }> = {};
+    let velocity: Record<string, { cap: number | null; usedToday: number; remaining: number | null }> = {};
     try {
-      const { multiUser } = await getAgentContext();
       // Query the tokens the user actually holds so we don't waste
-      // Redis round-trips on empty balances.
+      // Redis round-trips on empty balances. Always include hbar so the
+      // Withdraw modal's default token has a counter even when the user
+      // only holds non-HBAR tokens.
       const tokensToQuery = Object.keys(user.balances.tokens);
       if (!tokensToQuery.includes('hbar')) tokensToQuery.push('hbar');
-      for (const token of tokensToQuery) {
-        velocity[token] = await multiUser.getWithdrawalVelocityState(user.userId, token);
-      }
+      velocity = await readVelocityStates(user.userId, tokensToQuery);
     } catch {
       /* informational only — leave velocity empty */
     }

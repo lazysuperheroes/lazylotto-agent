@@ -194,11 +194,19 @@ export const GET = withStore(async (request: Request) => {
       {
         headers: {
           ...CORS_HEADERS,
-          // Brief client/CDN cache so a quick reload after a play
-          // doesn't hammer the dApp. The dashboard explicitly
-          // refetches after each play, so this is just a safety
-          // net for tab-switching.
-          'Cache-Control': 'private, max-age=10',
+          // Cache for 60s + stale-while-revalidate so tab-switching
+          // and dashboard re-mounts don't hammer the dApp MCP
+          // (which is the slow link in this query — 1-2s round trip).
+          //
+          // Pending prizes only change when the user plays AND wins,
+          // and we refetch explicitly inside handlePlay's success path,
+          // so the cache window doesn't hide stale data in practice.
+          // The previous max-age=10 was too short to deflect even a
+          // back-button bounce.
+          //
+          // s-maxage matches because Vercel's edge respects it for
+          // private responses keyed by Authorization.
+          'Cache-Control': 'private, max-age=60, stale-while-revalidate=120',
         },
       },
     );

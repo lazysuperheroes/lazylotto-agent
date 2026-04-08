@@ -1607,35 +1607,16 @@ export class MultiUserAgent {
 
   /**
    * Public accessor for the current 24h withdrawal volume (and cap) for
-   * a given user/token. Used by /api/user/status to surface the
-   * "remaining today" counter in the Withdraw modal so users don't get
-   * a raw backend error at submit time.
+   * a given user/token. Thin wrapper around readVelocityState() in
+   * src/custodial/velocity.ts — that helper is the single source of
+   * truth so /api/user/status can read velocity without instantiating
+   * MultiUserAgent at all.
    */
   async getWithdrawalVelocityState(
     userId: string,
     token: string,
   ): Promise<{ cap: number | null; usedToday: number; remaining: number | null }> {
-    const normalized = token.toLowerCase();
-    const isHbar = normalized === 'hbar' || normalized === HBAR_TOKEN_KEY;
-    const capEnvKey = isHbar
-      ? 'WITHDRAWAL_DAILY_CAP_HBAR'
-      : `WITHDRAWAL_DAILY_CAP_${normalized.replace(/[^a-z0-9]/gi, '_').toUpperCase()}`;
-    const capDefault = isHbar ? 1000 : Number.POSITIVE_INFINITY;
-    const cap = Number(process.env[capEnvKey] ?? capDefault);
-
-    if (!Number.isFinite(cap) || cap <= 0) {
-      return { cap: null, usedToday: 0, remaining: null };
-    }
-
-    try {
-      const { getRedis, KEY_PREFIX } = await import('../auth/redis.js');
-      const redis = await getRedis();
-      const key = `${KEY_PREFIX.velocity}${normalized}:${userId}`;
-      const currentRaw = await redis.get<string>(key);
-      const usedToday = currentRaw ? Number(currentRaw) || 0 : 0;
-      return { cap, usedToday, remaining: Math.max(0, cap - usedToday) };
-    } catch {
-      return { cap, usedToday: 0, remaining: cap };
-    }
+    const { readVelocityState } = await import('./velocity.js');
+    return readVelocityState(userId, token);
   }
 }
