@@ -62,7 +62,7 @@ export function TopUpModal({
       open={open}
       onClose={onClose}
       title="Top up your agent"
-      description="Send HBAR or LAZY to the agent wallet with your unique deposit memo. Deposits arrive in ~10 seconds."
+      description="Send HBAR or LAZY to the agent wallet with your unique deposit memo. Hedera mirror nodes can lag a few seconds behind the actual transfer, so give it a moment before checking."
       size="lg"
     >
       <div className="space-y-5">

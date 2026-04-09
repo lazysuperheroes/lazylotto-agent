@@ -600,7 +600,7 @@ export default function DashboardPage() {
         }
       } else {
         toast(
-          'No new deposits yet — Hedera takes ~10 seconds to confirm. Make sure you included the deposit memo and try again.',
+          'No new deposits yet — Hedera mirror nodes can lag a few seconds behind the actual transfer. Make sure you included the deposit memo and try again in a moment.',
           { variant: 'info' },
         );
       }
@@ -1751,9 +1751,9 @@ export default function DashboardPage() {
 
                       <p className="type-caption">
                         The memo is how the agent matches the deposit to
-                        your account. Deposits are usually credited within
-                        10 seconds — you can force a re-check anytime from
-                        the freshness ribbon above.{' '}
+                        your account. Hedera mirror nodes can lag a few
+                        seconds behind the actual transfer — you can force
+                        a re-check anytime from the freshness ribbon above.{' '}
                         <button
                           type="button"
                           onClick={() => setTopUpOpen(true)}
