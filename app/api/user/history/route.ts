@@ -14,6 +14,7 @@
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
+import { withStore } from '../../_lib/withStore';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 
 export async function OPTIONS() {
@@ -26,7 +27,13 @@ export async function OPTIONS() {
   });
 }
 
-export async function GET(request: Request) {
+// withStore wrapper: any error escaping the inner try/catch (or thrown
+// by a promise we forgot to await) gets logged to Vercel via
+// console.error with a full stack and returned as JSON instead of
+// Vercel's generic HTML /500 page. That's load-bearing for diagnosing
+// the "a bunch of 500s on /api/user/history" report — without the
+// wrapper, we only see the status code in the client network tab.
+export const GET = withStore(async (request: Request) => {
   try {
     if (!(await checkRateLimit({ request, action: 'user-history', limit: 60, windowSec: 60 }))) {
       return rateLimitResponse(60);
@@ -59,7 +66,17 @@ export async function GET(request: Request) {
     }
 
     // Refresh just this user's plays from Redis so we see recent sessions.
-    await store.refreshPlaysForUser(user.userId);
+    // Wrapped in its own try so a transient Redis blip doesn't nuke
+    // the whole response — we'd rather return stale-cached sessions
+    // than fail the entire dashboard history load.
+    try {
+      await store.refreshPlaysForUser(user.userId);
+    } catch (refreshErr) {
+      console.warn(
+        '[user/history] refreshPlaysForUser failed, serving cached sessions:',
+        refreshErr instanceof Error ? refreshErr.stack ?? refreshErr.message : refreshErr,
+      );
+    }
 
     // Get play sessions for this user, return the most recent 20.
     // Raw prizeDetails (including captured { token, hederaId, serial } refs)
@@ -72,10 +89,16 @@ export async function GET(request: Request) {
       { headers: CORS_HEADERS },
     );
   } catch (err) {
+    // Log the FULL stack so Vercel logs are diagnosable. The previous
+    // version only returned `err.message` in the JSON body — fine for
+    // known error types, useless for "what the hell is going wrong"
+    // intermittent failures. console.error shows up in Vercel's
+    // function log stream so operators can grep by route path.
+    console.error('[user/history] GET failed:', err);
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
       { error: message },
       { status: 500, headers: CORS_HEADERS },
     );
   }
-}
+});

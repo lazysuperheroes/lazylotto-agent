@@ -11,6 +11,7 @@
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
+import { withStore } from '../../_lib/withStore';
 import { getClient } from '../../_lib/hedera';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { getOperatorAccountId } from '~/hedera/wallet';
@@ -27,7 +28,12 @@ export async function OPTIONS() {
   });
 }
 
-export async function GET(request: Request) {
+// withStore wrapper: /api/user/status is the dashboard hot path —
+// it runs on every mount, every visibility refresh, and after every
+// play. Any HTML /500 leak here is the loudest failure mode in the
+// app. The wrapper gives us a JSON body with the full stack in
+// Vercel logs on any escaped throw.
+export const GET = withStore(async (request: Request) => {
   try {
     // Rate limit: 60/min per identity for read endpoints
     if (!(await checkRateLimit({ request, action: 'user-status', limit: 60, windowSec: 60 }))) {
@@ -116,10 +122,11 @@ export async function GET(request: Request) {
       { headers: CORS_HEADERS },
     );
   } catch (err) {
+    console.error('[user/status] GET failed:', err);
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
       { error: message },
       { status: 500, headers: CORS_HEADERS },
     );
   }
-}
+});
