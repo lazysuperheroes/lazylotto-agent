@@ -872,145 +872,36 @@ export default function DashboardPage() {
   // tooltip. Last-session feedback now belongs in a proper delta on
   // the play history row, not as an icon next to the hero balance.
 
-  // --- Loading state ---
-  // The dashboard no longer blocks on a full-page skeleton. We render the
-  // shell immediately and each section paints its own skeleton until its
-  // own fetch resolves. This means history shows up as soon as it lands
-  // (typically before status, since it doesn't go through getAgentContext)
-  // and the user gets an immediate sense that the page is alive.
-  //
-  // The auth wall and notRegistered wall remain full-page redirects below
-  // — those are discrete states, not loading states.
-
-  // --- No auth token ---
-  if (!sessionToken) {
-    // The previous version of this state was a generic muted "Sign in
-    // required / Welcome back / Authenticate with your Hedera wallet"
-    // card — indistinguishable from every crypto wallet auth gate. Now
-    // the persistent mascot sits front and centre with a character-
-    // voiced prompt, picked from the same roster the user will see
-    // on /auth and everywhere else. The first-time visitor meets the
-    // brand before they're even signed in.
-    const character = LSH_CHARACTERS[characterIdx] ?? LSH_CHARACTERS[0]!;
-    return (
-      <div className="flex flex-1 items-center justify-center px-4 py-12">
-        <div className="w-full max-w-md">
-          <ComicPanel label="LOCKED" tone="muted" halftone="none">
-            <div className="flex flex-col items-center gap-5 p-8 text-center">
-              <CharacterMascot
-                key={character.name}
-                character={character}
-                size="sm"
-                line="You're not signed in. Tap Sign In and I'll start the engine."
-              />
-              <h1 className="display-md text-foreground">Welcome back</h1>
-              <a
-                href="/auth"
-                className="inline-block border-2 border-brand bg-brand px-6 py-3 font-pixel text-[10px] uppercase tracking-wider text-background panel-shadow-sm transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-[6px_6px_0_0_var(--color-ink)]"
-              >
-                Sign in →
-              </a>
-            </div>
-          </ComicPanel>
-        </div>
-      </div>
-    );
-  }
-
-  // --- Not registered state ---
-  if (notRegistered) {
-    return (
-      <div className="flex flex-1 items-center justify-center px-4 py-12">
-        <div className="w-full max-w-md">
-          <ComicPanel label="ISSUE #00" halftone="dense">
-            <div className="p-8 text-center">
-              <p className="label-caps-brand-lg mb-3">Welcome</p>
-              <h1 className="display-md mb-3 text-foreground">
-                {storedAccountId ?? 'Explorer'}
-              </h1>
-              <p className="type-body prose-width mx-auto mb-6 text-muted">
-                You&apos;re signed in but haven&apos;t registered as a player
-                yet. One click and you&apos;ll get a deposit memo so you can
-                fund your account and start playing.
-              </p>
-              <button
-                type="button"
-                onClick={handleRegister}
-                disabled={registerLoading}
-                className="inline-block border-2 border-brand bg-brand px-6 py-3 font-pixel text-[10px] uppercase tracking-wider text-background panel-shadow-sm transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-[6px_6px_0_0_var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {registerLoading ? 'Registering…' : 'Register now'}
-              </button>
-              <p className="type-caption mt-4">
-                You&apos;ll be using the{' '}
-                <span className="font-semibold text-foreground">balanced</span>{' '}
-                strategy — a sensible default for new players.
-              </p>
-            </div>
-          </ComicPanel>
-        </div>
-      </div>
-    );
-  }
-
-  // NOTE: We no longer return a full-page error when /api/user/status
-  // fails. The balance + deposit cards render an inline error state with
-  // Retry below, and the rest of the dashboard (history, trust panel,
-  // dead letters) continues to render independently. This means a
-  // single transient Redis blip on status doesn't wipe the whole page.
-
-  // Build balance rows
+  // ── Hero derivations hoisted above early returns ─────────────
+  // These and the three hooks below USED to live after the
+  // !sessionToken / notRegistered early returns. That's a Rules of
+  // Hooks violation: when a user signs in (flipping sessionToken
+  // from null to non-null) the render count of hooks changes
+  // between renders, tripping React error #310. Hooks must run in
+  // the same order on every render, so we hoist the hook calls —
+  // and the derivations they depend on — above the early returns.
+  // Non-hook derivations used only by the main JSX render path
+  // stay below.
+  const character = LSH_CHARACTERS[characterIdx] ?? LSH_CHARACTERS[0]!;
   const balanceEntries = status
     ? Object.entries(status.balances.tokens)
     : [];
-
-  const totalDeposited = balanceEntries
-    .map(([key, entry]) => `${formatAmount(entry.totalDeposited)} ${tokenSymbol(key)}`)
-    .join(', ') || '--';
-  const totalRakePaid = balanceEntries
-    .map(([key, entry]) => `${formatAmount(entry.totalRake)} ${tokenSymbol(key)}`)
-    .filter((s) => !s.startsWith('0'))
-    .join(', ') || '--';
-
-  const agentWallet = status?.agentWallet ?? '';
-
-  // ── Hero derivations ─────────────────────────────────────────
-  // The hero panel shows ONE huge balance number. We pick the token
-  // with the highest `available` balance as the primary; any other
-  // non-zero tokens are surfaced as secondary pills below. Multi-
-  // token users still see everything, single-token users (the common
-  // case) see one confident pot.
-  const character = LSH_CHARACTERS[characterIdx] ?? LSH_CHARACTERS[0]!;
-  const primaryBalanceEntry = balanceEntries.reduce<
-    [string, typeof balanceEntries[number][1]] | null
-  >((best, current) => {
-    if (!best) return current;
-    return current[1].available > best[1].available ? current : best;
-  }, null);
-  const secondaryBalanceEntries = primaryBalanceEntry
-    ? balanceEntries.filter(
-        ([k, e]) => k !== primaryBalanceEntry[0] && (e.available > 0 || e.reserved > 0),
-      )
-    : [];
   const hasPlayableBalance = balanceEntries.some(([, e]) => e.available > 0);
-  const agentClosed =
-    publicStats?.acceptingOperations === false;
-  // First-run = just registered, no balance, no plays. The mascot
-  // teaches the loop in this state. As soon as the user funds, they
-  // graduate to "ready" and the line changes to a nudge toward PLAY.
-  // After the first play, they rotate through lazy quips. Kill
-  // switch overrides everything.
+  const agentClosed = publicStats?.acceptingOperations === false;
   const isFirstRun =
     !!status && sessions.length === 0 && !hasPlayableBalance;
   const hasPendingClaim =
     !!prizeStatus && prizeStatus.available && prizeStatus.pending.count > 0;
+  const latestSession = sessions[0];
+  const lastPlayedAtMs = status?.lastPlayedAt
+    ? new Date(status.lastPlayedAt).getTime()
+    : null;
 
   // Mascot rarity: the character is mostly silent, speaking only at
   // MEANINGFUL moments. The narrative headline absorbs the functional
   // states (play-in-flight, agent-closed, pending-claim) so the bubble
   // is now reserved strictly for first-run teaching + the 24h
-  // quiet-window welcome-back. The critique flagged redundancy when
-  // both the headline and the bubble carried the same information.
+  // quiet-window welcome-back.
   const mascotShouldSpeak = shouldMascotSpeak({
     isFirstRun,
     visitCount,
@@ -1028,69 +919,16 @@ export default function DashboardPage() {
 
   // Stamp the speech moment once the bubble actually renders — gated
   // on the line being non-empty so a no-speak render doesn't burn the
-  // quiet-window budget. Runs after paint, not during render, so a
-  // unmount before paint doesn't consume the budget either.
+  // quiet-window budget. Runs after paint, not during render.
   useEffect(() => {
     if (characterLine) {
       markSpoken();
     }
   }, [characterLine]);
 
-  // ── Play progress phase derivation ─────────────────────────
-  // The /api/user/play POST takes 5-15s typically (deposit poll +
-  // Hedera consensus + prize transfer). We can't get progress events
-  // from a single POST, so we fake it with a time-based phase rotation
-  // — the user gets a sense of "what's happening now" instead of a
-  // static "Playing…" label that may not move for 10 seconds.
-  //
-  // Each phase has a button label. Time bands tuned from observation
-  // of the actual play flow:
-  //   0-2s   "Waking up the agent…"
-  //   2-5s   "Picking pools…"
-  //   5-10s  "Pulling the lever…"
-  //   10-15s "Watching the wheels…"
-  //   15s+   "Hedera consensus is happening…"
-  // After 15s the last phase sticks. Worst case the user waits longer
-  // than expected but at least they know it's a blockchain timing
-  // issue, not a frozen UI.
-  const PLAY_PHASES: { atMs: number; label: string }[] = [
-    { atMs: 0, label: 'Waking up the agent…' },
-    { atMs: 2000, label: 'Picking pools…' },
-    { atMs: 5000, label: 'Pulling the lever…' },
-    { atMs: 10000, label: 'Watching the wheels…' },
-    { atMs: 15000, label: 'Hedera consensus is happening…' },
-  ];
-  const currentPlayPhase = (() => {
-    if (!playLoading) return null;
-    let phase = PLAY_PHASES[0]!;
-    for (const p of PLAY_PHASES) {
-      if (playElapsedMs >= p.atMs) phase = p;
-    }
-    return phase;
-  })();
-  const playElapsedSec = Math.floor(playElapsedMs / 1000);
-
-  // Sessions to display (capped at 10 unless expanded)
-  const displayedSessions = showAll ? sessions : sessions.slice(0, 10);
-
-  // ── Latest session + freshness ───────────────────────────────
-  //
-  // The latest session feeds the narrative headline builder, which
-  // replaced the old "last ran 2h ago" literal + activity summary
-  // with a character-voiced one-liner. The headline no longer
-  // prefixes a timestamp — the freshness ribbon up top carries
-  // "updated 3s ago" and the relative time of the last run is
-  // communicated through the character's phrasing instead.
-  //
-  // getPlaySessionsForUser returns oldest→newest; the history API
-  // reverses for us, so sessions[0] is the most recent session.
-  const latestSession = sessions[0];
   // Relative time of the last run — shown in the freshness ribbon
-  // next to "updated 3s ago" so users can see both the agent's
-  // activity cadence AND when the dashboard was last refreshed.
-  const lastPlayedAtMs = status?.lastPlayedAt
-    ? new Date(status.lastPlayedAt).getTime()
-    : null;
+  // next to "updated 3s ago" so users see both the agent's activity
+  // cadence AND when the dashboard was last refreshed.
   const lastRunFreshness = useFreshness(
     Number.isFinite(lastPlayedAtMs) ? lastPlayedAtMs : null,
   );
@@ -1100,11 +938,11 @@ export default function DashboardPage() {
   // Build the hero headline text ONCE per meaningful state change
   // instead of on every render. Previously the headline's IIFE ran
   // inside the JSX on every render, which meant the 5-second
-  // freshness ribbon tick (via useFreshness) cascaded into a full
-  // headline rebuild every 5s even though none of the headline's
-  // actual inputs had changed. The audit flagged this as M4.
+  // freshness ribbon tick cascaded into a full headline rebuild
+  // every 5s even though none of the headline's actual inputs had
+  // changed.
   //
-  // The `character.name` is known at build time on the text prefix
+  // The `character.name` is known at build time for the text prefix
   // so we split it here too; the JSX layer just renders the
   // name in brand-gold + the rest in foreground.
   const narrativeHeadline = useMemo(() => {
@@ -1179,6 +1017,161 @@ export default function DashboardPage() {
     character,
     hasPendingClaim,
   ]);
+
+  // --- Loading state ---
+  // The dashboard no longer blocks on a full-page skeleton. We render the
+  // shell immediately and each section paints its own skeleton until its
+  // own fetch resolves. This means history shows up as soon as it lands
+  // (typically before status, since it doesn't go through getAgentContext)
+  // and the user gets an immediate sense that the page is alive.
+  //
+  // The auth wall and notRegistered wall remain full-page redirects below
+  // — those are discrete states, not loading states.
+
+  // --- No auth token ---
+  if (!sessionToken) {
+    // The previous version of this state was a generic muted "Sign in
+    // required / Welcome back / Authenticate with your Hedera wallet"
+    // card — indistinguishable from every crypto wallet auth gate. Now
+    // the persistent mascot sits front and centre with a character-
+    // voiced prompt, picked from the same roster the user will see
+    // on /auth and everywhere else. The first-time visitor meets the
+    // brand before they're even signed in. `character` is hoisted
+    // above the early returns alongside the hook dependencies.
+    return (
+      <div className="flex flex-1 items-center justify-center px-4 py-12">
+        <div className="w-full max-w-md">
+          <ComicPanel label="LOCKED" tone="muted" halftone="none">
+            <div className="flex flex-col items-center gap-5 p-8 text-center">
+              <CharacterMascot
+                key={character.name}
+                character={character}
+                size="sm"
+                line="You're not signed in. Tap Sign In and I'll start the engine."
+              />
+              <h1 className="display-md text-foreground">Welcome back</h1>
+              <a
+                href="/auth"
+                className="inline-block border-2 border-brand bg-brand px-6 py-3 font-pixel text-[10px] uppercase tracking-wider text-background panel-shadow-sm transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-[6px_6px_0_0_var(--color-ink)]"
+              >
+                Sign in →
+              </a>
+            </div>
+          </ComicPanel>
+        </div>
+      </div>
+    );
+  }
+
+  // --- Not registered state ---
+  if (notRegistered) {
+    return (
+      <div className="flex flex-1 items-center justify-center px-4 py-12">
+        <div className="w-full max-w-md">
+          <ComicPanel label="ISSUE #00" halftone="dense">
+            <div className="p-8 text-center">
+              <p className="label-caps-brand-lg mb-3">Welcome</p>
+              <h1 className="display-md mb-3 text-foreground">
+                {storedAccountId ?? 'Explorer'}
+              </h1>
+              <p className="type-body prose-width mx-auto mb-6 text-muted">
+                You&apos;re signed in but haven&apos;t registered as a player
+                yet. One click and you&apos;ll get a deposit memo so you can
+                fund your account and start playing.
+              </p>
+              <button
+                type="button"
+                onClick={handleRegister}
+                disabled={registerLoading}
+                className="inline-block border-2 border-brand bg-brand px-6 py-3 font-pixel text-[10px] uppercase tracking-wider text-background panel-shadow-sm transition-all hover:-translate-x-0.5 hover:-translate-y-0.5 hover:shadow-[6px_6px_0_0_var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {registerLoading ? 'Registering…' : 'Register now'}
+              </button>
+              <p className="type-caption mt-4">
+                You&apos;ll be using the{' '}
+                <span className="font-semibold text-foreground">balanced</span>{' '}
+                strategy — a sensible default for new players.
+              </p>
+            </div>
+          </ComicPanel>
+        </div>
+      </div>
+    );
+  }
+
+  // NOTE: We no longer return a full-page error when /api/user/status
+  // fails. The balance + deposit cards render an inline error state with
+  // Retry below, and the rest of the dashboard (history, trust panel,
+  // dead letters) continues to render independently. This means a
+  // single transient Redis blip on status doesn't wipe the whole page.
+
+  // Balance row formatting for the detailed card below the hero.
+  // `balanceEntries` itself is hoisted above the early returns
+  // alongside the hook dependencies — see the hoisted block above.
+  const totalDeposited = balanceEntries
+    .map(([key, entry]) => `${formatAmount(entry.totalDeposited)} ${tokenSymbol(key)}`)
+    .join(', ') || '--';
+  const totalRakePaid = balanceEntries
+    .map(([key, entry]) => `${formatAmount(entry.totalRake)} ${tokenSymbol(key)}`)
+    .filter((s) => !s.startsWith('0'))
+    .join(', ') || '--';
+
+  const agentWallet = status?.agentWallet ?? '';
+
+  // ── Primary/secondary token split ─────────────────────────────
+  // The hero panel shows ONE huge balance number. We pick the token
+  // with the highest `available` balance as the primary; any other
+  // non-zero tokens are surfaced as secondary pills below. Multi-
+  // token users still see everything, single-token users (the common
+  // case) see one confident pot.
+  const primaryBalanceEntry = balanceEntries.reduce<
+    [string, typeof balanceEntries[number][1]] | null
+  >((best, current) => {
+    if (!best) return current;
+    return current[1].available > best[1].available ? current : best;
+  }, null);
+  const secondaryBalanceEntries = primaryBalanceEntry
+    ? balanceEntries.filter(
+        ([k, e]) => k !== primaryBalanceEntry[0] && (e.available > 0 || e.reserved > 0),
+      )
+    : [];
+
+  // ── Play progress phase derivation ─────────────────────────
+  // The /api/user/play POST takes 5-15s typically (deposit poll +
+  // Hedera consensus + prize transfer). We can't get progress events
+  // from a single POST, so we fake it with a time-based phase rotation
+  // — the user gets a sense of "what's happening now" instead of a
+  // static "Playing…" label that may not move for 10 seconds.
+  //
+  // Each phase has a button label. Time bands tuned from observation
+  // of the actual play flow:
+  //   0-2s   "Waking up the agent…"
+  //   2-5s   "Picking pools…"
+  //   5-10s  "Pulling the lever…"
+  //   10-15s "Watching the wheels…"
+  //   15s+   "Hedera consensus is happening…"
+  // After 15s the last phase sticks. Worst case the user waits longer
+  // than expected but at least they know it's a blockchain timing
+  // issue, not a frozen UI.
+  const PLAY_PHASES: { atMs: number; label: string }[] = [
+    { atMs: 0, label: 'Waking up the agent…' },
+    { atMs: 2000, label: 'Picking pools…' },
+    { atMs: 5000, label: 'Pulling the lever…' },
+    { atMs: 10000, label: 'Watching the wheels…' },
+    { atMs: 15000, label: 'Hedera consensus is happening…' },
+  ];
+  const currentPlayPhase = (() => {
+    if (!playLoading) return null;
+    let phase = PLAY_PHASES[0]!;
+    for (const p of PLAY_PHASES) {
+      if (playElapsedMs >= p.atMs) phase = p;
+    }
+    return phase;
+  })();
+  const playElapsedSec = Math.floor(playElapsedMs / 1000);
+
+  // Sessions to display (capped at 10 unless expanded)
+  const displayedSessions = showAll ? sessions : sessions.slice(0, 10);
 
   // --- Dashboard ---
   return (
