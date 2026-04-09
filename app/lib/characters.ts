@@ -638,14 +638,27 @@ export function buildNarrativeHeadline(input: NarrativeHeadlineInput): string {
 }
 
 /**
- * Round a display amount for headline rendering. Keeps 2 decimals for
- * sub-1 values, 0 decimals otherwise, so "0.25 HBAR" reads naturally
- * but "150 HBAR" doesn't become "150.00 HBAR".
+ * Format a display amount for headline rendering.
+ *
+ * MUST produce the same string as `formatAmount` in dashboard/helpers.ts
+ * for the same input, because the headline and the play log display
+ * the same prize — showing "18 HBAR" in the headline next to
+ * "17.5 HBAR won" in the play log is the bug this function exists
+ * to prevent. The previous implementation rounded any amount ≥ 10
+ * to the nearest integer, which produced exactly that divergence
+ * for the common "7.5 + 10 = 17.5" win.
+ *
+ * Keep this implementation in lock-step with formatAmount in
+ * app/dashboard/helpers.ts. Characters.ts is the more fundamental
+ * module (imported by helpers) so we can't import from helpers here
+ * without a circular dependency — the logic is duplicated instead,
+ * which is cheap since it's one toLocaleString call.
  */
 function formatDisplayAmount(amount: number): string {
-  if (amount < 1) return amount.toFixed(2);
-  if (amount < 10) return amount.toFixed(1).replace(/\.0$/, '');
-  return Math.round(amount).toString();
+  return amount.toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 4,
+  });
 }
 
 /**
