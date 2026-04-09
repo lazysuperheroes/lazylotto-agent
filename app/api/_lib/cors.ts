@@ -2,12 +2,39 @@
  * Shared CORS helpers — central source of truth for allowed origins.
  *
  * AUTH_PAGE_ORIGIN may be a single origin or a comma-separated list.
- * In production (NODE_ENV=production):
- *   - If unset, throws at module load (fail closed)
- *   - Wildcard '*' is rejected (fail closed)
  *
- * In development:
- *   - Falls back to '*' for convenience
+ * Security posture:
+ *   - Production with a valid allow list → that list is the truth
+ *   - Production with wildcard '*' → rejected (fail closed), treated as empty
+ *   - Production with EMPTY/unset → fail closed to "no cross-origin allowed"
+ *     (same-origin requests still work because browsers don't send an
+ *     Origin header for those). Logs a loud warning at boot so the
+ *     operator sees it in Vercel function logs and knows to fix it.
+ *   - Development with empty → wildcard '*' for convenience
+ *
+ * ── Why we no longer throw at module load ──────────────────────
+ *
+ * Previously, `getAllowList` threw during module initialization if
+ * AUTH_PAGE_ORIGIN was unset in production. That produces a NICE
+ * fail-closed posture in theory, but in practice it was a catastrophic
+ * failure mode: every API route imports this module transitively via
+ * `_lib/auth`, so a missing env var on a cold-start Lambda instance
+ * caused Next.js to serve its generic HTML /500 page on EVERY
+ * request to EVERY route — and because the throw was at module-init,
+ * the route's own try/catch and the withStore wrapper couldn't see
+ * it. The failure was opaque in both the client network tab and
+ * the Vercel function logs.
+ *
+ * Fail-closed is still the goal, but "crash the entire API" is the
+ * wrong way to achieve it. The new behavior:
+ *   1. Module loads successfully with an empty allow list
+ *   2. A boot warning fires exactly once per process in production
+ *      so the operator gets a loud signal in Vercel logs
+ *   3. Per-request `isOriginAllowed()` returns false for cross-origin
+ *      callers — same fail-closed result, graceful failure mode
+ *   4. Same-origin requests (browser sends no Origin header) still
+ *      work, so the dashboard on the same domain keeps functioning
+ *      even with a misconfigured env var
  *
  * The actual Allow-Origin header echoed to a request is the first
  * matching entry from the allow list, never the literal env value
@@ -22,46 +49,44 @@ function parseAllowList(raw: string): string[] {
     .filter(Boolean);
 }
 
-// Lazy-evaluated allow list. We can't validate at module load because
-// Next.js executes route modules during `next build` for page-data
-// collection, BEFORE Vercel injects env vars. Validation happens on
-// first request (production) and is cached.
+// Lazy-evaluated allow list. Computed once per process lifetime and
+// cached. Never throws — an empty list means "fail closed" which
+// per-request checks enforce via isOriginAllowed.
 let cachedAllowList: string[] | null = null;
-let validated = false;
+let bootWarned = false;
 
 function getAllowList(): string[] {
   if (cachedAllowList !== null) return cachedAllowList;
 
   const raw = process.env.AUTH_PAGE_ORIGIN ?? '';
-  cachedAllowList = parseAllowList(raw);
+  const parsed = parseAllowList(raw);
 
-  // Validate once per process, only when actually serving requests
-  // (NODE_ENV is production AND env var is missing/wildcard).
-  // The build phase has NEXT_PHASE='phase-production-build' set;
-  // we skip validation during the build itself.
-  if (
-    !validated &&
+  // Treat wildcard '*' as misconfigured in production. Strip it so the
+  // per-request check falls through to the empty-list fail-closed path.
+  // In dev we keep the wildcard for convenience.
+  const isProd =
     process.env.NODE_ENV === 'production' &&
-    process.env.NEXT_PHASE !== 'phase-production-build'
-  ) {
-    if (cachedAllowList.length === 0) {
-      throw new Error(
-        '[CORS] AUTH_PAGE_ORIGIN must be set in production. ' +
-        'Set it to a comma-separated list of allowed origins.',
-      );
-    }
-    if (cachedAllowList.includes('*')) {
-      throw new Error(
-        '[CORS] Wildcard "*" is not allowed for AUTH_PAGE_ORIGIN in production. ' +
-        'Specify explicit origins instead.',
-      );
-    }
-    validated = true;
+    process.env.NEXT_PHASE !== 'phase-production-build';
+  const filtered =
+    isProd && parsed.includes('*') ? parsed.filter((o) => o !== '*') : parsed;
+
+  if (isProd && filtered.length === 0 && !bootWarned) {
+    console.warn(
+      '[CORS] AUTH_PAGE_ORIGIN is not set (or is only "*") in production. ' +
+      'Cross-origin requests will be rejected by isOriginAllowed(). ' +
+      'Same-origin requests still work. Set AUTH_PAGE_ORIGIN to a ' +
+      'comma-separated list of allowed origins (e.g. ' +
+      '"https://testnet-agent.lazysuperheroes.com") to enable cross-origin.',
+    );
+    bootWarned = true;
   }
 
-  // In dev (or during build), fall back to wildcard for convenience
-  if (cachedAllowList.length === 0) {
+  // In dev only, fall back to wildcard for convenience. In prod the
+  // list stays empty and per-request checks fail closed.
+  if (filtered.length === 0 && !isProd) {
     cachedAllowList = ['*'];
+  } else {
+    cachedAllowList = filtered;
   }
 
   return cachedAllowList;
