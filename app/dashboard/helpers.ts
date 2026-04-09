@@ -81,16 +81,37 @@ export interface CharacterLineState {
   isFirstRun: boolean;
   hasPlayableBalance: boolean;
   sessionsLength: number;
+  /**
+   * True when the user has wins sitting in the LazyLotto contract that
+   * weren't earned through this agent (typically direct dApp plays
+   * before the user registered with the agent). When this is true we
+   * suppress the first-run teaching bubble — the narrative headline
+   * up top already carries the claim-pending call to action, and a
+   * "welcome, new player" intro line would contradict it.
+   */
+  hasPendingClaim?: boolean;
 }
 
 export function pickCharacterLine(
   character: (typeof LSH_CHARACTERS)[number],
   state: CharacterLineState,
 ): string {
-  const { status, playLoading, agentClosed, isFirstRun, hasPlayableBalance, sessionsLength } = state;
+  const {
+    status,
+    playLoading,
+    agentClosed,
+    isFirstRun,
+    hasPlayableBalance,
+    sessionsLength,
+    hasPendingClaim,
+  } = state;
   if (!status) return '';
   if (playLoading) return pickLine(character.playingLines, status.userId + '-play');
   if (agentClosed) return pickLine(character.nappingLines, status.userId);
+  // Claim-pending edge case: suppress the bubble so the narrative
+  // headline ("Crawford spotted your dApp wins — go grab it…") stands
+  // alone without a contradicting first-run teaching line underneath.
+  if (isFirstRun && hasPendingClaim) return '';
   if (isFirstRun) return pickLine(character.introLines, status.userId);
   if (hasPlayableBalance && sessionsLength === 0) {
     return pickLine(character.readyLines, status.userId);

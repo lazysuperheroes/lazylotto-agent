@@ -535,7 +535,9 @@ export interface NarrativeHeadlineInput {
   character: LshCharacter;
   /** Current high-level agent state. */
   state:
-    | 'first-run'       // no balance, no plays
+    | 'first-run'       // no balance, no plays, no pending claim
+    | 'claim-pending'   // no agent activity yet, but wins waiting on-chain
+                        // (e.g. direct dApp plays before connecting agent)
     | 'ready'            // has balance, no plays yet
     | 'playing'          // a play session is in flight
     | 'closed'           // kill switch engaged
@@ -573,6 +575,16 @@ export function buildNarrativeHeadline(input: NarrativeHeadlineInput): string {
 
   if (state === 'first-run') {
     return `${name} ${voice.firstRunPhrase}.`;
+  }
+  // Direct-dApp players (and admin wallets that played via the dApp
+  // frontend before registering with this agent) have real on-chain
+  // wins waiting in the LazyLotto contract even though they've never
+  // used the agent. Acknowledging those wins in-voice beats the
+  // bogus "first drop, friend" headline while still nudging them
+  // toward the claim action. Reuses the pendingClaimSuffix each
+  // character already has — no new voice slot needed.
+  if (state === 'claim-pending') {
+    return `${name} spotted your dApp wins — ${voice.pendingClaimSuffix}.`;
   }
   if (state === 'ready') {
     return `${name} ${voice.readyPhrase}.`;

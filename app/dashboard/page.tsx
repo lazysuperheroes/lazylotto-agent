@@ -914,6 +914,7 @@ export default function DashboardPage() {
         isFirstRun,
         hasPlayableBalance,
         sessionsLength: sessions.length,
+        hasPendingClaim,
       })
     : '';
 
@@ -950,12 +951,22 @@ export default function DashboardPage() {
 
     let headlineState:
       | 'first-run'
+      | 'claim-pending'
       | 'ready'
       | 'playing'
       | 'closed'
       | 'has-history';
     if (playLoading) headlineState = 'playing';
     else if (agentClosed) headlineState = 'closed';
+    // Pending-claim-without-agent-history takes priority over first-run:
+    // if the user has wins sitting on the LazyLotto contract from
+    // direct dApp plays, the "waiting on your first drop, friend"
+    // headline is factually wrong. They're not a blank slate — they
+    // have money waiting. The claim-pending branch acknowledges that
+    // with a character-voiced nudge toward the dApp, while the rest
+    // of the dashboard (deposit teaching, "no sessions yet" play log)
+    // continues to reflect the agent-side reality.
+    else if (isFirstRun && hasPendingClaim) headlineState = 'claim-pending';
     else if (isFirstRun) headlineState = 'first-run';
     // Edge case: lastPlayedAt is set but the sessions array hasn't
     // loaded yet (rare race during a fresh history fetch). Treat as
