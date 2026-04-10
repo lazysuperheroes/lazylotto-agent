@@ -33,6 +33,7 @@
     "dev:http": "node --import tsx src/index.ts --mcp-server --http",
     "dev:multi-http": "node --import tsx src/index.ts --multi-user --mcp-server --http",
     "test": "node --test --import tsx src/**/*.test.ts src/__tests__/*.test.ts",
+    "check-protocols": "node --import tsx src/cli/check-protocols.ts",
     "test:web": "vitest run",
     "test:web:watch": "vitest",
     "prepublishOnly": "npm run build"
