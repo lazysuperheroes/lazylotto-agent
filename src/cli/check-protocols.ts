@@ -76,7 +76,7 @@ async function post(
 
 // ── Auth helper ────────────────────────────────────────────────
 
-async function authenticate(): Promise<string | null> {
+async function authenticate(): Promise<{ token: string; tier: string } | null> {
   const accountId = process.env.HEDERA_ACCOUNT_ID;
   const privateKeyStr = process.env.HEDERA_PRIVATE_KEY;
 
@@ -120,7 +120,9 @@ async function authenticate(): Promise<string | null> {
     });
     if (verifyRes.status !== 200) return null;
 
-    return (verifyRes.data as { sessionToken?: string }).sessionToken ?? null;
+    const session = verifyRes.data as { sessionToken?: string; tier?: string };
+    if (!session.sessionToken) return null;
+    return { token: session.sessionToken, tier: session.tier ?? 'user' };
   } catch (e) {
     console.warn(
       '  Auth failed:',
@@ -312,37 +314,46 @@ async function testA2aEndpoint() {
   }
 }
 
-async function testAuthParity(token: string) {
+async function testAuthParity(token: string, tier: string) {
   console.log('\n─── Auth Parity (MCP vs A2A) ───');
 
-  // Call operator_health via MCP
-  let mcpResult: unknown;
+  // Pick a tool that the authenticated tier can access.
+  // user tier → multi_user_deposit_info (user-accessible)
+  // admin/operator → operator_health (admin/operator only)
+  const toolName = tier === 'user' ? 'multi_user_deposit_info' : 'operator_health';
+  const skillParams = tier === 'user' ? {} : {};
+
+  // Call via MCP
+  let mcpData: Record<string, unknown> | null = null;
+  let mcpIsError = false;
   try {
     const { status, data } = await post('/api/mcp', {
       jsonrpc: '2.0',
       id: 10,
       method: 'tools/call',
-      params: { name: 'operator_health', arguments: { auth_token: token } },
+      params: { name: toolName, arguments: { auth_token: token, ...skillParams } },
     });
     if (status !== 200) {
-      fail('MCP operator_health', `Status ${status}`);
+      fail(`MCP ${toolName}`, `Status ${status}`);
       return;
     }
-    const result = data.result as { content?: { text: string }[] } | undefined;
+    const result = data.result as { content?: { text: string }[]; isError?: boolean } | undefined;
+    mcpIsError = result?.isError === true;
     if (result?.content?.[0]?.text) {
-      mcpResult = JSON.parse(result.content[0].text);
-      ok('MCP operator_health', 'Got response');
+      mcpData = JSON.parse(result.content[0].text) as Record<string, unknown>;
+      ok(`MCP ${toolName}`, mcpIsError ? `Error: ${mcpData.error}` : 'Success');
     } else {
-      fail('MCP operator_health', 'No content in response');
+      fail(`MCP ${toolName}`, 'No content in response');
       return;
     }
   } catch (e) {
-    fail('MCP operator_health', String(e));
+    fail(`MCP ${toolName}`, String(e));
     return;
   }
 
-  // Call operator_health via A2A
-  let a2aResult: unknown;
+  // Call via A2A
+  let a2aData: Record<string, unknown> | null = null;
+  let a2aIsError = false;
   try {
     const { status, data } = await post(
       '/api/a2a',
@@ -355,14 +366,14 @@ async function testAuthParity(token: string) {
             kind: 'message',
             messageId: 'parity-1',
             role: 'user',
-            parts: [{ kind: 'data', data: { skill: 'operator_health', params: {} } }],
+            parts: [{ kind: 'data', data: { skill: toolName, params: skillParams } }],
           },
         },
       },
       { Authorization: `Bearer ${token}` },
     );
     if (status !== 200) {
-      fail('A2A operator_health', `Status ${status}`);
+      fail(`A2A ${toolName}`, `Status ${status}`);
       return;
     }
     const result = data.result as {
@@ -370,30 +381,48 @@ async function testAuthParity(token: string) {
       status?: { state: string };
       artifacts?: { parts: { kind: string; data: unknown }[] }[];
     } | undefined;
-    if (result?.kind === 'task' && result?.status?.state === 'completed') {
-      a2aResult = result.artifacts?.[0]?.parts?.[0]?.data;
-      ok('A2A operator_health', 'Got completed task');
+
+    if (result?.kind === 'task') {
+      a2aIsError = result.status?.state === 'failed';
+      if (a2aIsError) {
+        // Extract error from status message
+        const errParts = (result.status as { message?: { parts: { text?: string }[] } }).message?.parts;
+        a2aData = { error: errParts?.[0]?.text ?? 'unknown' };
+      } else {
+        a2aData = result.artifacts?.[0]?.parts?.[0]?.data as Record<string, unknown> ?? null;
+      }
+      ok(`A2A ${toolName}`, a2aIsError ? `Error: ${a2aData?.error}` : 'Success (completed task)');
     } else {
-      fail('A2A operator_health', `Unexpected result: ${JSON.stringify(result?.status)}`);
+      fail(`A2A ${toolName}`, `Not a task: ${JSON.stringify(result)}`);
       return;
     }
   } catch (e) {
-    fail('A2A operator_health', String(e));
+    fail(`A2A ${toolName}`, String(e));
     return;
   }
 
-  // Compare — both should have the same keys (values may differ due to timing)
-  if (mcpResult && a2aResult) {
-    const mcpKeys = Object.keys(mcpResult as Record<string, unknown>).sort();
-    const a2aKeys = Object.keys(a2aResult as Record<string, unknown>).sort();
+  // Compare: both should either succeed or fail, and with the same keys
+  if (mcpIsError !== a2aIsError) {
+    fail(
+      `Parity: ${toolName}`,
+      `MCP isError=${mcpIsError}, A2A isError=${a2aIsError}`,
+    );
+    return;
+  }
+
+  if (mcpData && a2aData) {
+    const mcpKeys = Object.keys(mcpData).sort();
+    const a2aKeys = Object.keys(a2aData).sort();
     if (JSON.stringify(mcpKeys) === JSON.stringify(a2aKeys)) {
-      ok('Parity: operator_health', `Same keys: ${mcpKeys.join(', ')}`);
+      ok(`Parity: ${toolName}`, `Both ${mcpIsError ? 'denied' : 'succeeded'} — same keys: ${mcpKeys.join(', ')}`);
     } else {
       fail(
-        'Parity: operator_health',
+        `Parity: ${toolName}`,
         `Keys differ — MCP: [${mcpKeys.join(',')}] A2A: [${a2aKeys.join(',')}]`,
       );
     }
+  } else {
+    ok(`Parity: ${toolName}`, `Both ${mcpIsError ? 'denied' : 'returned'} consistently`);
   }
 }
 
@@ -467,10 +496,10 @@ async function main() {
   await testNoAuthParity();
 
   // Authenticated tests (if credentials available)
-  const token = await authenticate();
-  if (token) {
-    console.log('\n  Authenticated successfully');
-    await testAuthParity(token);
+  const auth = await authenticate();
+  if (auth) {
+    console.log(`\n  Authenticated successfully (tier: ${auth.tier})`);
+    await testAuthParity(auth.token, auth.tier);
   } else {
     skip('Auth parity tests', 'No HEDERA_ACCOUNT_ID + HEDERA_PRIVATE_KEY in .env');
   }
