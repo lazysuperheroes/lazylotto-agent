@@ -57,9 +57,17 @@ async function post(
   body: unknown,
   headers?: Record<string, string>,
 ): Promise<{ status: number; data: Record<string, unknown> }> {
+  // MCP SDK's WebStandardStreamableHTTPServerTransport requires the
+  // Accept header to include both application/json AND text/event-stream,
+  // otherwise it returns 406 Not Acceptable. A2A doesn't care but it
+  // doesn't hurt to send it there too.
   const res = await fetch(`${BASE_URL}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...headers },
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      ...headers,
+    },
     body: JSON.stringify(body),
   });
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;

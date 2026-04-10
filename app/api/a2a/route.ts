@@ -106,10 +106,16 @@ export const POST = withStore(async (request: Request) => {
 
       await server.connect(transport);
 
-      // Build a synthetic Request for the transport
+      // Build a synthetic Request for the transport. The MCP SDK's
+      // WebStandardStreamableHTTPServerTransport requires Accept to
+      // include both application/json and text/event-stream — without
+      // it, handleRequest returns 406 Not Acceptable.
       const syntheticRequest = new Request('http://localhost/api/mcp', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+        },
         body: JSON.stringify(mcpRequest),
       });
 
