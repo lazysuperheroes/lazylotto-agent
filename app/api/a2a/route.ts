@@ -16,12 +16,9 @@
  */
 
 import { NextResponse } from 'next/server';
-import { WebStandardStreamableHTTPServerTransport }
-  from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { buildAgentCard } from '~/a2a/agent-card';
 import { dispatch } from '~/a2a/dispatcher';
 import type { ToolResult } from '~/a2a/adapter';
-import { createMcpServer } from '../_lib/mcp';
 import { withStore } from '../_lib/withStore';
 import { staticCorsHeaders } from '../_lib/cors';
 import { checkRateLimit, rateLimitResponse } from '../_lib/rateLimit';
@@ -70,14 +67,17 @@ export const POST = withStore(async (request: Request) => {
       ? authHeader.slice(7)
       : undefined;
 
-    // The callTool function bridges A2A → MCP. It creates a fresh
-    // McpServer per call (lightweight — tool registration is a hashmap
-    // insert) and dispatches through the MCP transport so we get
-    // EXACTLY the same code path as a real MCP tools/call request.
+    // The callTool function bridges A2A → MCP by calling the REAL
+    // MCP endpoint via HTTP. This guarantees identical behavior by
+    // construction — the request goes through the exact same route
+    // handler, rate limiter, transport, and tool dispatch as any
+    // external MCP caller.
     //
-    // This is intentionally NOT duplicated handler code — it goes
-    // through the full MCP pipeline including auth, Zod validation,
-    // distributed locks, and error formatting.
+    // We resolve the MCP URL from the request's own origin so this
+    // works on any deployment (testnet, mainnet, localhost).
+    const origin = new URL(request.url).origin;
+    const mcpUrl = `${origin}/api/mcp`;
+
     const callTool = async (
       toolName: string,
       params: Record<string, unknown>,
@@ -87,10 +87,6 @@ export const POST = withStore(async (request: Request) => {
         ? { ...params, auth_token: authToken }
         : params;
 
-      // Create a fresh MCP server with all tools registered
-      const server = await createMcpServer();
-
-      // Build a JSON-RPC tools/call request body
       const mcpRequest = {
         jsonrpc: '2.0',
         id: 1,
@@ -98,19 +94,7 @@ export const POST = withStore(async (request: Request) => {
         params: { name: toolName, arguments: paramsWithAuth },
       };
 
-      // Create a stateless transport and pipe the request through
-      const transport = new WebStandardStreamableHTTPServerTransport({
-        sessionIdGenerator: undefined, // stateless
-        enableJsonResponse: true,
-      });
-
-      await server.connect(transport);
-
-      // Build a synthetic Request for the transport. The MCP SDK's
-      // WebStandardStreamableHTTPServerTransport requires Accept to
-      // include both application/json and text/event-stream — without
-      // it, handleRequest returns 406 Not Acceptable.
-      const syntheticRequest = new Request('http://localhost/api/mcp', {
+      const mcpResponse = await fetch(mcpUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -118,9 +102,6 @@ export const POST = withStore(async (request: Request) => {
         },
         body: JSON.stringify(mcpRequest),
       });
-
-      const mcpResponse = await transport.handleRequest(syntheticRequest);
-      await transport.close();
 
       // Parse the MCP response to extract the tool result
       const mcpBody = await mcpResponse.json() as {
