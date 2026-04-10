@@ -53,6 +53,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "@a2a-js/sdk": "^0.3.13",
     "@hashgraph/hedera-wallet-connect": "^2.1.2",
     "@hashgraph/proto": "^2.25.0",
     "@hashgraph/sdk": "^2.81.0",

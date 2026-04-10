@@ -101,6 +101,8 @@ function buildAgentProfile(hcs11: any) {
         auth_endpoint: `${baseUrl}/api/auth/challenge`,
         discover_endpoint: `${baseUrl}/api/discover`,
         mcp_endpoint: `${baseUrl}/api/mcp`,
+        a2a_endpoint: `${baseUrl}/api/a2a`,
+        agent_card: `${baseUrl}/.well-known/agent-card.json`,
         dashboard: `${baseUrl}/dashboard`,
         rake_range: `${process.env.RAKE_MIN_PERCENT ?? 2}-${process.env.RAKE_MAX_PERCENT ?? 5}%`,
         accepted_tokens: 'HBAR,LAZY',
@@ -230,10 +232,21 @@ async function registerWithBroker(
 
   log('  Registering with HOL registry broker...');
 
+  const baseUrl = network === 'mainnet'
+    ? 'https://agent.lazysuperheroes.com'
+    : 'https://testnet-agent.lazysuperheroes.com';
+
   let uaid: string;
   try {
     const registration = await brokerClient.registerAgent({
       profile: JSON.parse(profileJson),
+      // endpoint + communicationProtocol tell the broker HOW to reach
+      // this agent over MCP/A2A. Without these, the base registration
+      // goes through but the agent isn't discoverable as an MCP or A2A
+      // endpoint — other agents can find us by name but can't connect.
+      // See: https://hol.org/registry/docs/getting-started/first-registration
+      endpoint: `${baseUrl}/api/mcp`,
+      communicationProtocol: 'MCP',
       metadata: {
         category: 'gaming',
         provider: 'lazy-superheroes',
@@ -302,8 +315,14 @@ async function updateRegistration(
 
   const profileJson = (hcs11 as any).profileToJSONString(profile);
 
+  const baseUrl = network === 'mainnet'
+    ? 'https://agent.lazysuperheroes.com'
+    : 'https://testnet-agent.lazysuperheroes.com';
+
   await brokerClient.updateAgent(existing.uaid!, {
     profile: JSON.parse(profileJson),
+    endpoint: `${baseUrl}/api/mcp`,
+    communicationProtocol: 'MCP',
     metadata: {
       category: 'gaming',
       provider: 'lazy-superheroes',
