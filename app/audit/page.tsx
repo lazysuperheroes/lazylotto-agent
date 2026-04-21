@@ -383,12 +383,37 @@ function statusBadgeClasses(status: V2SessionStatus): string {
 
 function statusLabel(status: V2SessionStatus): string {
   switch (status) {
-    case 'closed_success': return 'Closed';
+    // "Played" reads as an action ("the session was played") rather
+    // than a door state ("closed"). Users consistently misread the
+    // earlier "Closed" label as "the pool is shut" instead of "the
+    // session completed successfully". Reserve "Closed" vocab for
+    // the rare aborted/orphaned paths where the session ended
+    // without a clean play.
+    case 'closed_success': return 'Played';
     case 'closed_aborted': return 'Aborted';
     case 'in_flight': return 'In flight';
     case 'orphaned': return 'Orphaned';
     case 'corrupt': return 'CORRUPT';
   }
+}
+
+/**
+ * Format a per-token amount map as a compact human string.
+ * Examples:
+ *   { HBAR: 30 }             → "30 HBAR"
+ *   { HBAR: 30, LAZY: 5 }    → "30 HBAR + 5 LAZY"
+ *   { }                      → ""
+ * Zero-value entries are dropped so a 0-spend token doesn't clutter
+ * the line. Token IDs (0.0.X) pass through displayToken which maps
+ * LLCRED → HBAR for the legacy tick case.
+ */
+function formatByToken(byToken: Record<string, number>): string {
+  const parts: string[] = [];
+  for (const [token, amount] of Object.entries(byToken)) {
+    if (!amount) continue;
+    parts.push(`${formatAmount(amount)} ${displayToken(token)}`);
+  }
+  return parts.join(' + ');
 }
 
 function prizeTransferLabel(
@@ -436,11 +461,29 @@ function SessionCard({
             </div>
             <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
               <span className="text-foreground">
-                Spent <span className="num-tabular text-info">{formatAmount(session.totalSpent)}</span>
+                Spent{' '}
+                <span className="num-tabular text-info">
+                  {/* Per-token spend (HBAR for native, 0.0.X for FTs).
+                      Multi-token sessions render as "X HBAR + Y LAZY"
+                      so the cross-token sum (session.totalSpent) is
+                      never shown unlabeled. Falls back to a bare
+                      formatAmount for the edge case where the reader
+                      produced totalSpent but no per-token breakdown
+                      (shouldn't happen for v2, but v1 fallback sets
+                      totalSpentByToken={HBAR: totalSpent}). */}
+                  {Object.keys(session.totalSpentByToken).length > 0
+                    ? formatByToken(session.totalSpentByToken)
+                    : `${formatAmount(session.totalSpent)} HBAR`}
+                </span>
               </span>
               {isWin && (
                 <span className="text-foreground">
-                  Won <span className="num-tabular text-brand">+{formatAmount(session.totalPrizeValue)}</span>
+                  Won{' '}
+                  <span className="num-tabular text-brand">
+                    {Object.keys(session.totalPrizeValueByToken).length > 0
+                      ? `+${formatByToken(session.totalPrizeValueByToken)}`
+                      : `+${formatAmount(session.totalPrizeValue)} HBAR`}
+                  </span>
                   {session.totalNftCount > 0 && (
                     <span className="ml-1 text-muted">+ {session.totalNftCount} NFT{session.totalNftCount === 1 ? '' : 's'}</span>
                   )}
@@ -815,7 +858,14 @@ export default function AuditPage() {
   const nonPlayEntries = (v2Sessions && v2Sessions.length > 0)
     ? entries.filter((e) => e.type !== 'play')
     : entries;
-  const displayedEntries = showAll ? nonPlayEntries : nonPlayEntries.slice(0, 20);
+  // Newest first. Both the reader (sessions by firstSeq ascending)
+  // and the mirror node (messages by sequence ascending) return in
+  // oldest-first order; the dashboard's play log is newest-first,
+  // and a long audit page reads most naturally when the most recent
+  // activity is on top rather than buried under months of history.
+  const orderedSessions = (v2Sessions ?? []).slice().reverse();
+  const orderedEntries = nonPlayEntries.slice().reverse();
+  const displayedEntries = showAll ? orderedEntries : orderedEntries.slice(0, 20);
 
   return (
     <div className="w-full px-4 py-8 sm:px-6 lg:px-8">
@@ -1116,19 +1166,19 @@ export default function AuditPage() {
             so users can scan top to bottom and verify the math.
             Click to expand for the per-pool breakdown.
             ---- */}
-        {v2Sessions && v2Sessions.length > 0 && (
+        {orderedSessions.length > 0 && (
           <div className="mb-6 space-y-4">
             <h2 className="font-heading text-lg text-foreground">
-              Play sessions ({v2Sessions.length})
+              Play sessions ({orderedSessions.length})
             </h2>
-            {v2Sessions.map((s) => (
+            {orderedSessions.map((s) => (
               <SessionCard key={s.sessionId} session={s} explorerUrl={explorerUrl} />
             ))}
           </div>
         )}
 
         {/* ---- Timeline ---- */}
-        {entries.length > 0 ? (
+        {orderedEntries.length > 0 ? (
           <>
             <div className="space-y-4">
               {displayedEntries.map((entry) => (
@@ -1161,11 +1211,11 @@ export default function AuditPage() {
 
                     {entry.amount ? (
                       <span className="font-heading text-sm text-foreground">
-                        {entry.amount} {displayToken(entry.token)}
+                        {entry.amount} {displayToken(entry.token) || 'HBAR'}
                       </span>
                     ) : entry.type === 'play' && entry.totalSpent != null ? (
                       <span className="font-heading text-sm text-foreground">
-                        {formatAmount(entry.totalSpent)}
+                        {formatAmount(entry.totalSpent)} HBAR
                         <span className="ml-1 text-[10px] uppercase tracking-wider text-muted">
                           spent
                         </span>
@@ -1346,19 +1396,22 @@ export default function AuditPage() {
               ))}
             </div>
 
-            {/* Show more / less toggle */}
-            {entries.length > 20 && !showAll && (
+            {/* Show more / less toggle — uses orderedEntries (post
+                play-filter) so the "show 20 more" count never
+                advertises hidden play entries the user can never
+                see anyway. */}
+            {orderedEntries.length > 20 && !showAll && (
               <div className="mt-4 text-center">
                 <button
                   type="button"
                   onClick={() => setShowAll(true)}
                   className="text-sm text-brand transition-colors hover:text-brand/80"
                 >
-                  Show older entries ({entries.length - 20} more)
+                  Show older entries ({orderedEntries.length - 20} more)
                 </button>
               </div>
             )}
-            {showAll && entries.length > 20 && (
+            {showAll && orderedEntries.length > 20 && (
               <div className="mt-4 text-center">
                 <button
                   type="button"

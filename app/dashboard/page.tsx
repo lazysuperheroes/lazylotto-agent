@@ -2091,6 +2091,31 @@ export default function DashboardPage() {
                         (sum, pr) => sum + pr.entriesBought,
                         0,
                       );
+                      // Build a per-token win summary from prizesByToken
+                      // (e.g. "7.5 HBAR + 10 HBAR" or "5 LAZY") so the
+                      // header never shows a bare, unlabeled number.
+                      // Falls back to totalPrizeValue + HBAR for the
+                      // edge case where prizesByToken is empty but
+                      // totalPrizeValue is set (legacy records).
+                      // Empty/zero entries are filtered so a 0-HBAR
+                      // bucket doesn't leak into the display. NFT wins
+                      // don't have fungible value and are surfaced via
+                      // the prize cards below.
+                      const winTokenParts: string[] = [];
+                      for (const [token, amount] of Object.entries(s.prizesByToken ?? {})) {
+                        if (!amount) continue;
+                        winTokenParts.push(`${formatAmount(amount)} ${token}`);
+                      }
+                      const wonDisplay = winTokenParts.length > 0
+                        ? `${winTokenParts.join(' + ')} won`
+                        : s.totalPrizeValue > 0
+                          ? `${formatAmount(s.totalPrizeValue)} HBAR won`
+                          : 'NFT won';
+                      // Spend is HBAR today across all strategies. If
+                      // multi-token spend ever lands, PlaySessionResult
+                      // needs a spentByToken field to surface it here;
+                      // until then HBAR is both accurate and explicit.
+                      const spentDisplay = `${formatAmount(s.totalSpent)} HBAR spent`;
                       return (
                         <li
                           key={s.sessionId}
@@ -2116,9 +2141,7 @@ export default function DashboardPage() {
                                   isWin ? 'text-brand' : 'text-muted'
                                 }`}
                               >
-                                {isWin
-                                  ? `${formatAmount(s.totalPrizeValue)} won`
-                                  : `${formatAmount(s.totalSpent)} spent`}
+                                {isWin ? wonDisplay : spentDisplay}
                               </span>
                               {isWin && (
                                 <span className="font-pixel text-[10px] uppercase tracking-wider text-muted">
@@ -2149,7 +2172,7 @@ export default function DashboardPage() {
                             <span className="text-muted">
                               <span className="label-caps mr-1.5">Spent</span>
                               <span className="num-tabular text-foreground">
-                                {formatAmount(s.totalSpent)}
+                                {formatAmount(s.totalSpent)} HBAR
                               </span>
                             </span>
                             {isWin && s.totalWins > 0 && (
