@@ -10,6 +10,15 @@ import { useNftEnrichment } from '../components/useNftEnrichment';
 import { ComicPanel } from '../components/ComicPanel';
 import { SkeletonBox } from '../components/SkeletonBox';
 import { clearSession } from '../lib/session';
+import type { V2SessionStatus } from './types';
+import {
+  formatAmount,
+  displayToken,
+  formatByToken,
+  statusLabel,
+  statusBadgeClasses,
+  prizeTransferLabel,
+} from './helpers';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -133,12 +142,8 @@ interface V2NormalizedPool {
   ts: string;
 }
 
-type V2SessionStatus =
-  | 'closed_success'
-  | 'closed_aborted'
-  | 'in_flight'
-  | 'orphaned'
-  | 'corrupt';
+// V2SessionStatus is imported from ./types so helpers.ts can depend
+// on it without pulling in this client component.
 
 interface V2NormalizedSession {
   sessionId: string;
@@ -204,22 +209,11 @@ interface AuditResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Helpers (formatAmount, displayToken, formatByToken, statusLabel,
+// statusBadgeClasses, prizeTransferLabel live in ./helpers.ts so they
+// can be unit-tested without rendering the whole page. Keep page-only
+// helpers like formatTimestamp here.)
 // ---------------------------------------------------------------------------
-
-function formatAmount(amount: number): string {
-  return amount.toLocaleString(undefined, {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 4,
-  });
-}
-
-/** Map HCS-20 tick names to user-friendly token names. */
-function displayToken(tick?: string): string {
-  if (!tick) return '';
-  if (tick === 'LLCRED') return 'HBAR';
-  return tick;
-}
 
 function formatTimestamp(iso: string): string {
   try {
@@ -370,63 +364,9 @@ function AuditSkeleton() {
 //   in_flight       → muted spinner
 //   orphaned        → destructive
 //   corrupt         → destructive with hash icon
-
-function statusBadgeClasses(status: V2SessionStatus): string {
-  switch (status) {
-    case 'closed_success': return 'bg-success/15 text-success';
-    case 'closed_aborted': return 'bg-destructive/15 text-destructive';
-    case 'in_flight': return 'bg-info/15 text-info';
-    case 'orphaned': return 'bg-destructive/15 text-destructive';
-    case 'corrupt': return 'bg-destructive/15 text-destructive';
-  }
-}
-
-function statusLabel(status: V2SessionStatus): string {
-  switch (status) {
-    // "Played" reads as an action ("the session was played") rather
-    // than a door state ("closed"). Users consistently misread the
-    // earlier "Closed" label as "the pool is shut" instead of "the
-    // session completed successfully". Reserve "Closed" vocab for
-    // the rare aborted/orphaned paths where the session ended
-    // without a clean play.
-    case 'closed_success': return 'Played';
-    case 'closed_aborted': return 'Aborted';
-    case 'in_flight': return 'In flight';
-    case 'orphaned': return 'Orphaned';
-    case 'corrupt': return 'CORRUPT';
-  }
-}
-
-/**
- * Format a per-token amount map as a compact human string.
- * Examples:
- *   { HBAR: 30 }             → "30 HBAR"
- *   { HBAR: 30, LAZY: 5 }    → "30 HBAR + 5 LAZY"
- *   { }                      → ""
- * Zero-value entries are dropped so a 0-spend token doesn't clutter
- * the line. Token IDs (0.0.X) pass through displayToken which maps
- * LLCRED → HBAR for the legacy tick case.
- */
-function formatByToken(byToken: Record<string, number>): string {
-  const parts: string[] = [];
-  for (const [token, amount] of Object.entries(byToken)) {
-    if (!amount) continue;
-    parts.push(`${formatAmount(amount)} ${displayToken(token)}`);
-  }
-  return parts.join(' + ');
-}
-
-function prizeTransferLabel(
-  status: 'succeeded' | 'skipped' | 'failed' | 'recovered' | undefined,
-): { text: string; className: string } {
-  switch (status) {
-    case 'succeeded': return { text: 'Delivered to your wallet', className: 'text-success' };
-    case 'skipped': return { text: 'Nothing to deliver', className: 'text-muted' };
-    case 'failed': return { text: 'Delivery failed — operator notified', className: 'text-destructive' };
-    case 'recovered': return { text: 'Recovered by operator', className: 'text-brand' };
-    default: return { text: 'Unknown', className: 'text-muted' };
-  }
-}
+//
+// Pure helpers (statusLabel, statusBadgeClasses, prizeTransferLabel,
+// formatByToken) live in ./helpers.ts so they're unit-testable.
 
 function SessionCard({
   session,
