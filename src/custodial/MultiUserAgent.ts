@@ -643,11 +643,29 @@ export class MultiUserAgent {
           poolName: r.poolName,
           entriesBought: r.entriesBought,
           amountSpent: r.amountSpent,
+          // Propagate the canonical pool fee token. PoolResult.feeTokenId
+          // is the budget key used by the play loop and the v2 audit
+          // trail; persisting it into PlaySessionResult lets the
+          // dashboard display per-pool spend without guessing.
+          feeTokenId: r.feeTokenId,
           rolled: r.rolled,
           wins: r.wins,
           prizeDetails: r.prizeDetails,
         })),
         totalSpent: actualSpent,
+        // Per-token spend breakdown. Derived from per-pool settlements
+        // (spentByTokenId) rather than report.spentByToken so the map
+        // reflects the ACTUAL spend after reservations settled, not
+        // the mid-session report view. Keys match the per-token
+        // settlement ledger: "hbar" for native HBAR or a Hedera token
+        // id for FTs. Normalized to "HBAR" upper-case here so downstream
+        // (dashboard + audit) doesn't have to branch on case.
+        spentByToken: Object.fromEntries(
+          Array.from(spentByTokenId.entries()).map(([t, amt]) => [
+            t === 'hbar' ? 'HBAR' : t,
+            amt,
+          ]),
+        ),
         totalWins: report.totalWins,
         totalPrizeValue: report.totalPrizeValue,
         prizesByToken: report.prizesByToken,

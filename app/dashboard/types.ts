@@ -57,6 +57,13 @@ export interface PoolResult {
   poolName: string;
   entriesBought: number;
   amountSpent: number;
+  /**
+   * Canonical pool fee token (v2+ sessions). "HBAR" for native, a
+   * Hedera token id (e.g. "0.0.8011209") for FTs. Absent on legacy
+   * records — callers should treat the missing case as "HBAR" since
+   * all pre-v2 spend is HBAR by construction.
+   */
+  feeTokenId?: string;
   rolled: boolean;
   wins: number;
   prizeDetails: PrizeDetail[];
@@ -73,6 +80,13 @@ export interface PlaySession {
   poolsPlayed: number;
   poolResults: PoolResult[];
   totalSpent: number;
+  /**
+   * Per-token spend (v2+ sessions). Same key space as prizesByToken:
+   * "HBAR" for native, Hedera token id for FTs. Absent on legacy
+   * records — callers should synthesize `{ HBAR: totalSpent }` when
+   * missing since pre-v2 spend is HBAR-only.
+   */
+  spentByToken?: Record<string, number>;
   totalWins: number;
   totalPrizeValue: number;
   prizesByToken: Record<string, number>;

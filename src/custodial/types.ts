@@ -12,8 +12,13 @@ import type { PrizeDetail } from '../agent/ReportGenerator.js';
 // Version history:
 //   0 — pre-versioning (no schemaVersion field)
 //   1 — initial versioned schema (2026-04-06)
+//   2 — PlaySessionResult gains spentByToken + poolResults[].feeTokenId
+//       (2026-04-21). Legacy v0/v1 records synthesize
+//       spentByToken = { HBAR: totalSpent } on read — all pre-v2 spend
+//       is HBAR by construction. See MultiUserAgent.playForUser and
+//       app/api/user/history/route.ts for the read-time fallback.
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 // ── User ──────────────────────────────────────────────────────
 
@@ -150,11 +155,26 @@ export interface PlaySessionResult {
     poolName: string;
     entriesBought: number;
     amountSpent: number;
+    /**
+     * Canonical pool fee token (v2+). "HBAR" for native, a Hedera
+     * token id (e.g. "0.0.8011209") for FTs. Sourced from
+     * PoolResult.feeTokenId at write time. Legacy v0/v1 records
+     * lack this field; readers should assume "HBAR" when absent
+     * since all pre-v2 spend is HBAR by construction.
+     */
+    feeTokenId?: string;
     rolled: boolean;
     wins: number;
     prizeDetails: PrizeDetail[];
   }[];
   totalSpent: number;
+  /**
+   * Per-token spend breakdown (v2+). Same key space as prizesByToken:
+   * "HBAR" for native, Hedera token id for FTs. Legacy v0/v1 records
+   * lack this field — dashboard/history readers should synthesize
+   * { HBAR: totalSpent } on the fly since pre-v2 spend is HBAR-only.
+   */
+  spentByToken?: Record<string, number>;
   totalWins: number;
   totalPrizeValue: number;
   prizesByToken: Record<string, number>;

@@ -2111,11 +2111,20 @@ export default function DashboardPage() {
                         : s.totalPrizeValue > 0
                           ? `${formatAmount(s.totalPrizeValue)} HBAR won`
                           : 'NFT won';
-                      // Spend is HBAR today across all strategies. If
-                      // multi-token spend ever lands, PlaySessionResult
-                      // needs a spentByToken field to surface it here;
-                      // until then HBAR is both accurate and explicit.
-                      const spentDisplay = `${formatAmount(s.totalSpent)} HBAR spent`;
+                      // Per-token spend display (v2+). Legacy records
+                      // (pre-2026-04-21) don't carry spentByToken, so
+                      // fall back to { HBAR: totalSpent } — pre-v2
+                      // spend is HBAR-only by construction. Multi-token
+                      // sessions render as "30 HBAR + 5 LAZY spent".
+                      const spentParts: string[] = [];
+                      const spentMap = s.spentByToken ?? { HBAR: s.totalSpent };
+                      for (const [token, amount] of Object.entries(spentMap)) {
+                        if (!amount) continue;
+                        spentParts.push(`${formatAmount(amount)} ${token}`);
+                      }
+                      const spentDisplay = spentParts.length > 0
+                        ? `${spentParts.join(' + ')} spent`
+                        : '0 HBAR spent';
                       return (
                         <li
                           key={s.sessionId}
@@ -2172,7 +2181,13 @@ export default function DashboardPage() {
                             <span className="text-muted">
                               <span className="label-caps mr-1.5">Spent</span>
                               <span className="num-tabular text-foreground">
-                                {formatAmount(s.totalSpent)} HBAR
+                                {/* Reuses the per-token spent string
+                                    built above so the stats row and
+                                    the header readout never disagree
+                                    about what was spent. */}
+                                {spentParts.length > 0
+                                  ? spentParts.join(' + ')
+                                  : `${formatAmount(s.totalSpent)} HBAR`}
                               </span>
                             </span>
                             {isWin && s.totalWins > 0 && (

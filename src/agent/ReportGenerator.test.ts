@@ -71,4 +71,44 @@ describe('ReportGenerator', () => {
     assert.equal(report.poolsPlayed, 0);
     assert.equal(report.totalEntries, 0);
   });
+
+  // spentByToken is the per-token spend breakdown that the dashboard
+  // session card uses to display "30 HBAR + 5 LAZY spent" instead of
+  // a bare cross-token sum. Keyed by feeTokenSymbol (HBAR / LAZY /
+  // etc). Required for honest multi-token display.
+  it('aggregates spentByToken for a single HBAR-only session', () => {
+    const gen = new ReportGenerator();
+    gen.begin('balanced', 'HBAR');
+    gen.addPoolResult(makeResult({ poolId: 1, amountSpent: 25, feeTokenSymbol: 'HBAR' }));
+    gen.addPoolResult(makeResult({ poolId: 2, amountSpent: 15, feeTokenSymbol: 'HBAR' }));
+    const report = gen.generate();
+
+    assert.deepEqual(report.spentByToken, { HBAR: 40 });
+    assert.equal(report.totalSpent, 40);
+  });
+
+  it('aggregates spentByToken per token for a mixed HBAR + LAZY session', () => {
+    const gen = new ReportGenerator();
+    gen.begin('balanced', 'HBAR');
+    gen.addPoolResult(makeResult({ poolId: 1, amountSpent: 25, feeTokenSymbol: 'HBAR' }));
+    gen.addPoolResult(makeResult({ poolId: 2, amountSpent: 100, feeTokenSymbol: 'LAZY' }));
+    gen.addPoolResult(makeResult({ poolId: 3, amountSpent: 15, feeTokenSymbol: 'HBAR' }));
+    const report = gen.generate();
+
+    assert.deepEqual(report.spentByToken, { HBAR: 40, LAZY: 100 });
+    // totalSpent is the cross-token sum — meaningless for multi-token
+    // display but preserved for legacy single-number consumers.
+    assert.equal(report.totalSpent, 140);
+  });
+
+  it('defaults missing feeTokenSymbol to HBAR in spentByToken', () => {
+    const gen = new ReportGenerator();
+    gen.begin('balanced', 'HBAR');
+    // Simulate a legacy-ish pool result with empty feeTokenSymbol.
+    // The generator falls back to 'HBAR' so the bucket key is stable.
+    gen.addPoolResult(makeResult({ poolId: 1, amountSpent: 10, feeTokenSymbol: '' }));
+    const report = gen.generate();
+
+    assert.deepEqual(report.spentByToken, { HBAR: 10 });
+  });
 });
