@@ -50,6 +50,7 @@ interface AuditEntry {
     | 'operator_withdrawal'
     | 'deploy'
     | 'prize_recovery'
+    | 'refund'
     | 'unknown';
   operation: string;
   amount?: string;
@@ -163,6 +164,20 @@ function classifyType(payload: Record<string, unknown>): AuditEntry['type'] {
 
   if (op === 'deploy') return 'deploy';
   if (op === 'prize_recovery') return 'prize_recovery';
+  if (op === 'refund') return 'refund';
+
+  // v2 play-session sequence ops. Classified as 'play' so the client
+  // hides them from the raw timeline when v2 SessionCards render
+  // (see app/audit/page.tsx nonPlayEntries filter). Without this they
+  // surface as "Unknown" cards alongside the session card.
+  if (
+    op === 'play_session_open' ||
+    op === 'play_pool_result' ||
+    op === 'play_session_close' ||
+    op === 'play_session_aborted'
+  ) {
+    return 'play';
+  }
 
   if (op === 'mint') {
     return 'deposit';
@@ -409,11 +424,23 @@ export async function GET(request: Request) {
 
     // Build entries — optionally filtered by user
     const entries: AuditEntry[] = [];
-    let totalDeposited = 0;
-    let totalRake = 0;
+    // Per-token accumulators. Deposit/rake/withdrawal writers stamp
+    // payload.token with the actual asset (HBAR or a Hedera token id
+    // like 0.0.8011209); summing by token keeps the ribbon honest
+    // when mixed-token deposits eventually land. payload.tick
+    // (LLCRED) is the HCS-20 ledger tick — not a token identifier
+    // — so it is deliberately NOT used here.
+    const depositedByToken: Record<string, number> = {};
+    const rakeByToken: Record<string, number> = {};
+    const withdrawnByToken: Record<string, number> = {};
     let totalBurned = 0;
-    let totalWithdrawn = 0;
     let totalWon = 0;
+
+    const tokenOf = (payload: Record<string, unknown>): string => {
+      const t = String(payload.token ?? 'HBAR');
+      if (!t || t.toUpperCase() === 'HBAR') return 'HBAR';
+      return t.startsWith('0.0.') ? t : t.toUpperCase();
+    };
 
     for (const { seq, timestamp, payload } of decoded) {
       // If user filter is active, skip messages that don't involve that user
@@ -447,13 +474,14 @@ export async function GET(request: Request) {
 
       // Accumulate summary
       const amt = Number(entry.amount) || 0;
+      const token = tokenOf(payload);
 
       switch (entry.type) {
         case 'deposit':
-          totalDeposited += amt;
+          depositedByToken[token] = (depositedByToken[token] ?? 0) + amt;
           break;
         case 'rake':
-          totalRake += amt;
+          rakeByToken[token] = (rakeByToken[token] ?? 0) + amt;
           break;
         // 'play' is handled below from the v2 reader's normalized
         // sessions instead of the in-loop accumulator. The legacy
@@ -462,7 +490,15 @@ export async function GET(request: Request) {
         // every v2 play session. The reader correctly aggregates
         // both shapes via its v1 fallback path.
         case 'withdrawal':
-          totalWithdrawn += amt;
+          withdrawnByToken[token] = (withdrawnByToken[token] ?? 0) + amt;
+          break;
+        // A refund inverts a deposit (same token, same amount,
+        // opposite direction). Subtract from depositedByToken so the
+        // net-deposited figure reflects reality and balanceLeft math
+        // stays consistent — otherwise a refunded deposit would
+        // inflate the "Deposited" ribbon forever.
+        case 'refund':
+          depositedByToken[token] = (depositedByToken[token] ?? 0) - amt;
           break;
       }
     }
@@ -541,6 +577,22 @@ export async function GET(request: Request) {
     for (const token of Object.keys(wonByToken)) {
       wonByToken[token] = Math.round(wonByToken[token]! * 10000) / 10000;
     }
+    for (const token of Object.keys(depositedByToken)) {
+      depositedByToken[token] = Math.round(depositedByToken[token]! * 10000) / 10000;
+    }
+    for (const token of Object.keys(rakeByToken)) {
+      rakeByToken[token] = Math.round(rakeByToken[token]! * 10000) / 10000;
+    }
+    for (const token of Object.keys(withdrawnByToken)) {
+      withdrawnByToken[token] = Math.round(withdrawnByToken[token]! * 10000) / 10000;
+    }
+
+    // Top-level totals are the HBAR slice of the per-token maps. The
+    // ribbon labels them "HBAR" explicitly; non-HBAR activity surfaces
+    // in the per-token row below the ribbon.
+    const totalDeposited = depositedByToken['HBAR'] ?? 0;
+    const totalRake = rakeByToken['HBAR'] ?? 0;
+    const totalWithdrawn = withdrawnByToken['HBAR'] ?? 0;
 
     // `balanceLeft` is the user's remaining play money in the agent's
     // internal ledger (NOT a profit/loss net). Prizes never enter this
@@ -548,7 +600,8 @@ export async function GET(request: Request) {
     // contract's transferPendingPrizes call. The previous "Net" label
     // confused this with P/L; the field is now explicitly named
     // balanceLeft and the audit page surfaces totalWon as a separate
-    // dimension. See user feedback in commit history.
+    // dimension. This is the HBAR slice — a per-token balanceLeftByToken
+    // is possible but not needed until mixed-token deposits exist.
     const balanceLeft = totalDeposited - totalRake - totalBurned - totalWithdrawn;
 
     const explorerBase = network === 'mainnet'
@@ -581,6 +634,9 @@ export async function GET(request: Request) {
           // totalNftWins is an informational aggregate count.
           spentByToken,
           wonByToken,
+          depositedByToken,
+          rakeByToken,
+          withdrawnByToken,
           totalNftWins,
           // Legacy field for any consumer that hasn't been updated.
           // Removed in a future PR after the dashboard cuts over.

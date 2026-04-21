@@ -55,6 +55,7 @@ interface AuditEntry {
     | 'operator_withdrawal'
     | 'deploy'
     | 'prize_recovery'
+    | 'refund'
     | 'unknown';
   operation: string;
   amount?: string;
@@ -95,6 +96,17 @@ interface AuditSummary {
    */
   spentByToken?: Record<string, number>;
   wonByToken?: Record<string, number>;
+  /**
+   * Per-token ribbon dimensions. Same key normalization as
+   * spentByToken/wonByToken. The top-level totalDeposited/Rake/
+   * Withdrawn fields are the HBAR slice of these; the per-token
+   * row lights up when any non-HBAR activity is present.
+   * depositedByToken is net of refunds (refund subtracts from its
+   * token's deposit total).
+   */
+  depositedByToken?: Record<string, number>;
+  rakeByToken?: Record<string, number>;
+  withdrawnByToken?: Record<string, number>;
   totalNftWins?: number;
   /** Legacy alias for balanceLeft. Will be removed in a future PR. */
   netBalance: number;
@@ -240,6 +252,8 @@ function accentColor(type: AuditEntry['type']): string {
       return 'border-l-secondary';
     case 'prize_recovery':
       return 'border-l-brand';
+    case 'refund':
+      return 'border-l-success';
     default:
       return 'border-l-secondary';
   }
@@ -262,6 +276,8 @@ function badgeClasses(type: AuditEntry['type']): string {
       return 'bg-secondary text-muted';
     case 'prize_recovery':
       return 'bg-brand/15 text-brand';
+    case 'refund':
+      return 'bg-success/15 text-success';
     default:
       return 'bg-secondary text-muted';
   }
@@ -283,6 +299,8 @@ function typeLabel(type: AuditEntry['type']): string {
       return 'Deploy';
     case 'prize_recovery':
       return 'Recovery';
+    case 'refund':
+      return 'Refund';
     default:
       return 'Unknown';
   }
@@ -902,65 +920,103 @@ export default function AuditPage() {
             confused users who read "Net" as P/L. The relabel +
             split fixes that. ---- */}
         <div className="mb-8 space-y-1 text-sm text-muted">
+          {/* Ribbon numbers are the HBAR slice of each dimension —
+              server-side totalDeposited/Rake/Played/Withdrawn are
+              sourced from depositedByToken['HBAR'] / rakeByToken['HBAR']
+              / spentByToken['HBAR'] / withdrawnByToken['HBAR']. The
+              "HBAR" suffix on each value makes that explicit; any
+              non-HBAR activity surfaces in the per-token row below. */}
           <div className="flex flex-wrap gap-x-4 gap-y-1">
             <span>
               Deposited:{' '}
-              <span className="text-success">{formatAmount(summary.totalDeposited)}</span>
+              <span className="num-tabular text-success">{formatAmount(summary.totalDeposited)} HBAR</span>
             </span>
             <span className="hidden sm:inline">|</span>
             <span>
               Rake:{' '}
-              <span className="text-brand">{formatAmount(summary.totalRake)}</span>
+              <span className="num-tabular text-brand">{formatAmount(summary.totalRake)} HBAR</span>
             </span>
             <span className="hidden sm:inline">|</span>
             <span>
               Played:{' '}
-              <span className="text-info">{formatAmount(summary.totalBurned)}</span>
+              <span className="num-tabular text-info">{formatAmount(summary.totalBurned)} HBAR</span>
             </span>
             <span className="hidden sm:inline">|</span>
             <span>
               Withdrawn:{' '}
-              <span className="text-foreground">{formatAmount(summary.totalWithdrawn)}</span>
+              <span className="num-tabular text-foreground">{formatAmount(summary.totalWithdrawn)} HBAR</span>
             </span>
             <span className="hidden sm:inline">|</span>
             <span>
               Balance left:{' '}
-              <span className={(summary.balanceLeft ?? summary.netBalance) >= 0 ? 'text-success' : 'text-destructive'}>
-                {formatAmount(summary.balanceLeft ?? summary.netBalance)}
+              <span className={`num-tabular ${(summary.balanceLeft ?? summary.netBalance) >= 0 ? 'text-success' : 'text-destructive'}`}>
+                {formatAmount(summary.balanceLeft ?? summary.netBalance)} HBAR
               </span>
             </span>
           </div>
-          {/* Per-token breakdown: only shown when there's
-              spending or winning in a token OTHER than HBAR,
-              otherwise the single-number totals above are
-              sufficient and this row would be redundant.
-              Once LAZY pools are played, this row lights up
-              with a LAZY column. Future: support any FT. */}
+          {/* Per-token breakdown: only shown when there's non-HBAR
+              activity in any dimension (deposit/rake/played/won/
+              withdrawn) or when there are NFT wins. The HBAR slice
+              is intentionally omitted here — it's already in the
+              ribbon above, no need to repeat it. */}
           {(() => {
+            const deposited = summary.depositedByToken ?? {};
+            const rake = summary.rakeByToken ?? {};
             const spent = summary.spentByToken ?? {};
             const won = summary.wonByToken ?? {};
-            const spentTokens = Object.keys(spent).filter((k) => spent[k]! > 0);
-            const wonTokens = Object.keys(won).filter((k) => won[k]! > 0);
-            const nonHbarSpent = spentTokens.filter((k) => k !== 'HBAR');
-            const nonHbarWon = wonTokens.filter((k) => k !== 'HBAR');
-            // If there's only HBAR activity, skip the per-token row
-            // (the single-number fields above already say it all)
-            if (nonHbarSpent.length === 0 && nonHbarWon.length === 0 &&
-                !(summary.totalNftWins && summary.totalNftWins > 0)) {
+            const withdrawn = summary.withdrawnByToken ?? {};
+            const nonHbar = (m: Record<string, number>) =>
+              Object.keys(m).filter((k) => k !== 'HBAR' && m[k]! !== 0);
+            const nonHbarDeposited = nonHbar(deposited);
+            const nonHbarRake = nonHbar(rake);
+            const nonHbarSpent = nonHbar(spent);
+            const nonHbarWon = nonHbar(won);
+            const nonHbarWithdrawn = nonHbar(withdrawn);
+            const hasNonHbar =
+              nonHbarDeposited.length > 0 ||
+              nonHbarRake.length > 0 ||
+              nonHbarSpent.length > 0 ||
+              nonHbarWon.length > 0 ||
+              nonHbarWithdrawn.length > 0;
+            if (!hasNonHbar && !(summary.totalNftWins && summary.totalNftWins > 0)) {
               return null;
             }
             return (
               <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-secondary/40 pt-1 mt-1">
                 <span className="label-caps text-muted/80">Per token:</span>
-                {spentTokens.map((token) => (
+                {nonHbarDeposited.map((token) => (
+                  <span key={`dep-${token}`}>
+                    Deposited{' '}
+                    <span className="num-tabular text-success">
+                      {formatAmount(deposited[token]!)} {displayToken(token)}
+                    </span>
+                  </span>
+                ))}
+                {nonHbarRake.map((token) => (
+                  <span key={`rake-${token}`}>
+                    Rake{' '}
+                    <span className="num-tabular text-brand">
+                      {formatAmount(rake[token]!)} {displayToken(token)}
+                    </span>
+                  </span>
+                ))}
+                {nonHbarSpent.map((token) => (
                   <span key={`spent-${token}`}>
-                    Spent{' '}
+                    Played{' '}
                     <span className="num-tabular text-info">
                       {formatAmount(spent[token]!)} {displayToken(token)}
                     </span>
                   </span>
                 ))}
-                {wonTokens.map((token) => (
+                {nonHbarWithdrawn.map((token) => (
+                  <span key={`wd-${token}`}>
+                    Withdrawn{' '}
+                    <span className="num-tabular text-foreground">
+                      {formatAmount(withdrawn[token]!)} {displayToken(token)}
+                    </span>
+                  </span>
+                ))}
+                {nonHbarWon.map((token) => (
                   <span key={`won-${token}`}>
                     Won{' '}
                     <span className="num-tabular text-brand">
@@ -983,7 +1039,7 @@ export default function AuditPage() {
             <div className="flex flex-wrap gap-x-4 gap-y-1">
               <span>
                 Won (claim on dApp):{' '}
-                <span className="text-brand">+{formatAmount(summary.totalWon)}</span>
+                <span className="num-tabular text-brand">+{formatAmount(summary.totalWon)} HBAR</span>
               </span>
               <span className="type-caption-sm italic text-muted">
                 Winnings flow to your wallet directly via the contract; they don&apos;t
