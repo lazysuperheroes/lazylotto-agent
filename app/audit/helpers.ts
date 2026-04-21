@@ -35,6 +35,28 @@ export function displayToken(tick?: string): string {
 }
 
 /**
+ * Render an ISO consensus timestamp as a short "D MMM, HH:MM" string
+ * suitable for audit cards. Falls back to the raw ISO if parsing
+ * fails. Timezone follows the user's system locale — this IS the
+ * right thing for a "when did my session run" display because
+ * users recognise times in their own zone.
+ */
+export function formatTimestamp(iso: string): string {
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return iso;
+  }
+}
+
+/**
  * Format a per-token amount map as a compact human string.
  *
  *   { HBAR: 30 }             → "30 HBAR"
