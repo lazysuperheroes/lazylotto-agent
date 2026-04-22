@@ -63,6 +63,7 @@ export type NormalizedEvent =
   | NormalizedOperatorWithdrawalEvent
   | NormalizedRefundEvent
   | NormalizedPrizeRecoveryEvent
+  | NormalizedStrategyChangeEvent
   | NormalizedDeployEvent
   | NormalizedControlEvent
   | NormalizedSessionEvent
@@ -134,6 +135,21 @@ export interface NormalizedDeployEvent extends BaseEvent {
   tick: string;
   name?: string;
   max?: string;
+}
+
+/**
+ * Strategy change audit anchor. Not a balance-moving op — purely a
+ * marker so external auditors can reconstruct which strategy was
+ * active for any given play session by finding the most recent
+ * strategy_change message before that session's open message.
+ */
+export interface NormalizedStrategyChangeEvent extends BaseEvent {
+  type: 'strategy_change';
+  user: string;
+  previousStrategy: string;
+  newStrategy: string;
+  newStrategyVersion: string;
+  performedBy: string;
 }
 
 export interface NormalizedControlEvent extends BaseEvent {
@@ -312,6 +328,15 @@ export async function parseAuditTopic(
     if (op === 'prize_recovery') {
       stats.v2Messages++;
       const ev = parsePrizeRecovery(msg);
+      if (ev) events.push(ev);
+      else stats.skippedMessages++;
+      continue;
+    }
+
+    // ── strategy_change (v2 audit anchor) ──────────────────
+    if (op === 'strategy_change') {
+      stats.v2Messages++;
+      const ev = parseStrategyChange(msg);
       if (ev) events.push(ev);
       else stats.skippedMessages++;
       continue;
@@ -831,6 +856,24 @@ function parseRefund(msg: RawTopicMessage): NormalizedRefundEvent | null {
     refundTxId,
     reason: String(msg.payload.reason ?? ''),
     performedBy: String(msg.payload.performedBy ?? ''),
+  };
+}
+
+function parseStrategyChange(
+  msg: RawTopicMessage,
+): NormalizedStrategyChangeEvent | null {
+  const user = String(msg.payload.user ?? '');
+  const newStrategy = String(msg.payload.newStrategy ?? '');
+  if (!user || !newStrategy) return null;
+  return {
+    sequence: msg.sequence,
+    timestamp: msg.timestamp,
+    type: 'strategy_change',
+    user,
+    previousStrategy: String(msg.payload.previousStrategy ?? 'unknown'),
+    newStrategy,
+    newStrategyVersion: String(msg.payload.newStrategyVersion ?? ''),
+    performedBy: String(msg.payload.performedBy ?? 'user'),
   };
 }
 

@@ -51,6 +51,7 @@ interface AuditEntry {
     | 'deploy'
     | 'prize_recovery'
     | 'refund'
+    | 'strategy_change'
     | 'unknown';
   operation: string;
   amount?: string;
@@ -91,6 +92,17 @@ interface AuditEntry {
     affectedSessions?: string[];
     attempts?: number;
     gasUsed?: number;
+  };
+  /**
+   * Structured fields parsed from a `strategy_change` HCS-20 message.
+   * Populated only when type === 'strategy_change'.
+   */
+  strategyChange?: {
+    userAccountId: string;
+    previousStrategy: string;
+    newStrategy: string;
+    newStrategyVersion: string;
+    performedBy: string;
   };
   raw: Record<string, unknown>;
 }
@@ -165,6 +177,7 @@ function classifyType(payload: Record<string, unknown>): AuditEntry['type'] {
   if (op === 'deploy') return 'deploy';
   if (op === 'prize_recovery') return 'prize_recovery';
   if (op === 'refund') return 'refund';
+  if (op === 'strategy_change') return 'strategy_change';
 
   // v2 play-session sequence ops. Classified as 'play' so the client
   // hides them from the raw timeline when v2 SessionCards render
@@ -226,6 +239,19 @@ function toAuditEntry(seq: number, timestamp: string, payload: Record<string, un
   if (payload.from !== undefined) entry.from = String(payload.from);
   if (payload.memo !== undefined) entry.memo = String(payload.memo);
   if (payload.sessionId !== undefined) entry.sessionId = String(payload.sessionId);
+
+  // Extract structured fields from strategy_change messages so the
+  // audit page can render "Conservative → Aggressive" instead of a
+  // bare badge. Mirror of the user route's parser.
+  if (op === 'strategy_change') {
+    entry.strategyChange = {
+      userAccountId: String(payload.user ?? ''),
+      previousStrategy: String(payload.previousStrategy ?? 'unknown'),
+      newStrategy: String(payload.newStrategy ?? ''),
+      newStrategyVersion: String(payload.newStrategyVersion ?? ''),
+      performedBy: String(payload.performedBy ?? 'user'),
+    };
+  }
 
   // Extract structured fields from prize_recovery messages so the
   // audit page can render the recovery details (who, what, why, how

@@ -44,6 +44,7 @@ export const HCS20_V2_OPS = {
   PLAY_SESSION_ABORTED: 'play_session_aborted',
   REFUND: 'refund',
   PRIZE_RECOVERY: 'prize_recovery',
+  STRATEGY_CHANGE: 'strategy_change',
 } as const;
 
 export type Hcs20V2OpName = (typeof HCS20_V2_OPS)[keyof typeof HCS20_V2_OPS];
@@ -200,6 +201,28 @@ export interface RefundMessage {
   ts: string;
 }
 
+/**
+ * strategy_change — user switched their play strategy preset. Not a
+ * balance-moving op, purely an audit anchor so third parties can
+ * reconstruct "which strategy was active when each session ran"
+ * without having to correlate timestamps with the registration
+ * record.
+ *
+ * `performedBy` distinguishes self-serve user changes from admin
+ * interventions. Reads 'user' (default) or an admin account id.
+ * No `tick` field — this is not an HCS-20 balance op.
+ */
+export interface StrategyChangeMessage {
+  p: 'hcs-20';
+  op: 'strategy_change';
+  user: string;
+  previousStrategy: string;
+  newStrategy: string;
+  newStrategyVersion: string;
+  performedBy: string;
+  ts: string;
+}
+
 // ── Discriminated union of all v2 messages ──────────────────
 
 export type Hcs20V2Message =
@@ -207,7 +230,8 @@ export type Hcs20V2Message =
   | PlayPoolResultMessage
   | PlaySessionCloseMessage
   | PlaySessionAbortedMessage
-  | RefundMessage;
+  | RefundMessage
+  | StrategyChangeMessage;
 
 // ── Normalized session reconstruction (reader output) ───────
 //

@@ -150,6 +150,15 @@ export class NegotiationHandler {
    * switch, the next play session uses the new budget caps
    * automatically. No kill-switch-and-migrate required.
    *
+   * In-flight play safety: if a play session is actively running
+   * when this is called, that play has already captured
+   * user.strategyName into its SessionReport at phase start, so it
+   * completes under the old strategy. The per-user mutex in
+   * MultiUserAgent serializes store.saveUser() so the write from
+   * here cannot interleave with the play's session-record write.
+   * The next play session picks up the new strategy. There is no
+   * race — concurrent-strategy-change during a play is safe.
+   *
    * @throws if the user doesn't exist, is deregistered, or the
    *         strategy name is not in AVAILABLE_STRATEGIES.
    */

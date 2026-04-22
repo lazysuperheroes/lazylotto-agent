@@ -8,6 +8,7 @@ import { SkeletonBox } from '../components/SkeletonBox';
 import { clearSession } from '../lib/session';
 import { useTheme, type ThemePreference } from '../lib/theme';
 import { ThemePreviewMini } from '../components/ThemePreviewMini';
+import { StrategySwitcher, type StrategyName } from './StrategySwitcher';
 
 // ---------------------------------------------------------------------------
 // /account — the "everything that's not the lottery" page
@@ -249,7 +250,7 @@ export default function AccountPage() {
   }, [router, sessionToken, toast]);
 
   const handleStrategyChange = useCallback(
-    async (newStrategy: 'conservative' | 'balanced' | 'aggressive') => {
+    async (newStrategy: StrategyName) => {
       if (!sessionToken || !status) return;
       if (newStrategy === status.strategyName) return; // no-op
       setStrategyLoading(true);
@@ -399,90 +400,18 @@ export default function AccountPage() {
                   </div>
 
                   {/* Strategy picker — spans both columns so the
-                      three radio cards can lay out horizontally on
-                      desktop (and stack on mobile). The previous
-                      version was a native <select> that fell between
-                      two stools visually: utilitarian in a comic-
-                      vocabulary surface. Radio cards give each option
-                      a real label + a one-line description so the
-                      choice is informed, not cryptic. */}
+                      three radio cards lay out horizontally on desktop
+                      and stack on mobile. Extracted to ./StrategySwitcher
+                      on 2026-04-22 for isolated RTL testing. */}
                   <div className="sm:col-span-2">
                     <dt className="label-caps mb-2">Strategy</dt>
                     <dd>
-                      <fieldset disabled={strategyLoading}>
-                        <legend className="sr-only">Strategy</legend>
-                        <div
-                          role="radiogroup"
-                          aria-label="Strategy"
-                          className="grid gap-3 sm:grid-cols-3"
-                        >
-                          {(
-                            [
-                              {
-                                value: 'conservative',
-                                label: 'Conservative',
-                                blurb:
-                                  'Small entries, only the safest pools. Low variance — slow and steady.',
-                              },
-                              {
-                                value: 'balanced',
-                                label: 'Balanced',
-                                blurb:
-                                  'Medium entries across mid-EV pools. The default — reasonable swings.',
-                              },
-                              {
-                                value: 'aggressive',
-                                label: 'Aggressive',
-                                blurb:
-                                  'Bigger entries, high-EV pools only. More volatility — bigger upside and downside.',
-                              },
-                            ] as const
-                          ).map((opt) => {
-                            const isSelected = status.strategyName === opt.value;
-                            return (
-                              <label
-                                key={opt.value}
-                                className={`group relative flex cursor-pointer flex-col gap-1.5 border-2 bg-[var(--color-panel)] px-3 py-3 transition-colors ${
-                                  isSelected
-                                    ? 'border-brand bg-brand/5'
-                                    : 'border-secondary hover:border-brand/60'
-                                } ${strategyLoading ? 'cursor-wait opacity-50' : ''}`}
-                              >
-                                <input
-                                  type="radio"
-                                  name="strategy"
-                                  value={opt.value}
-                                  checked={isSelected}
-                                  onChange={() => void handleStrategyChange(opt.value)}
-                                  className="sr-only"
-                                />
-                                <div className="flex items-center gap-2">
-                                  {/* Sticker-style indicator — filled
-                                      brand block when selected, hollow
-                                      muted when not. */}
-                                  <span
-                                    className={`inline-block h-3 w-3 border-2 ${
-                                      isSelected
-                                        ? 'border-brand bg-brand'
-                                        : 'border-secondary'
-                                    }`}
-                                    aria-hidden="true"
-                                  />
-                                  <span className="font-heading text-sm font-extrabold uppercase tracking-wider text-foreground">
-                                    {opt.label}
-                                  </span>
-                                </div>
-                                <p className="type-caption">{opt.blurb}</p>
-                              </label>
-                            );
-                          })}
-                        </div>
-                      </fieldset>
-                      <p className="mt-2 type-caption">
-                        {strategyLoading
-                          ? 'Updating…'
-                          : `Active: ${status.strategyName} (${status.strategyVersion}). Changes take effect on the next play session.`}
-                      </p>
+                      <StrategySwitcher
+                        value={status.strategyName as StrategyName}
+                        version={status.strategyVersion}
+                        loading={strategyLoading}
+                        onChange={(v) => void handleStrategyChange(v)}
+                      />
                     </dd>
                   </div>
                 </dl>

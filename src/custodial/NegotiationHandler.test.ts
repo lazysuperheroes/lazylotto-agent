@@ -341,4 +341,127 @@ describe('NegotiationHandler', () => {
       assert.deepStrictEqual(a, b); // same contents
     });
   });
+
+  // ── updateUserStrategy ───────────────────────────────────────
+  //
+  // Self-serve strategy change. Called from the HTTP route
+  // (POST /api/user/strategy) and the MCP tool
+  // (multi_user_set_strategy). The handler is the single source
+  // of truth for validation, snapshot loading, and persistence.
+
+  describe('updateUserStrategy', () => {
+    it('updates strategyName + strategyVersion + strategySnapshot', async () => {
+      const initial = await handler.registerUser(
+        '0.0.7777',
+        '0.0.7777',
+        'conservative',
+      );
+      assert.equal(initial.strategyName, 'conservative');
+
+      const updated = await handler.updateUserStrategy(initial.userId, 'aggressive');
+
+      assert.equal(updated.userId, initial.userId);
+      assert.equal(updated.strategyName, 'aggressive');
+      assert.ok(updated.strategyVersion, 'version should be set');
+      assert.ok(updated.strategySnapshot, 'snapshot should be loaded');
+      // Snapshot reflects the new strategy, not the old one
+      assert.equal(updated.strategySnapshot.name, 'aggressive');
+    });
+
+    it('persists the change via store.saveUser', async () => {
+      const initial = await handler.registerUser(
+        '0.0.7778',
+        '0.0.7778',
+        'conservative',
+      );
+      await handler.updateUserStrategy(initial.userId, 'balanced');
+
+      // Re-fetch from store — the change must be durable, not just
+      // returned from the call.
+      const refetched = store.getUser(initial.userId);
+      assert.ok(refetched);
+      assert.equal(refetched.strategyName, 'balanced');
+    });
+
+    it('preserves balances, memo, registration date, rakePercent', async () => {
+      const initial = await handler.registerUser(
+        '0.0.7779',
+        '0.0.7779',
+        'conservative',
+        3, // custom rake
+      );
+      const updated = await handler.updateUserStrategy(initial.userId, 'balanced');
+
+      assert.equal(updated.depositMemo, initial.depositMemo);
+      assert.equal(updated.registeredAt, initial.registeredAt);
+      assert.equal(updated.rakePercent, initial.rakePercent);
+      assert.deepStrictEqual(updated.balances, initial.balances);
+      assert.equal(updated.active, true);
+    });
+
+    it('rejects unknown strategy name with available list in message', async () => {
+      const initial = await handler.registerUser(
+        '0.0.7780',
+        '0.0.7780',
+        'conservative',
+      );
+      await assert.rejects(
+        () => handler.updateUserStrategy(initial.userId, 'yolo'),
+        (err: Error) => {
+          assert.match(err.message, /Unknown strategy "yolo"/);
+          assert.match(err.message, /conservative|balanced|aggressive/);
+          return true;
+        },
+      );
+    });
+
+    it('rejects when user does not exist', async () => {
+      await assert.rejects(
+        () => handler.updateUserStrategy('ghost-userId', 'balanced'),
+        (err: Error) => {
+          assert.match(err.message, /not found/);
+          return true;
+        },
+      );
+    });
+
+    it('rejects when user is deregistered', async () => {
+      const initial = await handler.registerUser(
+        '0.0.7781',
+        '0.0.7781',
+        'conservative',
+      );
+      // Simulate deregistration by flipping active directly on the
+      // stored record — matches what deregisterUser does in the
+      // real store.
+      const stored = store.getUser(initial.userId);
+      assert.ok(stored);
+      stored.active = false;
+      store.saveUser(stored);
+
+      await assert.rejects(
+        () => handler.updateUserStrategy(initial.userId, 'balanced'),
+        (err: Error) => {
+          assert.match(err.message, /deregistered/);
+          return true;
+        },
+      );
+    });
+
+    it('is safe to call with the same strategy (no-op style)', async () => {
+      // Caller is responsible for idempotent short-circuiting (see
+      // POST /api/user/strategy and multi_user_set_strategy), but
+      // the handler itself still has to handle same-name gracefully
+      // — it just re-loads the snapshot and writes the same data.
+      const initial = await handler.registerUser(
+        '0.0.7782',
+        '0.0.7782',
+        'balanced',
+      );
+      const updated = await handler.updateUserStrategy(initial.userId, 'balanced');
+
+      assert.equal(updated.strategyName, 'balanced');
+      assert.equal(updated.strategyVersion, initial.strategyVersion);
+    });
+  });
 });

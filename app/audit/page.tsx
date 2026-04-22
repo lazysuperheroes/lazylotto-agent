@@ -51,6 +51,14 @@ interface RecoveryEntry {
   gasUsed?: number;
 }
 
+interface StrategyChangeEntry {
+  userAccountId: string;
+  previousStrategy: string;
+  newStrategy: string;
+  newStrategyVersion: string;
+  performedBy: string;
+}
+
 interface AuditEntry {
   sequence: number;
   timestamp: string;
@@ -63,6 +71,7 @@ interface AuditEntry {
     | 'deploy'
     | 'prize_recovery'
     | 'refund'
+    | 'strategy_change'
     | 'unknown';
   operation: string;
   amount?: string;
@@ -76,6 +85,7 @@ interface AuditEntry {
   totalSpent?: number;
   poolResults?: PoolWinResult[];
   recovery?: RecoveryEntry;
+  strategyChange?: StrategyChangeEntry;
   raw: Record<string, unknown>;
 }
 
@@ -184,6 +194,8 @@ function accentColor(type: AuditEntry['type']): string {
       return 'border-l-brand';
     case 'refund':
       return 'border-l-success';
+    case 'strategy_change':
+      return 'border-l-info';
     default:
       return 'border-l-secondary';
   }
@@ -208,6 +220,8 @@ function badgeClasses(type: AuditEntry['type']): string {
       return 'bg-brand/15 text-brand';
     case 'refund':
       return 'bg-success/15 text-success';
+    case 'strategy_change':
+      return 'bg-info/15 text-info';
     default:
       return 'bg-secondary text-muted';
   }
@@ -231,6 +245,8 @@ function typeLabel(type: AuditEntry['type']): string {
       return 'Recovery';
     case 'refund':
       return 'Refund';
+    case 'strategy_change':
+      return 'Strategy';
     default:
       return 'Unknown';
   }
@@ -1059,6 +1075,28 @@ export default function AuditPage() {
                             </p>
                           )}
                         </div>
+                      </div>
+                    )}
+
+                    {/* Strategy change transition — shows
+                        "conservative → aggressive" with performer
+                        attribution so third parties can reconstruct
+                        which strategy was active for any play
+                        session by finding the most recent transition
+                        before it. */}
+                    {entry.type === 'strategy_change' && entry.strategyChange && (
+                      <div className="mt-2 border-l-2 border-info/60 bg-info/5 px-3 py-2 text-xs">
+                        <p className="text-info">
+                          <span className="font-mono">{entry.strategyChange.previousStrategy}</span>
+                          <span className="mx-2 text-muted">→</span>
+                          <span className="font-mono font-semibold">{entry.strategyChange.newStrategy}</span>
+                          <span className="ml-2 type-caption-sm text-muted">
+                            (v{entry.strategyChange.newStrategyVersion})
+                          </span>
+                        </p>
+                        <p className="mt-1 type-caption-sm text-muted">
+                          Changed by <code className="font-mono">{entry.strategyChange.performedBy}</code>
+                        </p>
                       </div>
                     )}
                   </div>

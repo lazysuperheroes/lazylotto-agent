@@ -177,7 +177,8 @@ async function testAgentCard() {
     const expected = [
       'multi_user_status', 'multi_user_register', 'multi_user_deposit_info',
       'multi_user_play', 'multi_user_withdraw', 'multi_user_deregister',
-      'multi_user_play_history', 'operator_balance', 'operator_withdraw_fees',
+      'multi_user_play_history', 'multi_user_set_strategy',
+      'operator_balance', 'operator_withdraw_fees',
       'operator_reconcile', 'operator_dead_letters', 'operator_refund',
       'operator_recover_stuck_prizes', 'operator_health',
     ];

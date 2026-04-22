@@ -11,6 +11,7 @@ import {
   type PlaySessionCloseMessage,
   type PlaySessionAbortedMessage,
   type RefundMessage,
+  type StrategyChangeMessage,
   type PrizeEntry,
   computePoolsRoot,
   truncateError,
@@ -637,6 +638,37 @@ export class AccountingService {
   }
 
   /**
+   * Write a strategy_change audit anchor. Not a balance-moving op,
+   * purely an audit trail entry so third parties can reconstruct
+   * which strategy was active for any given play session by looking
+   * back at the most recent strategy_change message before that
+   * session's open message on the topic.
+   *
+   * Caller (NegotiationHandler.updateUserStrategy) invokes this
+   * AFTER the store write succeeds — a failure here should not roll
+   * back the local change, just log. See the caller's try/catch.
+   */
+  async recordStrategyChange(details: {
+    user: string;
+    previousStrategy: string;
+    newStrategy: string;
+    newStrategyVersion: string;
+    performedBy: string;
+  }): Promise<void> {
+    const message: StrategyChangeMessage = {
+      p: 'hcs-20',
+      op: 'strategy_change',
+      user: details.user,
+      previousStrategy: details.previousStrategy,
+      newStrategy: details.newStrategy,
+      newStrategyVersion: details.newStrategyVersion,
+      performedBy: details.performedBy,
+      ts: new Date().toISOString(),
+    };
+    await this.submitV2Message(message);
+  }
+
+  /**
    * Submit a v2 message. Unlike the legacy submitMessage() which
    * silently no-ops when topicId is missing, this throws — v2
    * writers are load-bearing for the audit trail and a missing
@@ -654,7 +686,8 @@ export class AccountingService {
       | PlayPoolResultMessage
       | PlaySessionCloseMessage
       | PlaySessionAbortedMessage
-      | RefundMessage,
+      | RefundMessage
+      | StrategyChangeMessage,
   ): Promise<void> {
     if (!this.topicId) {
       // Match legacy submitMessage() behavior to keep test envs

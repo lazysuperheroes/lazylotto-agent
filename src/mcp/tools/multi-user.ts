@@ -3,7 +3,7 @@
  *
  * Registers: multi_user_status, multi_user_register,
  * multi_user_deposit_info, multi_user_play, multi_user_withdraw,
- * multi_user_deregister, multi_user_play_history
+ * multi_user_deregister, multi_user_play_history, multi_user_set_strategy
  *
  * Per-user auth enforcement:
  *   - user tier: can only operate on their own account (resolved from session accountId)
@@ -347,6 +347,72 @@ export function registerMultiUserTools(
         return json({ userId, sessions: sessions.slice(-limit) });
       } catch (e) {
         return errorResult(`History failed: ${errorMsg(e)}`);
+      }
+    }
+  );
+
+  // ── multi_user_set_strategy ──────────────────────────────────
+  //
+  // Self-serve strategy change. Mirrors POST /api/user/strategy so
+  // Claude, A2A clients, and the CLI can all flip a user's strategy
+  // preset without re-registering. Thin wrapper around
+  // multiUser.updateUserStrategy() — zero new business logic.
+  //
+  // Idempotent: calling with the user's current strategy returns
+  // status='unchanged' and doesn't touch the store. Safe for the
+  // protocol parity checker to invoke in CI with the user's
+  // existing strategy.
+
+  server.tool(
+    'multi_user_set_strategy',
+    'Change a user\'s play strategy preset. Takes effect on the next play session.',
+    {
+      strategy: z.enum(['conservative', 'balanced', 'aggressive'])
+        .describe('Strategy preset. conservative=low variance, balanced=default, aggressive=high variance'),
+      userId: z.string().optional().describe('User ID (auto-resolved for user tier)'),
+      auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
+    },
+    async ({ strategy, userId, auth_token }) => {
+      const authResult = await requireAuth(auth_token);
+      if ('error' in authResult) return authResult.error;
+      const { auth } = authResult;
+
+      // Enforce per-user access — same pattern as other user-scoped tools
+      if (auth.tier === 'user') {
+        const myUserId = resolveUserId(auth.accountId);
+        if (!myUserId) return errorResult('Not registered. Call multi_user_register first.');
+        if (userId && userId !== myUserId) return errorResult('Access denied');
+        userId = myUserId;
+      }
+      if (!userId) return errorResult('userId is required');
+
+      try {
+        const current = multiUser.getUserStatus(userId);
+        if (!current) return errorResult('User not found');
+
+        // Idempotent path: same strategy, no store write, no HCS-20
+        // message. Matches the POST /api/user/strategy behaviour so
+        // the two protocols produce identical responses.
+        if (current.strategyName === strategy) {
+          return json({
+            status: 'unchanged',
+            userId,
+            strategyName: current.strategyName,
+            strategyVersion: current.strategyVersion,
+          });
+        }
+
+        const previousStrategy = current.strategyName;
+        const updated = await multiUser.updateUserStrategy(userId, strategy);
+        return json({
+          status: 'updated',
+          userId: updated.userId,
+          strategyName: updated.strategyName,
+          strategyVersion: updated.strategyVersion,
+          previousStrategy,
+        });
+      } catch (e) {
+        return errorResult(`Strategy change failed: ${errorMsg(e)}`);
       }
     }
   );

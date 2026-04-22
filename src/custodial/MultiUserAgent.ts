@@ -353,13 +353,55 @@ export class MultiUserAgent {
    * The user's balances, deposit memo, and registration date are
    * preserved — only the strategy snapshot changes. Takes effect on
    * the next play session.
+   *
+   * After the store write succeeds, writes a strategy_change
+   * audit-trail message to HCS-20 so third parties can reconstruct
+   * which strategy was active for any given play session. The HCS-20
+   * write is best-effort — if the topic isn't configured or the
+   * submit fails, the local strategy change still stands (we've
+   * already saved the user record) and we log the miss. We do NOT
+   * roll back the local change on audit-write failure because the
+   * user's intent has been captured; audit-trail recovery can
+   * backfill via a reconcile pass if needed.
    */
   async updateUserStrategy(
     userId: string,
     newStrategyName: string,
+    performedBy: string = 'user',
   ): Promise<UserAccount> {
     await assertKillSwitchDisabled();
-    return this.negotiation.updateUserStrategy(userId, newStrategyName);
+
+    // Capture the old strategy name BEFORE the mutation so the
+    // HCS-20 audit entry has both sides of the transition. Looking
+    // up the user again AFTER the mutation would give us the new
+    // name for both slots.
+    const prior = this.store.getUser(userId);
+    const previousStrategy = prior?.strategyName ?? 'unknown';
+
+    const updated = await this.negotiation.updateUserStrategy(userId, newStrategyName);
+
+    // No-op paths (same strategy): NegotiationHandler returns the
+    // user unchanged — still emits one audit anchor so the trail
+    // records the intent. Skipping would create a gap between user
+    // action and audit history that's annoying to explain.
+    try {
+      await this.accounting.recordStrategyChange({
+        user: updated.hederaAccountId,
+        previousStrategy,
+        newStrategy: updated.strategyName,
+        newStrategyVersion: updated.strategyVersion,
+        performedBy,
+      });
+    } catch (auditErr) {
+      // Local change already succeeded; don't block the caller on
+      // audit-trail hiccups. Operators see the warning in logs.
+      console.warn(
+        `[MultiUserAgent] strategy_change audit write failed for ${userId}:`,
+        auditErr instanceof Error ? auditErr.message : auditErr,
+      );
+    }
+
+    return updated;
   }
 
   // ── Play ───────────────────────────────────────────────────────
