@@ -40,6 +40,7 @@
 import { NextResponse } from 'next/server';
 import { getStore } from './store';
 import { staticCorsHeaders } from './cors';
+import { assertProductionRedis } from '~/auth/redis';
 
 const FALLBACK_CORS = staticCorsHeaders('GET, POST, DELETE, OPTIONS');
 
@@ -47,6 +48,26 @@ type RouteHandler = (request: Request) => Promise<Response | NextResponse>;
 
 export function withStore(handler: RouteHandler): RouteHandler {
   return async (request: Request) => {
+    // F3: refuse to serve any request in production without Upstash configured.
+    // Throws PRODUCTION_REDIS_REQUIRED — the catch below converts it to 503
+    // with a clear message in the response body and a stack trace in
+    // Vercel function logs. We choose 503 rather than 500 because the
+    // condition is a misconfiguration, not a code bug — the deploy is
+    // unhealthy until Upstash creds are added.
+    try {
+      assertProductionRedis();
+    } catch (err) {
+      console.error('[withStore] production-redis preflight failed:', err);
+      const message = err instanceof Error ? err.message : String(err);
+      return NextResponse.json(
+        { error: message },
+        {
+          status: 503,
+          headers: { ...FALLBACK_CORS, 'Content-Type': 'application/json' },
+        },
+      );
+    }
+
     let response: Response | NextResponse | undefined;
     let caught: unknown;
     try {

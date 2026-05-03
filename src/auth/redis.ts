@@ -133,6 +133,53 @@ export function isUpstashConfigured(): boolean {
   return Boolean(url && token);
 }
 
+/**
+ * Synchronous backend mode for the auth/state Redis client.
+ *
+ * Returns `'upstash'` when Upstash credentials are configured, `'memory'`
+ * otherwise. Used by `/api/health` (and any operator-facing diagnostic)
+ * to surface backend mode without instantiating the client. Independent
+ * of `getRedis()` so callers don't pay the lazy-init cost.
+ */
+export function getRedisBackendMode(): 'upstash' | 'memory' {
+  return isUpstashConfigured() ? 'upstash' : 'memory';
+}
+
+/**
+ * Hard-fail when running in production without Upstash configured.
+ *
+ * Why: without Upstash, every Redis-backed guarantee silently degrades
+ * to per-Lambda state — distributed locks become per-process mutexes,
+ * rate limits become per-Lambda counters, sessions don't persist across
+ * cold starts, the kill switch doesn't propagate, withdrawal velocity
+ * caps don't share state. The previous behavior was a one-line cold-
+ * start warning that scrolled past in Vercel logs. This function turns
+ * that into an obvious deploy failure (5xx on first request rather than
+ * a slow-burn correctness incident).
+ *
+ * Local development (`NODE_ENV` unset or `'development'`) keeps the
+ * in-memory fallback. Tests run under `NODE_ENV=test` (or undefined)
+ * and are unaffected.
+ *
+ * Called from `withStore` so every API route gets the check. Also
+ * called inside `getRedis()` before the in-memory fallback as a
+ * belt-and-braces guard for any code path that might bypass `withStore`.
+ *
+ * Throws an Error whose `message` starts with `PRODUCTION_REDIS_REQUIRED:`
+ * for grep-ability in Vercel function logs.
+ */
+export function assertProductionRedis(): void {
+  if (process.env.NODE_ENV === 'production' && !isUpstashConfigured()) {
+    throw new Error(
+      'PRODUCTION_REDIS_REQUIRED: Upstash Redis credentials missing in production. ' +
+      'Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN (or the legacy ' +
+      'KV_REST_API_URL / KV_REST_API_TOKEN aliases). Refusing to start with the ' +
+      'in-memory fallback because distributed locks, rate limiting, session ' +
+      'storage, and kill-switch state would silently degrade to per-Lambda scope.',
+    );
+  }
+}
+
 /** Get or create the Redis client. Survives Next.js dev HMR. */
 export async function getRedis(): Promise<RedisLike> {
   if (globalForRedis.__lazylottoRedisClient__) {
@@ -148,6 +195,13 @@ export async function getRedis(): Promise<RedisLike> {
     globalForRedis.__lazylottoRedisClient__ = client;
     return client;
   }
+
+  // Belt-and-braces: hard-fail in production rather than silently
+  // returning the in-memory fallback. This complements the same check
+  // in withStore — covers any code path that calls getRedis() outside
+  // a wrapped HTTP route (CLI scripts, cron handlers, tests run with
+  // NODE_ENV=production by mistake).
+  assertProductionRedis();
 
   // Fallback: in-memory store for local dev. Pinned to globalThis so
   // sessions persist across Next.js HMR — otherwise every file save

@@ -14,6 +14,35 @@ import { createSession, revokeAllForAccount } from './session.js';
 import type { AuthChallenge, AuthTier } from './types.js';
 
 /**
+ * Resolve a Hedera account ID to its wallet-bound auth tier.
+ *
+ * Tier hierarchy is explicit (operator > admin > user > public). Each tier
+ * maps to a comma-separated env list of Hedera account IDs:
+ *   - OPERATOR_ACCOUNTS — fees, reconcile, health, kill switch, fee withdrawal
+ *   - ADMIN_ACCOUNTS    — refunds, dead-letter queue, all-user views
+ *
+ * Operator is a strict superset (membership in OPERATOR_ACCOUNTS
+ * short-circuits the admin check). Operators inherit every admin
+ * capability via the `tierLevel` ordering in middleware.ts.
+ *
+ * No env-list match → 'user' tier (the authenticated wallet owner).
+ *
+ * Exported as a pure function so the tier-resolution invariant is
+ * unit-testable without forging mirror-node signatures.
+ */
+export function resolveWalletTier(accountId: string): AuthTier {
+  const parseList = (raw: string | undefined): string[] =>
+    (raw ?? '').split(',').map((a) => a.trim()).filter(Boolean);
+
+  const operatorAccounts = parseList(process.env.OPERATOR_ACCOUNTS);
+  const adminAccounts    = parseList(process.env.ADMIN_ACCOUNTS);
+
+  if (operatorAccounts.includes(accountId)) return 'operator';
+  if (adminAccounts.includes(accountId))    return 'admin';
+  return 'user';
+}
+
+/**
  * Verify a signed challenge and create a session.
  *
  * @param challengeId    - The challenge nonce/ID returned by createChallenge
@@ -91,9 +120,8 @@ export async function verifyChallenge(
     throw new Error('Signature verification failed');
   }
 
-  // 5. Determine tier (admin if account is in ADMIN_ACCOUNTS)
-  const adminAccounts = (process.env.ADMIN_ACCOUNTS ?? '').split(',').map(a => a.trim()).filter(Boolean);
-  const tier: AuthTier = adminAccounts.includes(accountId) ? 'admin' : 'user';
+  // 5. Determine tier from wallet bindings (see resolveWalletTier).
+  const tier: AuthTier = resolveWalletTier(accountId);
 
   // 6. Revoke any existing sessions for this account (auto-revoke on re-auth)
   await revokeAllForAccount(accountId);

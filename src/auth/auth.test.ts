@@ -15,7 +15,7 @@ process.env.MCP_AUTH_TOKEN = 'test-operator-token';
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { hashToken } from './redis.js';
+import { hashToken, assertProductionRedis, getRedisBackendMode, isUpstashConfigured } from './redis.js';
 import { buildChallengeMessage } from './challenge.js';
 import {
   createSession,
@@ -241,17 +241,201 @@ describe('resolveAuth', () => {
     assert.equal(auth.token, token);
   });
 
-  it('returns operator tier for valid MCP_AUTH_TOKEN', async () => {
-    // process.env.MCP_AUTH_TOKEN was set to 'test-operator-token' before module load
+  it('returns operator tier for valid MCP_AUTH_TOKEN in single-user mode', async () => {
+    // process.env.MCP_AUTH_TOKEN was set to 'test-operator-token' before module load.
+    // MULTI_USER_ENABLED is not set, so this is the single-user CLI path.
+    delete process.env.MULTI_USER_ENABLED;
     const auth = await resolveAuth('test-operator-token');
     assert.ok(auth, 'Expected auth context for operator token');
     assert.equal(auth.tier, 'operator');
-    assert.equal(auth.accountId, 'operator');
+    assert.equal(auth.accountId, 'local-owner');
   });
 
   it('returns null for wrong MCP_AUTH_TOKEN', async () => {
+    delete process.env.MULTI_USER_ENABLED;
     const auth = await resolveAuth('wrong-operator-token');
     assert.equal(auth, null);
+  });
+
+  // F1b: MCP_AUTH_TOKEN must NOT grant any tier in multi-user hosted mode.
+  // A leaked or misconfigured env var becomes a no-op, not an escalation.
+  it('IGNORES MCP_AUTH_TOKEN in multi-user mode (no escalation backdoor)', async () => {
+    process.env.MULTI_USER_ENABLED = 'true';
+    try {
+      const auth = await resolveAuth('test-operator-token');
+      assert.equal(auth, null, 'Expected null — MCP_AUTH_TOKEN must not work in multi-user mode');
+    } finally {
+      delete process.env.MULTI_USER_ENABLED;
+    }
+  });
+
+  it('still resolves valid sk_ session tokens in multi-user mode', async () => {
+    process.env.MULTI_USER_ENABLED = 'true';
+    try {
+      const { token } = await createSession('0.0.77777', 'user');
+      const auth = await resolveAuth(token);
+      assert.ok(auth, 'Expected sk_ session to resolve in multi-user mode');
+      assert.equal(auth.tier, 'user');
+    } finally {
+      delete process.env.MULTI_USER_ENABLED;
+    }
+  });
+});
+
+// ═════════════════════════════════════════════════════════════
+// assertProductionRedis — F3 invariant
+// ═════════════════════════════════════════════════════════════
+
+describe('assertProductionRedis', () => {
+  // Tests run with UPSTASH_* unset and NODE_ENV unset (or 'test').
+
+  it("does not throw when NODE_ENV is unset and Upstash is missing (local dev)", () => {
+    delete process.env.NODE_ENV;
+    assertProductionRedis();
+  });
+
+  it("does not throw when NODE_ENV='development' and Upstash is missing", () => {
+    const original = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'development';
+    try {
+      assertProductionRedis();
+    } finally {
+      if (original === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = original;
+    }
+  });
+
+  it("THROWS with PRODUCTION_REDIS_REQUIRED when NODE_ENV='production' and Upstash is missing", () => {
+    const original = process.env.NODE_ENV;
+    // Make doubly sure Upstash is unset
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    delete process.env.KV_REST_API_URL;
+    delete process.env.KV_REST_API_TOKEN;
+    process.env.NODE_ENV = 'production';
+    try {
+      assert.throws(
+        () => assertProductionRedis(),
+        /PRODUCTION_REDIS_REQUIRED/,
+      );
+    } finally {
+      if (original === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = original;
+    }
+  });
+
+  it("does not throw when NODE_ENV='production' and Upstash IS configured", () => {
+    const original = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    process.env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    try {
+      assertProductionRedis();
+    } finally {
+      if (original === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = original;
+      delete process.env.UPSTASH_REDIS_REST_URL;
+      delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    }
+  });
+});
+
+describe('getRedisBackendMode', () => {
+  it("returns 'memory' when Upstash is unset", () => {
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    delete process.env.KV_REST_API_URL;
+    delete process.env.KV_REST_API_TOKEN;
+    assert.equal(getRedisBackendMode(), 'memory');
+    assert.equal(isUpstashConfigured(), false);
+  });
+
+  it("returns 'upstash' when both env vars are set", () => {
+    process.env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    try {
+      assert.equal(getRedisBackendMode(), 'upstash');
+      assert.equal(isUpstashConfigured(), true);
+    } finally {
+      delete process.env.UPSTASH_REDIS_REST_URL;
+      delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    }
+  });
+
+  it("supports legacy KV_REST_API_* aliases", () => {
+    process.env.KV_REST_API_URL = 'https://example.kv.io';
+    process.env.KV_REST_API_TOKEN = 'kv-token';
+    try {
+      assert.equal(getRedisBackendMode(), 'upstash');
+    } finally {
+      delete process.env.KV_REST_API_URL;
+      delete process.env.KV_REST_API_TOKEN;
+    }
+  });
+});
+
+// ═════════════════════════════════════════════════════════════
+// resolveWalletTier — F1a invariant
+// ═════════════════════════════════════════════════════════════
+//
+// Pure function — testable without forging mirror-node signatures.
+// Membership ordering is OPERATOR > ADMIN > USER, with operator
+// short-circuiting admin (a strict-superset hierarchy).
+
+describe('resolveWalletTier', () => {
+  // Save and restore env between tests
+  const ORIGINAL_OPERATOR = process.env.OPERATOR_ACCOUNTS;
+  const ORIGINAL_ADMIN = process.env.ADMIN_ACCOUNTS;
+
+  beforeEach(() => {
+    delete process.env.OPERATOR_ACCOUNTS;
+    delete process.env.ADMIN_ACCOUNTS;
+  });
+
+  // Restore after the suite
+  // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+  process.on('exit', () => {
+    if (ORIGINAL_OPERATOR !== undefined) process.env.OPERATOR_ACCOUNTS = ORIGINAL_OPERATOR;
+    if (ORIGINAL_ADMIN !== undefined) process.env.ADMIN_ACCOUNTS = ORIGINAL_ADMIN;
+  });
+
+  it("returns 'user' when no envs match", async () => {
+    const { resolveWalletTier } = await import('./verify.js');
+    assert.equal(resolveWalletTier('0.0.99999'), 'user');
+  });
+
+  it("returns 'admin' when account is in ADMIN_ACCOUNTS", async () => {
+    process.env.ADMIN_ACCOUNTS = '0.0.111,0.0.222';
+    const { resolveWalletTier } = await import('./verify.js');
+    assert.equal(resolveWalletTier('0.0.111'), 'admin');
+    assert.equal(resolveWalletTier('0.0.222'), 'admin');
+    assert.equal(resolveWalletTier('0.0.333'), 'user');
+  });
+
+  it("returns 'operator' when account is in OPERATOR_ACCOUNTS", async () => {
+    process.env.OPERATOR_ACCOUNTS = '0.0.500';
+    const { resolveWalletTier } = await import('./verify.js');
+    assert.equal(resolveWalletTier('0.0.500'), 'operator');
+  });
+
+  it("operator short-circuits admin (strict-superset)", async () => {
+    process.env.OPERATOR_ACCOUNTS = '0.0.500';
+    process.env.ADMIN_ACCOUNTS = '0.0.500,0.0.501';
+    const { resolveWalletTier } = await import('./verify.js');
+    assert.equal(resolveWalletTier('0.0.500'), 'operator');
+    assert.equal(resolveWalletTier('0.0.501'), 'admin');
+  });
+
+  it('handles whitespace and empty entries in env', async () => {
+    process.env.OPERATOR_ACCOUNTS = ' 0.0.500 , , 0.0.501 ';
+    const { resolveWalletTier } = await import('./verify.js');
+    assert.equal(resolveWalletTier('0.0.500'), 'operator');
+    assert.equal(resolveWalletTier('0.0.501'), 'operator');
+  });
+
+  it('handles unset envs gracefully', async () => {
+    const { resolveWalletTier } = await import('./verify.js');
+    assert.equal(resolveWalletTier('0.0.anything'), 'user');
   });
 });
 

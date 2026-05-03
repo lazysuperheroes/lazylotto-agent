@@ -7,12 +7,31 @@
  *   - auth_token tool parameter (legacy stdio compatibility)
  *
  * Resolves the token to an AuthContext with tier, accountId, and userId.
- * Legacy MCP_AUTH_TOKEN is supported for operator-tier access.
+ *
+ * MCP_AUTH_TOKEN handling — scoped intentionally:
+ *   - Single-user CLI / local stdio (`MULTI_USER_ENABLED !== 'true'`):
+ *     MCP_AUTH_TOKEN confers operator tier (`accountId: 'local-owner'`).
+ *     This is the documented and intended primitive for gating Claude
+ *     Desktop / other local processes against the agent's MCP server when
+ *     the operator runs the agent on their own machine.
+ *   - Multi-user hosted (`MULTI_USER_ENABLED === 'true'`):
+ *     MCP_AUTH_TOKEN is IGNORED. Wallet auth is the only path to any
+ *     tier. A leaked or misconfigured env var becomes a no-op rather
+ *     than an escalation backdoor. Hosted operators land in
+ *     OPERATOR_ACCOUNTS via src/auth/verify.ts.
  */
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { getSession } from './session.js';
 import type { AuthContext, AuthTier } from './types.js';
+
+/**
+ * True when the agent is running in multi-user (custodial) mode. Read at
+ * call time so tests can flip the flag without re-importing the module.
+ */
+function isMultiUserMode(): boolean {
+  return process.env.MULTI_USER_ENABLED === 'true';
+}
 
 /**
  * Resolve an auth token to an AuthContext.
@@ -34,16 +53,22 @@ export async function resolveAuth(token?: string): Promise<AuthContext | null> {
     };
   }
 
-  // Legacy: check against MCP_AUTH_TOKEN (operator tier)
-  // Read at call time (not module load) so tests can set it dynamically
-  const mcpAuthToken = process.env.MCP_AUTH_TOKEN || null;
-  if (mcpAuthToken) {
-    const hash = (s: string) => createHash('sha256').update(s).digest();
-    if (timingSafeEqual(hash(token), hash(mcpAuthToken))) {
-      return {
-        tier: 'operator',
-        accountId: 'operator',
-      };
+  // Single-user CLI: MCP_AUTH_TOKEN confers local-owner operator access.
+  // Hosted multi-user mode IGNORES this branch — wallet auth is the only
+  // path to any tier on a deployed agent. See module docstring for the
+  // rationale; this is a deliberate scope, not a bypass.
+  //
+  // Read env at call time so tests can flip MULTI_USER_ENABLED dynamically.
+  if (!isMultiUserMode()) {
+    const mcpAuthToken = process.env.MCP_AUTH_TOKEN || null;
+    if (mcpAuthToken) {
+      const hash = (s: string) => createHash('sha256').update(s).digest();
+      if (timingSafeEqual(hash(token), hash(mcpAuthToken))) {
+        return {
+          tier: 'operator',
+          accountId: 'local-owner',
+        };
+      }
     }
   }
 

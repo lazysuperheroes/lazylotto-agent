@@ -1,11 +1,16 @@
 /**
  * Auth system types for Hedera signature challenge-response authentication.
  *
- * Four authorization tiers:
+ * Four authorization tiers (ordered by privilege, operator highest):
  *   - public:   rate-limited, no auth (registration, onboarding)
  *   - user:     session token proving Hedera account ownership
  *   - admin:    session token + account in ADMIN_ACCOUNTS env
- *   - operator: MCP_AUTH_TOKEN (infrastructure/automation)
+ *   - operator: session token + account in OPERATOR_ACCOUNTS env
+ *
+ * In single-user CLI mode (MULTI_USER_ENABLED != 'true'), MCP_AUTH_TOKEN
+ * also confers operator tier — see src/auth/middleware.ts. That path is
+ * scoped to local stdio / Claude Desktop and does NOT apply on hosted
+ * multi-user deployments.
  */
 
 /** Authorization tiers, ordered by privilege. */
