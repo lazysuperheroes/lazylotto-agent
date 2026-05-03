@@ -737,6 +737,20 @@ export class AccountingService {
 
     const message = JSON.stringify(payload);
 
+    // F8: enforce the 1024-byte cap on the legacy v1 path too. The v2
+    // writer above already does this; before now the legacy path could
+    // silently truncate or get rejected at the HCS layer with a less
+    // actionable error. Same hard-fail rationale as v2: a truncated
+    // audit message is worse than a dropped one — surface the bug.
+    if (Buffer.byteLength(message, 'utf-8') > 1024) {
+      throw new Error(
+        `[AccountingService] V1 message exceeds 1024 bytes (${Buffer.byteLength(
+          message,
+          'utf-8',
+        )}): op=${payload.op}`,
+      );
+    }
+
     await new TopicMessageSubmitTransaction()
       .setTopicId(TopicId.fromString(this.topicId))
       .setMessage(message)

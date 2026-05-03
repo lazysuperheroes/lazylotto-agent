@@ -39,6 +39,7 @@ import { getStore } from '../../_lib/store';
 import { getAgentContext } from '../../_lib/mcp';
 import { withStore } from '../../_lib/withStore';
 import { reconcile, type ReconciliationResult } from '~/custodial/Reconciliation';
+import { isAuthorizedCron, escapeMrkdwn } from './helpers';
 
 // CORS for the cron endpoint isn't strictly necessary (Vercel Cron
 // hits it from the same origin), but include it so an operator can
@@ -59,24 +60,8 @@ export async function OPTIONS() {
   });
 }
 
-/**
- * Auth check: bearer-token comparison against CRON_SECRET. Constant-time
- * comparison would be ideal but we're not protecting against timing
- * attacks here — anyone with the URL can already DoS via repeated
- * requests, so the win from constant-time comparison is small. Plain
- * `===` is fine.
- */
-function isAuthorizedCron(request: Request): boolean {
-  const expected = process.env.CRON_SECRET;
-  if (!expected) {
-    // No secret configured = endpoint disabled. Better than allowing
-    // unauthenticated access by accident.
-    return false;
-  }
-  const header = request.headers.get('authorization') ?? '';
-  if (!header.startsWith('Bearer ')) return false;
-  return header.slice(7) === expected;
-}
+// Auth check + mrkdwn escape live in ./helpers so vitest can unit-test
+// them without booting the agent context.
 
 export const GET = withStore(async (request: Request) => {
   if (!isAuthorizedCron(request)) {
@@ -134,14 +119,19 @@ export const GET = withStore(async (request: Request) => {
  * Post a Slack/Discord-shaped failure message to the webhook URL.
  * Both Slack and Discord webhooks accept `{ text: string }` as the
  * minimum payload, so this works for either.
+ *
+ * All variable strings (warnings, token names) flow through
+ * `escapeMrkdwn` before concatenation. Static format characters
+ * (the `*bold*` markers, bullets, the `🚨` emoji) are NOT escaped
+ * because they're authored here, not user-supplied.
  */
 async function fireFailureWebhook(result: ReconciliationResult): Promise<void> {
   const url = process.env.RECONCILE_FAILURE_WEBHOOK_URL;
   if (!url) return;
 
-  const network = process.env.HEDERA_NETWORK ?? 'unknown';
+  const network = escapeMrkdwn(process.env.HEDERA_NETWORK ?? 'unknown');
   const warningsList = result.warnings.length
-    ? result.warnings.map((w) => `• ${w}`).join('\n')
+    ? result.warnings.map((w) => `• ${escapeMrkdwn(w)}`).join('\n')
     : '(no warnings)';
 
   const text =
@@ -149,7 +139,7 @@ async function fireFailureWebhook(result: ReconciliationResult): Promise<void> {
     `solvent: ${result.solvent}\n` +
     `\n*Adjusted deltas:*\n` +
     Object.entries(result.adjustedDelta)
-      .map(([token, delta]) => `• ${token}: ${delta.toFixed(4)}`)
+      .map(([token, delta]) => `• ${escapeMrkdwn(token)}: ${delta.toFixed(4)}`)
       .join('\n') +
     `\n\n*Warnings:*\n${warningsList}\n` +
     `\n_Run \`/admin\` reconcile or check function logs for details._`;

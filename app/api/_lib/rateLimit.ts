@@ -53,10 +53,41 @@ export interface RateLimitOptions {
 /**
  * Extract a stable rate-limit key from the request:
  *   1. First 16 chars of Bearer token (dedupe per session)
- *   2. x-forwarded-for header (Vercel sets this to the client IP)
+ *   2. x-forwarded-for[0] (Vercel edge IP — see security note below)
  *   3. 'unknown' fallback
+ *
+ * ── F7 — x-forwarded-for trust model ────────────────────────────
+ *
+ * On Vercel, the platform's edge network REWRITES `x-forwarded-for`
+ * before the function sees it. The first entry is the client's
+ * real source IP as observed by the edge — NOT a value the client
+ * controls. Any client-supplied `x-forwarded-for` header is appended
+ * after the edge-set value, so `split(',')[0]` always returns the
+ * trustworthy value.
+ *
+ * Reference: Vercel docs — "Headers sent to functions" lists
+ * `x-forwarded-for` with the edge-prepended client IP as the first
+ * entry, followed by any upstream proxy chain. See also:
+ *   https://vercel.com/docs/edge-network/headers
+ *
+ * Implications:
+ *   - On Vercel: trustworthy. The body's `accountId` field never
+ *     enters the rate-limit key, so an attacker cannot fan out by
+ *     rotating accountIds.
+ *   - Off Vercel (self-hosted CLI HTTP, local dev): the header is
+ *     whatever upstream sets it to. For local dev this is usually
+ *     unset or `127.0.0.1`. For self-hosted production behind an
+ *     untrusted reverse proxy, this would be spoofable — but the
+ *     CLI HTTP mode is documented as single-tenant and gated by
+ *     `MCP_AUTH_TOKEN`, so rate limiting isn't the primary security
+ *     boundary.
+ *
+ * Shared-NAT note: legitimate users behind the same corporate / NAT
+ * gateway share rate-limit budget. The 10-challenge / 5-verify per
+ * 5-minute caps are sized to absorb that without locking out a
+ * large org. If we see legitimate-user 429s clustering, revisit.
  */
-function identityFor(request: Request): string {
+export function identityFor(request: Request): string {
   const auth = request.headers.get('authorization');
   if (auth?.startsWith('Bearer ')) return auth.slice(7, 23);
   const xff = request.headers.get('x-forwarded-for');

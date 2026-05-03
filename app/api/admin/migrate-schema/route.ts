@@ -27,6 +27,7 @@ import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
+import { withStore } from '../../_lib/withStore';
 import { CURRENT_SCHEMA_VERSION } from '~/custodial/types';
 
 export async function OPTIONS() {
@@ -39,7 +40,8 @@ export async function OPTIONS() {
   });
 }
 
-export async function POST(request: Request) {
+// withStore: F3 production-Redis preflight + uniform diagnostic shape.
+export const POST = withStore(async (request: Request) => {
   try {
     // Modest limit — migration is cheap but operator-driven, no point
     // letting it be hammered.
@@ -120,4 +122,4 @@ export async function POST(request: Request) {
       { status: 500, headers: CORS_HEADERS },
     );
   }
-}
+});

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { lockSession } from '~/auth/session';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { staticCorsHeaders } from '../../_lib/cors';
+import { withStore } from '../../_lib/withStore';
 
 const CORS_HEADERS = staticCorsHeaders('POST, OPTIONS');
 
@@ -15,7 +16,11 @@ export async function OPTIONS() {
   });
 }
 
-export async function POST(request: Request) {
+// withStore: F3 production-Redis preflight + uniform last-resort catch.
+// Without it, a missing Upstash deploy returns a route-local 500 here
+// while every other route returns a structured 503 — that asymmetry is
+// the diagnostic gap we're closing.
+export const POST = withStore(async (request: Request) => {
   try {
     // Rate limit: 5 lock attempts per identity per minute
     if (!(await checkRateLimit({ request, action: 'lock', limit: 5, windowSec: 60 }))) {
@@ -52,4 +57,4 @@ export async function POST(request: Request) {
       { status: 500, headers: CORS_HEADERS },
     );
   }
-}
+});

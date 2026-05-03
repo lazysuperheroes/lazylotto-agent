@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { refreshSession } from '~/auth/session';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { staticCorsHeaders } from '../../_lib/cors';
+import { withStore } from '../../_lib/withStore';
 
 const CORS_HEADERS = staticCorsHeaders('POST, OPTIONS');
 
@@ -15,7 +16,8 @@ export async function OPTIONS() {
   });
 }
 
-export async function POST(request: Request) {
+// withStore: F3 production-Redis preflight + uniform diagnostic shape.
+export const POST = withStore(async (request: Request) => {
   try {
     // Rate limit: 20 refreshes per identity per minute
     if (!(await checkRateLimit({ request, action: 'refresh', limit: 20, windowSec: 60 }))) {
@@ -52,4 +54,4 @@ export async function POST(request: Request) {
       { status: 500, headers: CORS_HEADERS },
     );
   }
-}
+});

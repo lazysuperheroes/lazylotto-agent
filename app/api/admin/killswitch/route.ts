@@ -25,6 +25,7 @@ import {
   disableKillSwitch,
 } from '~/lib/killswitch';
 import { getAgentContext } from '../../_lib/mcp';
+import { withStore } from '../../_lib/withStore';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -36,15 +37,21 @@ export async function OPTIONS() {
   });
 }
 
-export async function GET(request: Request) {
+// withStore wraps all three verbs so the F3 production-Redis preflight,
+// store flush, and last-resort error catch fire uniformly. The kill
+// switch is the most important admin tool — any operator hitting a
+// misconfigured deploy must get the same `PRODUCTION_REDIS_REQUIRED`
+// 503 they get on every other route, not a route-local 500.
+
+export const GET = withStore(async (request: Request) => {
   const auth = await requireTier(request, 'admin');
   if (isErrorResponse(auth)) return auth;
 
   const state = await getKillSwitchState();
   return NextResponse.json(state, { headers: CORS_HEADERS });
-}
+});
 
-export async function POST(request: Request) {
+export const POST = withStore(async (request: Request) => {
   try {
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
@@ -83,9 +90,9 @@ export async function POST(request: Request) {
       { status: 500, headers: CORS_HEADERS },
     );
   }
-}
+});
 
-export async function DELETE(request: Request) {
+export const DELETE = withStore(async (request: Request) => {
   try {
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
@@ -110,4 +117,4 @@ export async function DELETE(request: Request) {
       { status: 500, headers: CORS_HEADERS },
     );
   }
-}
+});
