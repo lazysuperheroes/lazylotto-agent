@@ -2,12 +2,19 @@
  * Agent Card validation tests.
  *
  * Ensures the Agent Card is structurally valid and that every MCP
- * tool the serverless endpoint exposes has a corresponding A2A skill.
+ * tool the serverless endpoint exposes has a corresponding A2A skill,
+ * with the canonical tool-name list (`src/mcp/tool-names.ts`) as the
+ * single source of truth.
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildAgentCard, getSkillIds } from '../agent-card.js';
+import {
+  MULTI_USER_TOOL_NAMES,
+  OPERATOR_TOOL_NAMES,
+  ALL_REMOTE_TOOL_NAMES,
+} from '../../mcp/tool-names.js';
 
 describe('buildAgentCard', () => {
   const card = buildAgentCard();
@@ -75,39 +82,38 @@ describe('Agent Card skills', () => {
     assert.equal(ids.length, unique.size, `Duplicate skill IDs: ${ids.filter((id, i) => ids.indexOf(id) !== i)}`);
   });
 
-  it('includes all multi-user tools', () => {
+  it('includes every multi-user tool from the canonical list', () => {
     const ids = getSkillIds();
-    const multiUserTools = [
-      'multi_user_status',
-      'multi_user_register',
-      'multi_user_deposit_info',
-      'multi_user_play',
-      'multi_user_withdraw',
-      'multi_user_deregister',
-      'multi_user_play_history',
-    ];
-    for (const tool of multiUserTools) {
+    for (const tool of MULTI_USER_TOOL_NAMES) {
       assert.ok(ids.has(tool), `Missing multi-user skill: ${tool}`);
     }
   });
 
-  it('includes all operator tools', () => {
+  it('includes every operator tool from the canonical list', () => {
     const ids = getSkillIds();
-    const operatorTools = [
-      'operator_balance',
-      'operator_withdraw_fees',
-      'operator_reconcile',
-      'operator_dead_letters',
-      'operator_refund',
-      'operator_recover_stuck_prizes',
-      'operator_health',
-    ];
-    for (const tool of operatorTools) {
+    for (const tool of OPERATOR_TOOL_NAMES) {
       assert.ok(ids.has(tool), `Missing operator skill: ${tool}`);
     }
   });
 
-  it('has exactly 14 skills (7 multi-user + 7 operator)', () => {
-    assert.equal(card.skills.length, 14);
+  // Strict drift-prevention test. If a new MCP tool ships, the canonical
+  // list must be updated AND the A2A skill must be added; if a skill is
+  // removed without removing the tool (or vice versa) this fires loudly.
+  // This is the test that should have caught the multi_user_set_strategy
+  // gap in the original c0fa099 commit.
+  it('A2A skill set EQUALS the canonical MCP tool list (no drift in either direction)', () => {
+    const skillIds = Array.from(getSkillIds()).sort();
+    const expected = [...ALL_REMOTE_TOOL_NAMES].sort();
+    assert.deepEqual(
+      skillIds,
+      expected,
+      `A2A skills drifted from src/mcp/tool-names.ts. ` +
+        `If you added an MCP tool, also add the matching skill in src/a2a/agent-card.ts. ` +
+        `If you removed one, remove it from both places.`,
+    );
+  });
+
+  it('skill count matches the canonical list', () => {
+    assert.equal(card.skills.length, ALL_REMOTE_TOOL_NAMES.length);
   });
 });

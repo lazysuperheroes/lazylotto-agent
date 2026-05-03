@@ -174,14 +174,9 @@ async function testAgentCard() {
     const { data } = await get('/api/a2a');
     const card = data as { skills: { id: string }[] };
     const ids = new Set(card.skills.map((s) => s.id));
-    const expected = [
-      'multi_user_status', 'multi_user_register', 'multi_user_deposit_info',
-      'multi_user_play', 'multi_user_withdraw', 'multi_user_deregister',
-      'multi_user_play_history', 'multi_user_set_strategy',
-      'operator_balance', 'operator_withdraw_fees',
-      'operator_reconcile', 'operator_dead_letters', 'operator_refund',
-      'operator_recover_stuck_prizes', 'operator_health',
-    ];
+    // Single source of truth — see src/mcp/tool-names.ts.
+    const { ALL_REMOTE_TOOL_NAMES } = await import('../mcp/tool-names.js');
+    const expected = [...ALL_REMOTE_TOOL_NAMES];
     const missing = expected.filter((e) => !ids.has(e));
     if (missing.length > 0) {
       fail('Skill completeness', `Missing: ${missing.join(', ')}`);

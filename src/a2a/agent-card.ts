@@ -70,6 +70,13 @@ const MULTI_USER_SKILLS: AgentSkill[] = [
     tags: ['history', 'sessions', 'plays'],
     examples: ['Show my last 5 play sessions'],
   },
+  {
+    id: 'multi_user_set_strategy',
+    name: 'Change strategy preset',
+    description: 'Change a user\'s play strategy preset. Takes effect on the next play session. Params: strategy (conservative|balanced|aggressive, required), userId (optional, auto-resolved for user tier).',
+    tags: ['strategy', 'preferences'],
+    examples: ['Switch me to aggressive', 'Set strategy to conservative'],
+  },
 ];
 
 const OPERATOR_SKILLS: AgentSkill[] = [
