@@ -24,6 +24,7 @@
  */
 
 import { getRedis, KEY_PREFIX } from '../auth/redis.js';
+import { recordRedisFailure, recordRedisSuccess } from './redisHealth.js';
 import { logger } from './logger.js';
 
 const KILL_KEY = KEY_PREFIX.killswitch;
@@ -56,11 +57,18 @@ export async function isKillSwitchEnabled(): Promise<boolean> {
   try {
     const redis = await getRedis();
     const raw = await redis.get<string>(KILL_KEY);
+    recordRedisSuccess();
     return raw !== null && raw !== undefined;
   } catch (err) {
     // If we can't reach Redis, FAIL OPEN. The kill switch is a safety
-    // override, not a gate — the normal path (Redis down) should not
-    // halt the agent just because we couldn't check a flag.
+    // override, not a gate — halting the agent because we couldn't
+    // check a flag would be worse than the rare case the flag was set.
+    //
+    // F6: but we DO record the failure so the circuit-breaker can
+    // catch a sustained outage. While the breaker is open, write-path
+    // routes (play, withdraw) fail closed even though this individual
+    // guard fails open. That's the trade — defense in depth.
+    recordRedisFailure();
     logger.warn('killswitch check failed, allowing operation', { error: err });
     return false;
   }
@@ -71,6 +79,7 @@ export async function getKillSwitchState(): Promise<KillSwitchState> {
   try {
     const redis = await getRedis();
     const raw = await redis.get<string>(KILL_KEY);
+    recordRedisSuccess();
     if (raw === null || raw === undefined) {
       return { enabled: false };
     }
@@ -82,6 +91,9 @@ export async function getKillSwitchState(): Promise<KillSwitchState> {
       return { enabled: true };
     }
   } catch (err) {
+    // Same fail-open + breaker-record dance as isKillSwitchEnabled. See
+    // the F6 comment there for the trade-off rationale.
+    recordRedisFailure();
     logger.warn('killswitch state read failed', { error: err });
     return { enabled: false };
   }

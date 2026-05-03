@@ -975,7 +975,25 @@ export class MultiUserAgent {
    * Process a user withdrawal: deduct from ledger, execute on-chain
    * token transfer, record the withdrawal, and notify the user.
    *
-   * Uses per-user mutex to prevent concurrent withdrawals/plays.
+   * Concurrency invariant (F10): the per-user lock MUST be held across
+   * BOTH the velocity-cap check AND the on-chain transfer. The
+   * read-modify-write pattern in `checkWithdrawalVelocity` is not
+   * atomic at the Redis layer (we read, compute, then write), so
+   * without a wrapping lock two concurrent withdrawals could both
+   * pass the cap check. Two layers of locking enforce this:
+   *
+   *   1. In-process mutex via `this.acquireLock(userId)` below,
+   *      serializing within a single Lambda or CLI process.
+   *   2. Distributed lock via `acquireUserLock` at the route layer
+   *      (web `/api/user/withdraw` and the `multi_user_withdraw` MCP
+   *      tool both wrap this call in `acquireUserLock(userId)`),
+   *      serializing across warm Lambda instances.
+   *
+   * If a future caller bypasses route-layer locking (e.g. an internal
+   * cron, a refund flow, an HCS-10 negotiation handler), it MUST also
+   * acquire the distributed user lock before invoking
+   * `processWithdrawal`. The in-process mutex alone is not sufficient
+   * in serverless — two warm Lambdas would each hold their OWN mutex.
    */
   async processWithdrawal(userId: string, amount: number, token: string = 'hbar'): Promise<WithdrawalRecord> {
     await this.acquireLock(userId);
@@ -1644,6 +1662,7 @@ export class MultiUserAgent {
   ): Promise<number> {
     try {
       const { getRedis, KEY_PREFIX } = await import('../auth/redis.js');
+      const { recordRedisSuccess } = await import('../lib/redisHealth.js');
       const redis = await getRedis();
       const key = `${KEY_PREFIX.velocity}${tokenKey}:${userId}`;
 
@@ -1653,15 +1672,26 @@ export class MultiUserAgent {
       const proposed = current + amount;
 
       if (proposed > cap) {
+        recordRedisSuccess();
         return cap - proposed; // negative = over cap
       }
 
       // Within budget — increment and (re)set TTL to 24h
       await redis.set(key, String(proposed), { ex: 24 * 60 * 60 });
+      recordRedisSuccess();
       return cap - proposed; // positive = remaining
     } catch (e) {
-      console.warn('[velocity] check failed (allowing withdrawal):', e);
-      return cap; // fail-open — don't block legit withdrawals on Redis hiccup
+      // F6: record the failure so the breaker can detect sustained outages.
+      // We still fail open here (allowing the withdrawal) — the breaker
+      // is what catches the stack-up. The route layer's assertRedisHealthy()
+      // gate will reject the withdrawal entirely once enough failures
+      // accumulate.
+      try {
+        const { recordRedisFailure } = await import('../lib/redisHealth.js');
+        recordRedisFailure();
+      } catch { /* nothing to do if we can't even import the breaker module */ }
+      console.warn('[velocity] check failed (allowing withdrawal — breaker will catch sustained outage):', e);
+      return cap; // fail-open per-call; breaker catches sustained issues
     }
   }
 

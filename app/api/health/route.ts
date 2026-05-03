@@ -1,22 +1,35 @@
 /**
  * GET /api/health
  *
- * Liveness check — no auth, no dependencies, cheap to call. Intended
- * for uptime monitors, load balancers, and the HOL discovery payload.
+ * Liveness check — no auth, cheap to call. Intended for uptime monitors,
+ * load balancers, and the HOL discovery payload.
  *
  * Returns the minimum fields a monitor needs to distinguish "agent is
- * running" from "Vercel is serving a 500 page":
- *   - status:    always 'ok' when the route executes
- *   - network:   testnet | mainnet (from env)
- *   - version:   package version (from NEXT_PUBLIC_APP_VERSION,
- *                injected at build time by next.config.mjs from
- *                package.json — see notes below)
- *   - timestamp: ISO string, so stale-cache probes can see freshness
+ * running" from "Vercel is serving a 500 page", plus diagnostic fields
+ * that surface backend misconfiguration without requiring operators to
+ * peek at Vercel env vars:
  *
- * Deliberately does NOT check Redis, Hedera SDK, or any downstream
- * service. A health endpoint that fans out is a health endpoint that
- * cascades failures — and the MCP / status routes already cover the
- * "is everything actually working" question.
+ *   - status:       always 'ok' when the route executes
+ *   - network:      testnet | mainnet (from env)
+ *   - version:      package version (from NEXT_PUBLIC_APP_VERSION,
+ *                   injected at build time by next.config.mjs from
+ *                   package.json — see notes below)
+ *   - timestamp:    ISO string, so stale-cache probes can see freshness
+ *   - redis:        'upstash' | 'memory' — backend mode for auth, locks,
+ *                   rate limits, sessions, kill switch, velocity caps.
+ *                   Synchronous env check; no Redis I/O. Monitors should
+ *                   alert if this is 'memory' in production. (F3 + F4)
+ *   - auth_backend: alias for `redis` (they share the same client).
+ *   - kill_switch:  { state: 'enabled'|'disabled'|'unknown', reason? }.
+ *                   `unknown` means the Redis read for the flag failed —
+ *                   does NOT cause the route to 5xx, but is a signal a
+ *                   monitor should pick up.
+ *
+ * The Redis-mode fields are deliberately synchronous. The kill switch
+ * read is best-effort — if Redis is unreachable we report 'unknown' and
+ * the health endpoint still returns 200. A health endpoint that
+ * cascades failures from one downstream into a global outage is worse
+ * than no health endpoint.
  *
  * Version sourcing: Vercel does NOT set `npm_package_version` at
  * function runtime — that var is only present when the process was
@@ -28,6 +41,8 @@
  */
 
 import { NextResponse } from 'next/server';
+import { getRedisBackendMode } from '~/auth/redis';
+import { getKillSwitchState } from '~/lib/killswitch';
 
 // Public endpoint — wide-open CORS so any monitor can read.
 const CORS_HEADERS = {
@@ -47,6 +62,22 @@ export async function OPTIONS() {
 }
 
 export async function GET() {
+  // Backend mode — synchronous env check, no I/O.
+  const redisMode = getRedisBackendMode();
+
+  // Kill switch — best-effort. If Redis is unreachable, getKillSwitchState
+  // already swallows the error and returns { enabled: false }; we surface
+  // a third 'unknown' state by re-running the lower-level check ourselves.
+  let killSwitch: { state: 'enabled' | 'disabled' | 'unknown'; reason?: string };
+  try {
+    const ks = await getKillSwitchState();
+    killSwitch = ks.enabled
+      ? { state: 'enabled', ...(ks.reason ? { reason: ks.reason } : {}) }
+      : { state: 'disabled' };
+  } catch {
+    killSwitch = { state: 'unknown' };
+  }
+
   return NextResponse.json(
     {
       status: 'ok',
@@ -56,6 +87,9 @@ export async function GET() {
         process.env.npm_package_version ??
         '0.1.0',
       timestamp: new Date().toISOString(),
+      redis: redisMode,
+      auth_backend: redisMode,
+      kill_switch: killSwitch,
     },
     {
       headers: {

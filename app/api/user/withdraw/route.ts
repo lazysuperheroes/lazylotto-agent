@@ -22,6 +22,7 @@ import { withStore } from '../../_lib/withStore';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { getAgentContext } from '../../_lib/mcp';
 import { acquireUserLock, releaseUserLock } from '../../_lib/locks';
+import { assertRedisHealthy, RedisDegradedError } from '~/lib/redisHealth';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -35,6 +36,14 @@ export async function OPTIONS() {
 
 export const POST = withStore(async (request: Request) => {
   try {
+    // F6: fail closed if the Redis circuit-breaker is open. Withdrawals
+    // depend on the user lock, velocity cap, kill switch, and HCS-20
+    // audit — every safety rail flows through Redis. Sustained Redis
+    // failure means the velocity cap silently fails open (returns full
+    // cap on every check), so the right move is to refuse the operation
+    // until Redis recovers. Reads continue normally on other routes.
+    assertRedisHealthy();
+
     // Withdrawal is sensitive — strict rate limit
     if (!(await checkRateLimit({ request, action: 'user-withdraw', limit: 5, windowSec: 60 }))) {
       return rateLimitResponse(60);
@@ -102,6 +111,12 @@ export const POST = withStore(async (request: Request) => {
       await releaseUserLock(user.userId, lockToken);
     }
   } catch (err) {
+    if (err instanceof RedisDegradedError) {
+      return NextResponse.json(
+        { error: err.message, reason: 'redis_degraded' },
+        { status: 503, headers: CORS_HEADERS },
+      );
+    }
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
       { error: message },

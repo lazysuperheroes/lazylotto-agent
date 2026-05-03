@@ -25,6 +25,7 @@ import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { getAgentContext } from '../../_lib/mcp';
 import { acquireUserLock, releaseUserLock } from '../../_lib/locks';
 import { KillSwitchError } from '~/lib/killswitch';
+import { assertRedisHealthy, RedisDegradedError } from '~/lib/redisHealth';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -38,6 +39,13 @@ export async function OPTIONS() {
 
 export const POST = withStore(async (request: Request) => {
   try {
+    // F6: fail closed if the Redis circuit-breaker is open. Plays touch
+    // the user lock, kill switch, rate limiter, and HCS-20 audit trail —
+    // ALL of which depend on Redis. Sustained Redis failure means our
+    // safety guarantees are degraded; better to surface a clear 503 than
+    // run with safety rails silently disabled.
+    assertRedisHealthy();
+
     // Stricter than general user routes — plays cost HBAR and touch
     // the dApp contracts, so cap to 3 per minute per identity.
     if (!(await checkRateLimit({ request, action: 'user-play', limit: 3, windowSec: 60 }))) {
@@ -116,6 +124,15 @@ export const POST = withStore(async (request: Request) => {
     if (err instanceof KillSwitchError) {
       return NextResponse.json(
         { error: err.message, reason: err.reason ?? null },
+        { status: 503, headers: CORS_HEADERS },
+      );
+    }
+    // F6: Redis breaker open → service-degraded 503. Same shape as
+    // kill switch so the dashboard's "agent temporarily unavailable"
+    // banner picks it up uniformly.
+    if (err instanceof RedisDegradedError) {
+      return NextResponse.json(
+        { error: err.message, reason: 'redis_degraded' },
         { status: 503, headers: CORS_HEADERS },
       );
     }
