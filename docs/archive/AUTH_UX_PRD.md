@@ -1,3 +1,8 @@
+> **Archived — bootstrap PRD, not current documentation.**
+> The wallet-based auth described here has shipped. Current spec lives in
+> [`../../README.md`](../../README.md) under "Multi-User Authentication" and
+> in source under `src/auth/`. See [`./README.md`](./README.md) for archive policy.
+
 # Authentication UX: Product Requirements Document
 
 > **Status**: Draft

@@ -513,8 +513,16 @@ or transaction, wait a few seconds before checking balances.
 
 ## Further Reading
 
-- [How It Works](HOW_IT_WORKS.md) -- architecture overview and flow diagrams
+- [Repository README](../README.md) -- architecture, security model, MCP + A2A surfaces, CLI reference
+- [Players Guide](../PLAYERS.md) -- friendly walkthrough for end users
+- [Features](../FEATURES.md) -- what the agent does, by audience
 - [Multi-User Guide](MULTI_USER.md) -- deep dive into custodial mode
-- [MCP Server Reference](MCP_SERVER.md) -- all available MCP tools
-- [Auth Architecture](HEDERA_AUTH_ARCHITECTURE.md) -- signature challenge design
-- [Testnet Playbook](TESTNET_PLAYBOOK.md) -- step-by-step testing checklist
+- [Testnet User Guide](testnet-user-guide.md) -- end-user dashboard + Claude flow
+- [Testnet UAT Checklist](testnet-uat.md) -- pre-release validation
+- [HCS-20 v2 Schema](hcs20-v2-schema.md) -- external-auditor wire format
+- [HOL Discovery Guide](hol-discovery-guide.md) -- the 3-layer discovery model
+- [Mainnet Deploy Checklist](mainnet-deploy-checklist.md) -- production runbook
+- [Incident Playbook](incident-playbook.md) -- 2am-page response
+- [Disaster Recovery](disaster-recovery.md) -- Redis loss + HCS-20 rebuild
+- [Uptime Monitoring](uptime-monitoring.md) -- external monitor wiring
+- [Engineering Blog](blog/) -- the why, the how, and the security story

@@ -1,3 +1,8 @@
+> **Archived — bootstrap design across two repos, not current documentation.**
+> Phases 0-2 shipped. The dApp's MCP endpoint is documented in the dApp repo;
+> this repo's MCP surface is in [`../../README.md`](../../README.md) "MCP Server".
+> See [`./README.md`](./README.md) for archive policy.
+
 # LazyLotto MCP Integration Design
 
 > **Status**: v1.0 — Phases 0–2 Complete (Read + Write MCP tools live)

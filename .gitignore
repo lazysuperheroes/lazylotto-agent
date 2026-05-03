@@ -11,3 +11,4 @@ play-history-*.csv
 
 # Claude Code frameworks (exclude all)
 .claude/
+docs/security-hardening-plan.md

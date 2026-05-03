@@ -1,4 +1,10 @@
-# LazyLotto MCP Server
+> **Archived — describes the LazyLotto dApp's MCP endpoint, which lives in a SEPARATE repo.**
+> The agent consumes that endpoint via the `LAZYLOTTO_MCP_URL` env var.
+> The current source of truth for the dApp's MCP tools is the dApp repo, not here.
+> For THIS repo's MCP server (the agent's tools), see
+> [`../../README.md`](../../README.md) "MCP Server".
+
+# LazyLotto MCP Server (dApp endpoint — separate repo)
 
 > **Status**: Live on Testnet
 > **Endpoint**: `https://lazy-dapp-v3-env-testnet-lazysuperheroes.vercel.app/api/mcp`

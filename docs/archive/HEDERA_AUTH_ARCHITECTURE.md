@@ -1,3 +1,9 @@
+> **Archived — bootstrap design, not current documentation.**
+> Implementation has shipped; sequence diagrams here match `src/auth/` but the
+> code is now the source of truth. Current operational view is in
+> [`../../README.md`](../../README.md) "Multi-User Authentication".
+> See [`./README.md`](./README.md) for archive policy.
+
 # Hedera Signature Challenge-Response Authentication
 
 Architecture design for replacing the shared `MCP_AUTH_TOKEN` with per-user
