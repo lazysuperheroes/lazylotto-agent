@@ -337,7 +337,208 @@ timestamp}`. If it's down, the entire deployment is hosed.
 
 ---
 
-## Symptom 8 — Rate limiter behaving wrong
+## Symptom 8 — Operator key compromise (suspected or confirmed)
+
+**You'll see this from**: unexpected outflows from the agent wallet on
+HashScan, the reconcile cron firing with unexplained negative deltas,
+suspicious `/api/auth/verify` activity, an alert from a security
+service, OR — best case — a teammate noticing a leak before damage.
+
+This is a P0. Stop reading the rest of this playbook and execute the
+seven steps below in order.
+
+### Step 1 — Engage the kill switch with a key-compromise reason
+
+```
+/admin → Engage → reason: "key compromise — investigating <date>"
+```
+
+Or via API:
+
+```bash
+curl -X POST https://agent.lazysuperheroes.com/api/admin/killswitch \
+  -H "Authorization: Bearer sk_OPERATOR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true,"reason":"key compromise - investigating"}'
+```
+
+What this stops: new plays, new registrations.
+What it does NOT stop: withdrawals, reads. Users can still get out.
+
+### Step 2 — Drain operator-controlled float to a cold wallet
+
+Don't wait for the rotation. The current operator key is presumed
+hostile-controllable; move the working-capital float out of reach
+immediately.
+
+```bash
+# From an operator-tier session (wallet auth, OPERATOR_ACCOUNTS):
+operator_withdraw_fees amount=<all-HBAR> to=<cold-wallet> token=HBAR
+operator_withdraw_fees amount=<all-LAZY> to=<cold-wallet> token=LAZY
+```
+
+Or the corresponding REST endpoints. Pick a Hedera account YOU control
+that the compromised key has never touched. Hardware-wallet preferred.
+
+Note: this only drains the operator float (rake collected, gas pool).
+User-deposited balances stay where they are — they'll be reconciled in
+Step 5 from the HCS-20 trail.
+
+### Step 3 — Rotate the Hedera operator key
+
+1. Generate a new keypair (HashPack or `hedera-cli`):
+   ```bash
+   # Locally — DO NOT echo the private key into terminal scrollback
+   node -e "import('@hashgraph/sdk').then(({PrivateKey})=>{const k=PrivateKey.generateED25519();console.log('PUB:',k.publicKey.toStringDer());require('fs').writeFileSync('/tmp/newkey.txt',k.toStringDer(),{mode:0o600});})"
+   ```
+2. Update the Hedera account's key on-chain via `AccountUpdateTransaction`
+   signed by the OLD key (this is the key-compromise paradox — if the
+   old key is leaked, an attacker could race you. Do this BEFORE the
+   attacker realizes the leak is detected, or after rotating to a
+   throwaway account first):
+   ```bash
+   npx tsx src/scripts/rotate-operator-key.ts \
+     --account-id <agent-account> \
+     --old-key-file /tmp/oldkey.txt \
+     --new-public-key <pub-from-step-1>
+   ```
+   *(If this script doesn't exist yet — write it as part of the
+   pre-mainnet runbook hardening. The transaction is a 4-line SDK call.)*
+3. Update Vercel environment variables (Sensitive mode):
+   - `HEDERA_PRIVATE_KEY` = new private key (DER hex)
+   - Trigger a redeploy
+4. Verify: `agent_status` returns the operator EVM address; the new key
+   signs a test no-op transaction successfully.
+
+### Step 4 — Revoke all live sessions
+
+A leaked operator key may have been used to mint sessions. Wipe them.
+
+```bash
+# Flushes the entire `lla:<network>:session:*` and account-sessions space.
+# Requires Upstash CLI access OR a one-shot operator endpoint.
+upstash redis cli "EVAL \"for _,k in ipairs(redis.call('KEYS','lla:'..ARGV[1]..':session:*')) do redis.call('DEL',k) end\" 0 testnet"
+```
+
+Re-issue admin/operator sessions by signing fresh wallet challenges.
+
+### Step 5 — Reconcile from HCS-20 (no operator state needed)
+
+The audit topic is the source of truth for what users are owed.
+
+```bash
+npx tsx src/scripts/verify-audit.ts \
+  --topic <HCS20_TOPIC_ID> \
+  --json > /tmp/post-incident-ledger.json
+```
+
+For each user, compare reconstructed balance against current Redis
+state. Discrepancies (caused by attacker-issued operations not present
+in Redis, or by Redis ops that didn't reach the topic) become Phase 2
+items — fund users from the cold wallet to match the audit-trail
+balance.
+
+### Step 6 — User communication
+
+- **Status page / dashboard banner**: "We detected unauthorized access
+  to operator infrastructure. The agent has been paused. Withdrawals
+  remain available. We will publish a post-incident report within 72
+  hours."
+- **No specific account-level outreach** until Step 5 reveals which
+  users were affected (if any).
+- **Do NOT publish the rotation timeline or the new operator account
+  address** until you're certain no further compromise is in progress.
+
+### Step 7 — Post-incident
+
+After the system is stable:
+
+1. Disengage kill switch.
+2. Monitor `/admin` reconcile + dead letters for 24h.
+3. Write a postmortem covering: detection time, time to engage kill
+   switch, time to rotate key, total funds at risk, total funds lost,
+   user-facing impact, root cause (how did the key leak?).
+4. Update this playbook based on what you learned.
+5. If KMS-backed signing was deferred (see README "Deferred
+   Hardening"), this incident is the trigger to schedule the migration.
+
+### Acceptance test (dry-run, schedulable)
+
+This runbook is not believed-to-work until it's been executed
+end-to-end on testnet. The dry-run drill:
+
+1. Pick a quiet testnet window.
+2. Generate a NEW keypair for the testnet agent wallet.
+3. Update the testnet account's key on-chain via the rotation script.
+4. Update Vercel testnet env, redeploy.
+5. Verify the agent comes back up signing transactions with the new key.
+6. Verify `verify-audit.ts` ledger reconciles cleanly.
+7. Time each step.
+
+Total wall-clock target: **< 30 minutes**. If the drill takes longer,
+identify the bottleneck (probably the Vercel redeploy step) and either
+script around it or document the realistic timing.
+
+---
+
+## Symptom 9 — Users seeing `redis_degraded` 503s
+
+**You'll see this from**: dashboard banner "service temporarily
+degraded — try again shortly" on play or withdraw, OR a 503 with
+`reason: 'redis_degraded'` in the JSON body, OR the structured log
+line `[redisHealth] BREAKER OPENED` in Vercel function logs.
+
+This is the Redis circuit breaker doing its job. Three Redis
+failures within 60s tripped it; write-path routes are returning 503
+until a successful Redis op closes the breaker. Reads continue
+working throughout.
+
+### Diagnosis
+
+1. Hit `GET /api/health` and check the `redis` field. Expected
+   `upstash`; if it reports `memory`, something is more broken than
+   the breaker — your Upstash credentials aren't being read at all
+   (see Symptom 8 of the deploy checklist).
+2. Check Upstash status page (or your provider equivalent).
+3. Tail Vercel function logs: `[redisHealth] BREAKER OPENED` at the
+   trip, `[redisHealth] BREAKER CLOSED` when a probe succeeds.
+4. Hit Upstash directly with curl from your machine to confirm
+   end-to-end reachability.
+
+### Fix
+
+The breaker auto-closes on the first successful Redis op. If Upstash
+recovers, the next play/withdraw probe closes the breaker and traffic
+resumes. No operator action needed for transient outages.
+
+If Upstash is down for an extended period (>5 min):
+
+1. **Acknowledge users.** Post a status update — the dashboard banner
+   already explains "service degraded" but a longer outage warrants a
+   public note.
+2. **Confirm reads still work** — `/api/user/status`, `/api/audit`,
+   the audit page should all keep responding. If they don't, this
+   isn't an F6 issue, it's a wider Vercel/Upstash regional incident.
+3. **No emergency action while degraded.** Withdrawals are paused but
+   funds aren't locked — they're still in the user's ledger, ready
+   to settle once Redis is back.
+4. After recovery, run reconcile to confirm no drift: `/admin` → run
+   reconcile.
+
+### Prevent recurrence
+
+The breaker is the prevention. Sustained Upstash outages are an
+upstream-provider problem; the structural defense is what we
+control. If you see the breaker tripping repeatedly without obvious
+upstream cause, look for:
+
+- Network egress issues from Vercel to Upstash (check Vercel status)
+- A noisy-neighbor scenario on the Upstash plan (consider upgrading)
+- Code paths making excessive Redis calls (profile the hot route)
+
+---
+
+## Symptom 10 — Rate limiter behaving wrong
 
 **You'll see this from**: legitimate users getting 429s, or the
 reverse — abusers not being throttled.

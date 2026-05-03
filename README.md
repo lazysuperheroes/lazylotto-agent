@@ -4,6 +4,20 @@ Autonomous AI agent that plays the [LazyLotto](https://lazysuperheroes.com) lott
 on Hedera. The agent evaluates pools, buys entries, rolls for prizes, transfers
 winnings, and manages its budget -- all without human intervention.
 
+> **Three real deployment modes — pick what matches your trust model.**
+> Use the hosted testnet/mainnet agent (zero setup), self-host the
+> multi-user variant on your own subdomain (operator CLI or your own
+> Vercel + Upstash), or run single-user on your laptop with your own
+> Hedera wallet (Claude Desktop over stdio, no operator wallet in the
+> loop). Same code base, three configs.
+
+> **New here?** This README is the engineering / operator entrypoint. If you're
+> a player who just wants to play the lottery without running anything, start
+> with **[PLAYERS.md](PLAYERS.md)** — the friendly version. For a feature
+> breakdown by audience, see **[FEATURES.md](FEATURES.md)**. The engineering
+> blog under **[docs/blog/](docs/blog/)** has the why, the how, and the security
+> story, written for three different audiences.
+
 The agent operates in **three deployment modes**:
 
 | Mode | Who runs it | Users | Persistence | Auth |
@@ -115,8 +129,8 @@ authentication. No shared secrets, no passwords.
 |------|--------|-----|
 | **public** | Register, onboard, discovery | Anyone |
 | **user** | Play, withdraw, status, deposit info | Authenticated users (own data only) |
-| **admin** | Refund, dead-letter queue, all user views | Configured admin accounts |
-| **operator** | Fee withdrawal, reconciliation, health | Configured operator accounts |
+| **admin** | Refund, dead-letter queue, all user views | Accounts in `ADMIN_ACCOUNTS` env |
+| **operator** | Fee withdrawal, reconciliation, health | Accounts in `OPERATOR_ACCOUNTS` env |
 
 **Per-user ownership enforcement:** User-tier sessions can only access their own
 data. The server resolves the caller's identity from their session token and
@@ -126,14 +140,39 @@ rejects cross-user access attempts.
 user are prevented via per-user mutex locks (Redis-backed in hosted mode). This
 ensures sequential execution even across multiple serverless function instances.
 
-**Rate limiting:** The MCP endpoint enforces 30 requests per minute per
-authenticated identity.
+**Rate limiting:** The MCP and A2A endpoints each enforce 30 requests per
+minute per authenticated identity. Auth endpoints have their own budgets
+(10 challenge / 5 verify per 5 minutes per identity).
 
 ---
 
 ## Production Hardening
 
 Operational features and explicit trade-offs for running the hosted agent.
+
+### Production guarantees
+
+The hosted agent's contract in three lines:
+
+1. **Redis is required, not optional.** Production deploys
+   (`NODE_ENV=production`) must have Upstash Redis configured. Missing
+   credentials cause every API route to return a structured
+   `PRODUCTION_REDIS_REQUIRED` 503 on the first request. Distributed
+   locks, rate limits, kill-switch state, and velocity caps all live
+   in Redis by design — there is no in-memory fallback in production.
+2. **Layered safety on Redis.** Individual guards (kill switch,
+   velocity cap, rate limiter, distributed locks) fail open on
+   transient Redis errors so a 200ms upstream blip doesn't lock
+   anyone out. A process-local circuit breaker tracks sustained
+   failures and flips write-path routes (play, withdraw) to
+   `redis_degraded` 503 when Redis is genuinely unhealthy. Reads
+   continue throughout.
+3. **Wallet-only privileged auth on hosted.** Operator and admin tiers
+   are issued exclusively through Hedera signature challenge against
+   `OPERATOR_ACCOUNTS` / `ADMIN_ACCOUNTS`. The `MCP_AUTH_TOKEN`
+   shared-secret env var is scoped to single-user CLI / stdio
+   deployments; multi-user mode ignores it. One trust model per
+   deployment shape.
 
 ### Kill Switch
 
@@ -215,9 +254,25 @@ the key is set using Vercel's **Sensitive** env var mode, which hides the
 value from the dashboard after it's written — only one team member (the
 person who set it) ever sees the plaintext. With a two-person team, this
 trust boundary is considered acceptable for testnet and early mainnet.
-**Revisit when:** team size grows past the original two-person circle,
-the agent wallet holds balances large enough to justify KMS operational
-cost, or a compliance requirement mandates hardware-backed signing.
+
+**Triggers to revisit (the explicit kill criteria for "deferred"):**
+
+- **Monthly review** — first business day of each month, the operator
+  re-evaluates whether KMS-backed signing should be moved up the
+  priority list. Surfaced as a recurring calendar reminder so it
+  doesn't fall off.
+- **Hard trigger — 50,000 HBAR equivalent AUM.** When the agent
+  wallet's assets-under-management exceed 50,000 HBAR (USD-converted at
+  month-end mid-market), KMS-backed signing moves from "deferred" to
+  "active scoping." The monthly reconcile report includes operator-wallet
+  AUM with this threshold check, so the trigger fires on its own.
+- Other unconditional triggers: team size grows past the original
+  two-person circle, or a compliance requirement mandates hardware-
+  backed signing.
+
+The key-compromise runbook in `docs/incident-playbook.md` (Symptom 8)
+documents the rotation procedure that bridges the gap between today's
+trust boundary and a future KMS migration.
 
 **Vercel Cron for deposit polling** — Deposits are detected on demand:
 when a user calls `multi_user_deposit_info`, `multi_user_play`, or
@@ -381,11 +436,12 @@ lazylotto-agent
 
 Multi-user mode (both local and hosted) requires additional configuration:
 Upstash Redis credentials, rake fee settings, HCS-20 accounting topic, and
-admin/operator account IDs. See the dedicated guides:
+admin account IDs. See the dedicated guides:
 
 - [Multi-User Guide](docs/MULTI_USER.md) -- full custodial mode documentation
-- [Auth Architecture](docs/HEDERA_AUTH_ARCHITECTURE.md) -- challenge-response auth design
-- [Testnet Playbook](docs/TESTNET_PLAYBOOK.md) -- end-to-end testnet walkthrough
+- [Getting Started](docs/getting-started.md) -- three-modes setup runbook
+- [Mainnet Deploy Checklist](docs/mainnet-deploy-checklist.md) -- production runbook
+- [Testnet User Guide](docs/testnet-user-guide.md) -- the end-user dashboard + Claude flow
 
 ### Getting Testnet Tokens
 
@@ -449,15 +505,17 @@ npx @lazysuperheroes/lazylotto-agent
 | `MAX_USER_BALANCE` | No | Maximum user balance (default: 10000) |
 | `HCS20_TOPIC_ID` | No | HCS-20 accounting topic ID |
 | `HCS20_TICK` | No | HCS-20 token tick symbol (default: LLCRED) |
-| `MCP_AUTH_TOKEN` | No | Static auth token for single-user MCP server |
+| `MCP_AUTH_TOKEN` | No | Static auth token for single-user CLI / stdio MCP server. **Ignored in multi-user mode** (`MULTI_USER_ENABLED=true`) — hosted operators authenticate via wallet signature against `OPERATOR_ACCOUNTS`. |
 | `OPERATOR_WITHDRAW_ADDRESS` | No | Restrict operator fee withdrawals to this address |
 
 **Hosted deployment (Vercel):**
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `UPSTASH_REDIS_REST_URL` | Yes | Upstash Redis REST URL for sessions and persistence |
+| `UPSTASH_REDIS_REST_URL` | Yes | Upstash Redis REST URL for sessions and persistence. **In `NODE_ENV=production`, missing Upstash credentials cause every API route to return 503 with `PRODUCTION_REDIS_REQUIRED`** — there is no silent fallback. |
 | `UPSTASH_REDIS_REST_TOKEN` | Yes | Upstash Redis REST token |
+| `ADMIN_ACCOUNTS` | No | Comma-separated Hedera account IDs that get the `admin` tier (refunds, dead-letters, all-user views). |
+| `OPERATOR_ACCOUNTS` | No | Comma-separated Hedera account IDs that get the `operator` tier (fees, reconcile, health, kill switch, fee withdrawal). Operator is a strict superset of admin. |
 
 **Legacy aliases:** `KV_REST_API_URL` and `KV_REST_API_TOKEN` are accepted as
 fallbacks for the Upstash variables.
@@ -623,7 +681,87 @@ Or if installed locally during development:
 | `operator_refund` | Refund a specific transaction back to the sender |
 | `operator_health` | Uptime, deposit watcher status, error count, active users, pending reserves |
 
-See [MCP Server Reference](docs/MCP_SERVER.md) for detailed parameter schemas and examples.
+Tool parameter schemas are defined in `src/mcp/tools/*` (Zod). Inspect them with
+`tools/list` against the live endpoint, or via the parity smoke test:
+
+```bash
+npm run check-protocols    # against testnet-agent.lazysuperheroes.com by default
+npm run check-protocols -- http://localhost:3000   # against a local dev server
+```
+
+The dApp's MCP endpoint (which the agent consumes via `LAZYLOTTO_MCP_URL`) is
+documented in the separate LazyLotto dApp repo, not here.
+
+---
+
+## A2A Protocol (Agent-to-Agent)
+
+The same tools are also exposed via the **Agent-to-Agent (A2A)** protocol, so
+non-MCP clients (or other agents) can drive the LazyLotto Agent without
+speaking MCP. The A2A surface is a thin adapter on top of the MCP server: every
+A2A skill maps 1:1 to an MCP tool, every skill invocation is routed through
+the same handler, and parity is verified by `npm run check-protocols`.
+
+### Endpoints
+
+| Path | Method | Purpose |
+|------|--------|---------|
+| `/.well-known/agent-card.json` | GET | A2A discovery — capabilities, skills, auth scheme, service URL. Cached 5 min. |
+| `/api/a2a` | GET | Convenience alias for the Agent Card (same payload). |
+| `/api/a2a` | POST | JSON-RPC 2.0 dispatcher. |
+
+### Methods
+
+`POST /api/a2a` accepts standard A2A JSON-RPC methods:
+
+| Method | Status |
+|--------|--------|
+| `message/send` | **Supported.** Synchronous — the response includes a completed (or failed) `Task` with the result inline as a `DataPart` artifact. |
+| `message/stream` | Returns `UnsupportedOperationError (-32003)`. Streaming is a Phase 2 item. |
+| `tasks/get` | Returns `TaskNotFoundError (-32001)`. We are stateless — tasks are returned inline from `message/send` and not persisted. |
+| `tasks/cancel` | Returns `TaskNotCancelableError (-32002)`. Tasks complete synchronously. |
+
+### Auth
+
+Same Bearer token as MCP. Pass `Authorization: Bearer sk_...` from
+`/api/auth/verify`. The route extracts the token and threads it as
+`auth_token` into the underlying MCP tool call, so all four authorization
+tiers behave identically across both protocols.
+
+### Example: invoke a skill
+
+```bash
+curl -X POST https://testnet-agent.lazysuperheroes.com/api/a2a \
+  -H 'Authorization: Bearer sk_...' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "message/send",
+    "params": {
+      "message": {
+        "kind": "message",
+        "messageId": "demo-1",
+        "role": "user",
+        "parts": [
+          { "kind": "data", "data": { "skill": "multi_user_play", "params": {} } }
+        ]
+      }
+    }
+  }'
+```
+
+The response contains a `Task` with `status.state: "completed"` and an
+`artifacts` array — the first artifact's `parts[0].data` is the JSON tool
+result.
+
+### Skills
+
+Skills mirror the MCP tool catalog. The full list is served live at
+`/.well-known/agent-card.json`. Skill `id` equals the MCP tool name —
+e.g. `multi_user_play`, `operator_health`, `operator_recover_stuck_prizes`.
+Use `npm run check-protocols` to confirm parity between the two surfaces
+on any deployment.
 
 ---
 
@@ -822,7 +960,8 @@ npm run smoke-test               Auth flow smoke test
 npm run read-accounting          HCS-20 audit trail reader
 npm run build                    Compile CLI + shebang injection
 npm run build:web                Next.js production build
-npm test                         Run test suite (339 tests)
+npm test                         Run test suite (380 tests)
+npm run check-protocols          MCP + A2A parity smoke test against a deployed URL
 ```
 
 **Dual tsconfig note:** The project uses `tsconfig.json` for Next.js (App Router,
@@ -841,7 +980,7 @@ against pure logic or mocked.
 npm test
 ```
 
-339 tests covering:
+380 tests covering:
 - **BudgetManager** -- spend tracking, pool limits, reserve checks
 - **StrategyEngine** -- pool filtering, EV scoring, strategy accessors
 - **ReportGenerator** -- aggregation, timestamps, reset behavior
@@ -849,8 +988,10 @@ npm test
 - **estimateGas** -- gas calculations, multipliers, cap enforcement
 - **Agent play loop** -- phase orchestration, budget exhaustion, error resilience, prerequisite handling
 - **Auth system** -- challenge generation, signature verification, session lifecycle, tier enforcement
-- **Multi-user** -- registration, deposit tracking, withdrawal, rake calculation, reconciliation
+- **Multi-user** -- registration, deposit tracking, withdrawal, rake calculation, reconciliation, per-token reservation invariants
 - **Operator tools** -- dead letters, refunds, health checks
+- **A2A** -- Agent Card builder, message parsing, MCP-parity adapter (`src/a2a/__tests__/`)
+- **HCS-20 audit reader** -- dual-shape parser for v1 batch + v2 sequence trails
 
 ---
 
@@ -938,8 +1079,25 @@ too, or they will diverge on Vercel.
 | LazyLotto dApp (testnet) | https://testnet-dapp.lazysuperheroes.com |
 | LazyLotto dApp (mainnet) | https://dapp.lazysuperheroes.com |
 | Hosted agent (testnet) | https://testnet-agent.lazysuperheroes.com |
+| Agent MCP endpoint (testnet) | https://testnet-agent.lazysuperheroes.com/api/mcp |
+| Agent A2A endpoint (testnet) | https://testnet-agent.lazysuperheroes.com/api/a2a |
+| Agent Card (testnet) | https://testnet-agent.lazysuperheroes.com/.well-known/agent-card.json |
 | Lazy Superheroes | https://lazysuperheroes.com |
 | GitHub | https://github.com/lazysuperheroes/lazylotto-agent |
+
+### Internal docs
+
+- **[PLAYERS.md](PLAYERS.md)** — friendly guide for players
+- **[FEATURES.md](FEATURES.md)** — feature breakdown by audience
+- **[CHANGELOG.md](CHANGELOG.md)** — release history
+- **[docs/blog/](docs/blog/)** — engineering blog (product, security, architecture)
+- **[docs/getting-started.md](docs/getting-started.md)** — three-modes setup runbook
+- **[docs/MULTI_USER.md](docs/MULTI_USER.md)** — custodial-mode reference
+- **[docs/testnet-user-guide.md](docs/testnet-user-guide.md)** — end-user dashboard + Claude flow
+- **[docs/hcs20-v2-schema.md](docs/hcs20-v2-schema.md)** — external-auditor wire spec
+- **[docs/incident-playbook.md](docs/incident-playbook.md)** — 2am-page runbook
+- **[docs/disaster-recovery.md](docs/disaster-recovery.md)** — Redis loss recovery
+- **[docs/mainnet-deploy-checklist.md](docs/mainnet-deploy-checklist.md)** — production deploy
 
 ---
 

@@ -21,10 +21,13 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Three deployment
 - **Strategy**: Versioned JSON files define play behavior, budget, and risk tolerance
 - **Accounting**: HCS-20 v2 immutable on-chain ledger with per-pool play_session_open/play_pool_result/play_session_close sequence. Self-sufficient — external auditors can reconstruct from the topic alone. v1 batch messages still parse via the reader's dual-shape fallback for legacy testnet sessions. See `docs/hcs20-v2-schema.md` for the wire spec.
 - **Auth**: Hedera signature challenge-response, session tokens in Upstash Redis (or in-memory fallback)
+- **Agent surfaces**: TWO protocols, ONE codepath.
+  - **MCP server** at `/api/mcp` (and stdio for Claude Desktop) — JSON-RPC 2.0 with `WebStandardStreamableHTTPServerTransport`. Primary surface; all tool handlers live here.
+  - **A2A server** at `POST /api/a2a` (JSON-RPC 2.0 `message/send` only — synchronous) and `GET /.well-known/agent-card.json` for discovery. The A2A route is a thin adapter that re-issues each skill call as a `tools/call` against the local MCP endpoint, so parity is by construction. Skills map 1:1 to MCP tool names. Streaming + persisted tasks deliberately out of scope (Phase 1).
 - **HTTP Transport**: Dual mode — stdio for Claude Desktop, HTTP/serverless for Vercel
 - **Frontend**: Next.js 16 app with WalletConnect auth page, user dashboard, admin dashboard, audit page with SessionCard aggregation
 - **Persistence**: RedisStore (Vercel/production) or PersistentStore (local dev, JSON files)
-- **Discovery**: HOL HCS-11 profile + /api/discover endpoint
+- **Discovery**: HOL HCS-11 profile + `/api/discover` (human/operator-facing) + `/.well-known/agent-card.json` (A2A spec)
 - **Monitoring**: Hourly reconcile cron at `/api/cron/reconcile` (CRON_SECRET auth, optional webhook on insolvency); external uptime monitor on `/api/health`. See `docs/uptime-monitoring.md`.
 
 ## Tech Stack
@@ -32,6 +35,7 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Three deployment
 - Runtime: Node.js 20+ (TypeScript, ESM)
 - Hedera SDK: @hashgraph/sdk (wallet, signing, contract calls, transfers)
 - MCP: @modelcontextprotocol/sdk (client for dApp reads, server for agent control)
+- A2A: @a2a-js/sdk (Agent Card builder, type definitions). Wire format is plain JSON-RPC 2.0 — we don't run the SDK's server runtime, we adapt to our existing MCP handlers via `src/a2a/adapter.ts`.
 - Contract ABIs: @lazysuperheroes/lazy-lotto (NPM package)
 - HOL: @hashgraphonline/standards-sdk (HCS-10/11/20, registry, discovery)
 - Scheduler: node-cron (periodic play sessions)
@@ -46,15 +50,19 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Three deployment
 - src/agent/       — Core agent logic (LottoAgent, StrategyEngine, BudgetManager, AuditReport, ReportGenerator)
 - src/custodial/   — Multi-user layer: UserLedger, DepositWatcher, MultiUserAgent (per-token reservation/settlement), AccountingService (v1+v2 writers), NegotiationHandler, GasTracker, PersistentStore, RedisStore, **hcs20-v2.ts** (schema types + helpers), **hcs20-reader.ts** (state-machine reader with dual v1+v2 dispatcher)
 - src/hedera/      — Hedera SDK wrappers (wallet, contracts, mirror node, tokens, delegates, refund with retry ladder)
-- src/mcp/         — MCP client (dApp reads) and MCP server (23 tools: 7 multi-user, 6 single-user, 7 operator incl. operator_recover_stuck_prizes)
+- src/mcp/         — MCP client (dApp reads) and MCP server (23 tools: 7 multi-user, 6 single-user, 7 operator incl. operator_recover_stuck_prizes; plus `multi_user_set_strategy`)
+- src/a2a/         — A2A protocol layer: `agent-card.ts` (skill registry mirroring MCP tools), `adapter.ts` (A2A → MCP translation, no new business logic), `dispatcher.ts` (JSON-RPC 2.0 method routing). Tests under `__tests__/`.
 - src/hol/         — HOL registry integration (HCS-11 profile, UAID)
 - src/auth/        — Challenge-response authentication, session management, Redis client
-- src/cli/         — Interactive setup wizard
+- src/cli/         — Interactive setup wizard, `check-protocols.ts` (MCP/A2A parity smoke test)
 - src/config/      — Strategy schema (Zod) and defaults, PRIZE_TRANSFER_RETRY gas ladder
 - src/scripts/     — Operator CLI tools: recover-stuck-prizes, verify-audit (standalone), audit-deposit-discrepancy, test-v2-reader
 - strategies/      — Versioned JSON strategy files
-- docs/            — User guide, HOL discovery guide, HCS-20 v2 schema spec, mainnet checklists, incident playbook, DR plan, uptime monitoring
-- app/             — Next.js frontend (auth, dashboards, API routes, MCP endpoint)
+- docs/            — Operational + user-facing material; bootstrap design lives under `docs/archive/`
+- docs/blog/       — Engineering blog posts (architecture, security, product perspectives)
+- app/             — Next.js frontend (auth, dashboards, API routes, MCP endpoint, A2A endpoint)
+- app/api/a2a/     — A2A JSON-RPC dispatcher (POST) + Agent Card (GET)
+- app/.well-known/agent-card.json/ — Standard A2A discovery path
 - app/api/_lib/    — Serverless singletons (store, hedera client, deposits, locks, MCP context)
 - app/api/cron/    — Vercel Cron endpoints (reconcile)
 - public/          — Static assets (favicon, robots.txt)
@@ -63,18 +71,26 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Three deployment
 
 - Challenge-response: server generates nonce, user signs with Hedera wallet, server verifies signature
 - Four tiers: public (register, onboard), user (play, withdraw, status), admin (refund, dead-letters), operator (fees, reconcile, health)
-- Per-user ownership: user tier can only access their own data (enforced in MCP tools)
+- Per-user ownership: user tier can only access their own data (enforced in MCP tools and A2A adapter)
 - Operator tools require admin/operator tier (user tier denied)
 - Session tokens: sk_ prefixed, sha256-hashed in Redis, 7-day expiry, lockable (permanent)
 - Auto-revoke on re-auth
-- Rate limiting: auth endpoints (10/5min challenge, 5/5min verify), MCP endpoint (30/min per identity)
+- Rate limiting: auth endpoints (10/5min challenge, 5/5min verify), MCP endpoint (30/min per identity), A2A endpoint (30/min per identity)
 
 ## HTTP Transport
 
 - CLI mode: `--mcp-server --http --port 3001` (persistent process, full state)
 - Serverless mode: Next.js API route at /api/mcp (stateless, WebStandardStreamableHTTPServerTransport)
 - CLI endpoints: /mcp, /auth/*, /health, /discover
-- Serverless endpoints: /api/mcp, /api/auth/*, /api/user/*, /api/admin/*, /api/discover
+- Serverless endpoints: /api/mcp, /api/a2a, /.well-known/agent-card.json, /api/auth/*, /api/user/*, /api/admin/*, /api/discover, /api/health, /api/cron/reconcile
+
+## A2A Protocol Layer
+
+- Endpoint: `POST /api/a2a` (JSON-RPC 2.0); supported method is `message/send`. `message/stream` returns `UnsupportedOperationError (-32003)`. `tasks/get`/`tasks/cancel` return `TaskNotFoundError`/`TaskNotCancelableError` (we are stateless — tasks complete synchronously and are returned inline).
+- Agent Card served at both `GET /.well-known/agent-card.json` (standard) and `GET /api/a2a` (alias). Cached 5 min. Network-aware: testnet vs mainnet `url` field.
+- Auth: Bearer token (same `sk_*` session token used by MCP). The route extracts the token from `Authorization: Bearer ...` and threads it as `auth_token` into the underlying MCP tool call so existing tier enforcement is reused unchanged.
+- Implementation: `app/api/a2a/route.ts` calls the local `/api/mcp` endpoint over HTTP for each skill invocation. This guarantees parity by construction — the request path is identical to any other MCP client. Tested by `src/cli/check-protocols.ts` (run with `npm run check-protocols`).
+- Skills are registered in `src/a2a/agent-card.ts` and map 1:1 to MCP tool names by `id`. Every MCP tool surfaced to clients MUST have a corresponding A2A skill entry — the parity smoke test (`npm run check-protocols`) verifies this on every release.
 
 ## Next.js Frontend
 
@@ -161,6 +177,7 @@ npm run build            — Compile + shebang injection
 npm run build:web        — Next.js production build
 npm run smoke-test       — Auth flow smoke test
 npm run read-accounting  — HCS-20 audit trail reader
+npm run check-protocols  — Smoke-test MCP + A2A endpoints + Agent Card on a deployed URL
 ```
 
 Multi-user mode:
@@ -196,14 +213,36 @@ npx tsx src/scripts/test-v2-reader.ts
 
 ## Documentation
 
-Key operator-facing docs in `docs/`:
+`docs/` contains operational + user-facing material only. Bootstrap design docs
+and shipped PRDs live under `docs/archive/` (do not link to them from current
+docs). The dApp's MCP endpoint is documented in the separate LazyLotto dApp
+repo, not here.
 
-- `testnet-user-guide.md` — how end users play via dashboard or Claude
-- `hol-discovery-guide.md` — how the agent shows up on HOL (3-layer model)
-- `hcs20-v2-schema.md` — external-auditor spec for the on-chain audit trail
-- `mainnet-deploy-checklist.md` — phase-by-phase mainnet deploy runbook
-- `mainnet-hol-registration.md` — one-time mainnet HOL registration
-- `incident-playbook.md` — symptom → action runbook for production incidents
-- `disaster-recovery.md` — Redis loss recovery procedure + backup options
-- `uptime-monitoring.md` — wiring `/api/health` + reconcile cron into external monitoring
-- `testnet-uat.md` — pre-launch UAT checklist (mostly checked off)
+**Repo root:**
+- `README.md` — engineering / operator entrypoint (architecture, security, MCP + A2A surfaces, CLI, env vars)
+- `PLAYERS.md` — friendly normie-facing guide for end users
+- `FEATURES.md` — feature breakdown by audience (Players / Developers / Operators)
+- `CHANGELOG.md` — release history
+
+**Operational (load-bearing for running production):**
+- `docs/hcs20-v2-schema.md` — external-auditor wire spec for the audit trail
+- `docs/mainnet-deploy-checklist.md` — phase-by-phase mainnet deploy runbook
+- `docs/mainnet-hol-registration.md` — one-time mainnet HOL registration
+- `docs/incident-playbook.md` — 2am-page symptom → action runbook
+- `docs/disaster-recovery.md` — Redis-loss recovery via HCS-20 trail
+- `docs/uptime-monitoring.md` — `/api/health` + reconcile cron wiring
+- `docs/testnet-uat.md` — pre-release UAT checklist against testnet-agent
+
+**User / operator facing:**
+- `docs/getting-started.md` — three-modes setup runbook
+- `docs/MULTI_USER.md` — custodial-mode operator + user reference
+- `docs/testnet-user-guide.md` — end-user dashboard + Claude walkthrough
+- `docs/hol-discovery-guide.md` — 3-layer HOL discovery model with curl examples
+- `docs/LSH-Branding-Reference.md` — frontend design tokens + branding rules
+
+**Engineering blog (`docs/blog/`):**
+- `lazy-wins.md` — product perspective on why this exists
+- `trust-by-design.md` — security perspective for skeptical Web3 audiences
+- `architecture-deep-dive.md` — engineering perspective on the build
+
+**Archive (`docs/archive/`):** see `docs/archive/README.md`.
