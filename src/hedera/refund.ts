@@ -96,8 +96,13 @@ export async function processRefund(
   // Reject any txId that wasn't processed by the deposit watcher.
   // Without this, an admin could refund operator gas top-ups, prize
   // transfers, bounty payouts, or any other inbound transfer.
+  //
+  // Uses `isDepositCredited` (cross-Lambda Redis check) rather than
+  // the local-cache `isTransactionProcessed`. The latter would return
+  // a false negative on a Lambda whose local cache hadn't yet seen the
+  // recent deposit, refusing a legitimate refund.
   if (options?.store) {
-    if (!options.store.isTransactionProcessed(transactionId)) {
+    if (!(await options.store.isDepositCredited(transactionId))) {
       throw new Error(
         `Transaction ${transactionId} was not credited as a user deposit. ` +
         `Only deposits processed by the deposit watcher can be refunded.`,
@@ -110,125 +115,184 @@ export async function processRefund(
     );
   }
 
-  // ── Replay protection ────────────────────────────────────────
-  // Check Redis for an existing refund record before doing anything.
-  // We persist the refund record AFTER the on-chain transfer succeeds.
+  // ── Replay protection: atomic SET-NX-EX claim ────────────────
+  // Atomic claim — `SET NX EX` returns 'OK' iff this is the first
+  // caller to claim across all Lambdas, null if another Lambda already
+  // claimed. The pre-fix pattern (GET then later SET after the on-chain
+  // transfer) had a multi-second TOCTOU window covering the mirror-node
+  // lookup + the on-chain refund tx; two admin clicks landing on
+  // different Lambdas could both pass the GET and both execute the
+  // refund. Same bug class as the duplicate-deposit incident.
   //
-  // FAIL CLOSED: if Redis is unreachable we cannot verify that this
-  // refund hasn't already been processed. Refunds are irreversible
-  // on-chain — "proceed anyway" would allow a 30-second Redis flake
-  // to become a double-refund incident. Refuse the refund with a
-  // clear error the operator can act on (retry once Redis recovers).
+  // Marker progression:
+  //   1. SET-NX-EX 'pending' — first claim wins
+  //   2. On success: overwrite with the actual refundTxId
+  //   3. On failure: DEL so a retry can claim again
+  //
+  // FAIL CLOSED: if Redis is unreachable we cannot claim — refuse
+  // the refund. Refunds are irreversible on-chain.
   let redisLockKey: string | null = null;
   try {
     const redis = await getRedis();
     redisLockKey = `${REFUND_KEY_PREFIX}${transactionId}`;
-    const existing = await redis.get(redisLockKey);
-    if (existing) {
+    const claimResult = await redis.set(
+      redisLockKey,
+      'pending',
+      { nx: true, ex: 30 * 24 * 60 * 60 },
+    );
+    if (claimResult === null) {
+      // Another caller has already claimed. Read the stored value so
+      // we can include the actual refundTxId in the error if the prior
+      // refund completed; if it's still 'pending', surface that
+      // explicitly so the operator knows to wait.
+      const existing = await redis.get<string>(redisLockKey);
       throw new Error(
-        `Transaction ${transactionId} has already been refunded. ` +
-        `Original refund tx: ${existing}`,
+        existing && existing !== 'pending'
+          ? `Transaction ${transactionId} has already been refunded. ` +
+            `Original refund tx: ${existing}`
+          : `Refund for ${transactionId} is already in progress on another ` +
+            `Lambda. Try again in a minute.`,
       );
     }
   } catch (e) {
-    // Rethrow the "already refunded" sentinel unchanged
-    if (e instanceof Error && e.message.includes('already been refunded')) {
+    // Rethrow our own sentinels unchanged
+    if (
+      e instanceof Error &&
+      (e.message.includes('already been refunded') ||
+        e.message.includes('already in progress'))
+    ) {
       throw e;
     }
-    // Any other error means we couldn't verify — refuse the refund.
+    // Any other error means we couldn't claim — refuse the refund.
     throw new Error(
       'Refund replay protection unavailable: the Redis backend is not ' +
-      'reachable right now. Refusing to refund without a duplicate-check. ' +
+      'reachable right now. Refusing to refund without an atomic claim. ' +
       'Retry once the backend recovers.',
     );
   }
 
-  // ── Mirror node lookup ──────────────────────────────────────
-  const mirrorUrl =
-    (process.env.HEDERA_NETWORK === 'mainnet'
-      ? 'https://mainnet.mirrornode.hedera.com'
-      : 'https://testnet.mirrornode.hedera.com') + '/api/v1';
-
-  const txRes = await fetch(`${mirrorUrl}/transactions/${transactionId}`);
-  if (!txRes.ok) {
-    throw new Error(`Transaction ${transactionId} not found on mirror node`);
-  }
-
-  const txData = (await txRes.json()) as MirrorTxResponse;
-  const tx = txData.transactions?.[0];
-  if (!tx) throw new Error('Transaction not found');
-  if (tx.result !== 'SUCCESS') {
-    throw new Error(`Transaction was not successful: ${tx.result}`);
-  }
-
-  // ── Identify incoming transfer to agent ──────────────────────
-  const hbarIn = tx.transfers?.find(
-    (t) => t.account === agentAccountId && t.amount > 0,
-  );
-  const tokenIn = tx.token_transfers?.find(
-    (t) => t.account === agentAccountId && t.amount > 0,
-  );
-
-  if (!hbarIn && !tokenIn) {
-    throw new Error('No incoming transfer to agent found in this transaction');
-  }
-
-  // ── Find sender ──────────────────────────────────────────────
-  let senderAccountId: string | null = null;
-  let refundAmount: number;
-  let refundToken: string | null = null;
-
-  if (tokenIn) {
-    senderAccountId =
-      tx.token_transfers.find(
-        (t) => t.token_id === tokenIn.token_id && t.amount < 0,
-      )?.account ?? null;
-    refundAmount = tokenIn.amount; // base units
-    refundToken = tokenIn.token_id;
-  } else if (hbarIn) {
-    senderAccountId =
-      tx.transfers.find(
-        (t) => t.amount < 0 && t.account !== agentAccountId,
-      )?.account ?? null;
-    refundAmount = hbarIn.amount; // tinybars
-    refundToken = null; // HBAR
-  } else {
-    throw new Error('Could not determine sender');
-  }
-
-  if (!senderAccountId) {
-    throw new Error('Could not determine sender account from transaction');
-  }
-
-  // ── Execute refund ───────────────────────────────────────────
+  // ── Mirror lookup + on-chain transfer (rollback claim on failure) ──
+  //
+  // Anything that throws between here and the success of the
+  // on-chain transfer leaves the 'pending' marker in place. Without
+  // explicit rollback, the marker would TTL-expire after 30 days,
+  // permanently blocking retries for that txId. We DEL the marker on
+  // throw so a retry can claim again immediately. Once the transfer
+  // succeeds (refundTxId is set), we're committed and no rollback
+  // happens — any subsequent failure (audit write, ledger adjustment,
+  // marker overwrite) is a recoverable post-condition handled by the
+  // ledger / audit / overwrite blocks' own try/catch.
   let refundTxId: string;
   let amountDisplay: string;
+  let senderAccountId: string;
+  let refundToken: string | null;
+  let refundAmount: number;
+  let tx: MirrorTxResponse['transactions'][number];
+  try {
+    const mirrorUrl =
+      (process.env.HEDERA_NETWORK === 'mainnet'
+        ? 'https://mainnet.mirrornode.hedera.com'
+        : 'https://testnet.mirrornode.hedera.com') + '/api/v1';
 
-  if (refundToken) {
-    // Token refund (amount is in base units, transferToken expects human-readable)
-    const { getTokenMeta } = await import('../utils/math.js');
-    const meta = await getTokenMeta(refundToken);
-    const humanAmount = refundAmount / Math.pow(10, meta.decimals);
-    const result = await transferToken(
-      client,
-      agentAccountId,
-      senderAccountId,
-      refundToken,
-      humanAmount,
+    const txRes = await fetch(`${mirrorUrl}/transactions/${transactionId}`);
+    if (!txRes.ok) {
+      throw new Error(`Transaction ${transactionId} not found on mirror node`);
+    }
+
+    const txData = (await txRes.json()) as MirrorTxResponse;
+    const fetched = txData.transactions?.[0];
+    if (!fetched) throw new Error('Transaction not found');
+    if (fetched.result !== 'SUCCESS') {
+      throw new Error(`Transaction was not successful: ${fetched.result}`);
+    }
+    tx = fetched;
+
+    // Identify incoming transfer to agent
+    const hbarIn = tx.transfers?.find(
+      (t) => t.account === agentAccountId && t.amount > 0,
     );
-    refundTxId = result.transactionId;
-    amountDisplay = `${humanAmount} ${meta.symbol} (${refundToken})`;
-  } else {
-    // HBAR refund (amount is in tinybars, transferHbar expects HBAR)
-    const hbarAmount = refundAmount / 1e8;
-    const result = await transferHbar(
-      client,
-      agentAccountId,
-      senderAccountId,
-      hbarAmount,
+    const tokenIn = tx.token_transfers?.find(
+      (t) => t.account === agentAccountId && t.amount > 0,
     );
-    refundTxId = result.transactionId;
-    amountDisplay = `${hbarAmount} HBAR`;
+
+    if (!hbarIn && !tokenIn) {
+      throw new Error('No incoming transfer to agent found in this transaction');
+    }
+
+    // Find sender
+    let resolvedSender: string | null = null;
+    if (tokenIn) {
+      resolvedSender =
+        tx.token_transfers.find(
+          (t) => t.token_id === tokenIn.token_id && t.amount < 0,
+        )?.account ?? null;
+      refundAmount = tokenIn.amount; // base units
+      refundToken = tokenIn.token_id;
+    } else if (hbarIn) {
+      resolvedSender =
+        tx.transfers.find(
+          (t) => t.amount < 0 && t.account !== agentAccountId,
+        )?.account ?? null;
+      refundAmount = hbarIn.amount; // tinybars
+      refundToken = null; // HBAR
+    } else {
+      throw new Error('Could not determine sender');
+    }
+
+    if (!resolvedSender) {
+      throw new Error('Could not determine sender account from transaction');
+    }
+    senderAccountId = resolvedSender;
+
+    // Execute refund (the irreversible step)
+    if (refundToken) {
+      // Token refund (amount is in base units, transferToken expects human-readable)
+      const { getTokenMeta } = await import('../utils/math.js');
+      const meta = await getTokenMeta(refundToken);
+      const humanAmount = refundAmount / Math.pow(10, meta.decimals);
+      const result = await transferToken(
+        client,
+        agentAccountId,
+        senderAccountId,
+        refundToken,
+        humanAmount,
+      );
+      refundTxId = result.transactionId;
+      amountDisplay = `${humanAmount} ${meta.symbol} (${refundToken})`;
+    } else {
+      // HBAR refund (amount is in tinybars, transferHbar expects HBAR)
+      const hbarAmount = refundAmount / 1e8;
+      const result = await transferHbar(
+        client,
+        agentAccountId,
+        senderAccountId,
+        hbarAmount,
+      );
+      refundTxId = result.transactionId;
+      amountDisplay = `${hbarAmount} HBAR`;
+    }
+  } catch (err) {
+    // Pre-transfer failure (mirror lookup, sender resolution, chain
+    // rejection). Release the claim so the operator can retry once
+    // the underlying issue is resolved.
+    if (redisLockKey) {
+      try {
+        const redis = await getRedis();
+        await redis.del(redisLockKey);
+      } catch (delErr) {
+        // The 30-day TTL is the worst-case fallback; the marker
+        // expires on its own. Surface so an operator can manually
+        // DEL if they need a faster retry window.
+        logger.error('refund claim release failed after pre-transfer error', {
+          component: 'Refund',
+          event: 'refund_claim_release_failed',
+          originalTx: transactionId,
+          claimError: err instanceof Error ? err.message : String(err),
+          releaseError: delErr instanceof Error ? delErr.message : String(delErr),
+        });
+      }
+    }
+    throw err;
   }
 
   // ── Ledger adjustment ─────────────────────────────────────────
@@ -392,15 +456,20 @@ export async function processRefund(
     }
   }
 
-  // ── Persist refund record for replay protection ─────────────
-  // 30 day TTL — long enough that any duplicate refund attempt
-  // will be caught, short enough that the set doesn't grow forever.
+  // ── Overwrite the 'pending' claim with the actual refundTxId ────
+  // The atomic SET-NX-EX claim earlier wrote 'pending' to the marker.
+  // Now that the on-chain refund has completed and we know the
+  // refundTxId, overwrite with the real value (resetting the 30-day
+  // TTL) so future duplicate attempts get a useful error message.
+  // Best-effort: if this overwrite fails, the 'pending' marker still
+  // gives 30 days of replay protection — operationally equivalent
+  // for safety, just less informative on a duplicate-attempt error.
   if (redisLockKey) {
     try {
       const redis = await getRedis();
       await redis.set(redisLockKey, refundTxId, { ex: 30 * 24 * 60 * 60 });
     } catch (e) {
-      console.warn('[Refund] Failed to record refund in Redis:', e);
+      console.warn('[Refund] Failed to overwrite refund marker with refundTxId:', e);
     }
   }
 
