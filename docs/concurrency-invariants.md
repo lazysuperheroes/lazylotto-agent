@@ -185,6 +185,12 @@ Every invariant has a regression test in
 | 9 | At most one reconcile runs at a time across all Lambdas (cron + admin click + MCP tool serialise). | SET NX EX (`acquireOperatorLock('reconcile')`) | `src/mcp/tools/operator.ts`, `app/api/admin/reconcile/route.ts`, `app/api/cron/reconcile/route.ts` |
 | 10 | At most one schema migration runs at a time. | SET NX EX (`acquireOperatorLock('migrate-schema')`) | `app/api/admin/migrate-schema/route.ts` |
 | 11 | Per-user play and withdraw mutations serialise across all Lambdas (single mutator at a time per user). | SET NX EX (`acquireUserLock`) | `app/api/user/play/route.ts`, `app/api/user/withdraw/route.ts` |
+| 12 | Lock holders see post-flush Redis state — local cache is refreshed on acquire, all pending writes are flushed before release. | `withUserLock` helper composing `acquireUserLock` + `refreshUser` + `applyPendingLedgerForUser` + `flush` + `releaseUserLock` | `src/lib/locks.ts:withUserLock` |
+| 13 | `creditDeposit` acquires the same per-user lock as refund/play/withdraw — no lost-update on `user.balances` between deposit watcher and other actors. | SET NX EX with backoff (`acquireUserLock` ~6.85s) | `src/custodial/UserLedger.ts:creditDeposit` |
+| 14 | Refund-queued ledger debits drain on EVERY user lock acquire — no up-to-1-hour window where on-chain refund is undebited. | Eager drain inside `withUserLock` (`applyPendingLedgerForUser`) | `src/custodial/pendingLedger.ts`, `src/lib/locks.ts` |
+| 15 | Withdrawal requests with the same `Idempotency-Key` execute exactly once across all Lambdas — lost-response retries don't double-withdraw. | SET NX EX (`withIdempotency`) | `src/lib/idempotency.ts`, `app/api/user/withdraw/route.ts` |
+| 16 | Velocity cap fails CLOSED on Redis error — single transient hiccup can no longer disable the cap for one withdrawal. | Throw → 503 `redis_degraded` | `src/custodial/MultiUserAgent.ts:checkWithdrawalVelocity` |
+| 17 | CLI `recover-stuck-prizes` serialises with itself — two CLI invocations on the same target account block each other. | SET NX EX (`acquireUserLock(\`recover-cli:\${accountId}\`)`) | `src/scripts/recover-stuck-prizes.ts` |
 
 Adding a new entry to this table is the visible "did I do my
 homework?" signal. Drift between the table and the test file is

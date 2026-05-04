@@ -794,6 +794,74 @@ External auditors using `agentSeq` for ordering should use
 
 ---
 
+## Symptom 15 — Double-withdrawal from a lost-response retry
+
+**You'll see this from**: a user reports two on-chain withdrawals
+for the amount they expected one of, sometime after a network blip
+or a 503 response that they retried.
+
+### Cause (closed in 0.3.3)
+
+Pre-fix: per-user lock prevented simultaneous withdrawals but not
+sequential retries. Client posts withdrawal, response packet drops,
+client retries the SAME body, both calls execute (the first holder
+already released the lock).
+
+### Fix
+
+`Idempotency-Key` header support in `app/api/user/withdraw/route.ts`
+via `withIdempotency`. First request claims the key in Redis with
+24h TTL; duplicate retries with the same key get the cached result
+back without a second on-chain transfer.
+
+### Diagnosis
+
+If you see this post-0.3.3:
+
+1. Check the request logs in Vercel for the user's withdraw calls.
+   Were both requests sent with the SAME `Idempotency-Key` header?
+   - If YES, this is a regression — `withIdempotency` failed to
+     dedupe. Check Redis logs for the claim key (`idem:withdraw:{userId}:{key}`)
+     during that timeframe.
+   - If NO (or no header sent), the client didn't send a key — the
+     fix opts out when no header is present (backwards compat). The
+     dashboard should be sending one; check for a regression in the
+     frontend submit handler.
+2. The two on-chain transfers are real. Reconciliation: either
+   admin-refund the duplicate, OR document the loss in the incident
+   postmortem and move on (testnet treats this as expected churn).
+
+---
+
+## Symptom 16 — Withdraw 503 `velocity_check_unavailable`
+
+**You'll see this from**: a withdraw returning 503 with
+`reason: 'redis_degraded'` and message starting
+`velocity_check_unavailable`. User can't withdraw, dashboard shows
+"agent temporarily unavailable" banner.
+
+### Cause (intentional, 0.3.3 hardening)
+
+Pre-fix the velocity cap silently failed open on a transient Redis
+error — single hiccup disabled the daily cap for one withdrawal.
+Now fails closed. A single Redis call within `checkWithdrawalVelocity`
+that errors will refuse the withdrawal.
+
+### Diagnosis
+
+1. Check `/api/health` — is the Redis backend healthy? `redis: 'upstash'`?
+2. Look for a flap: a single 50ms hiccup vs a sustained outage.
+   Sustained outages also trip the breaker (Symptom 9) so the user
+   sees `redis_degraded` from a different code path.
+3. If the hiccup is transient, the user's retry should succeed.
+   If not, escalate per Symptom 9 (Redis health investigation).
+
+This is NOT a bug — it's the deliberate fail-closed posture from
+the 0.3.3 audit. False-positive 503s during transient issues are
+the cost of preventing a single-call cap bypass.
+
+---
+
 ## When in doubt
 
 1. **Engage the kill switch first** — it's almost never the wrong move
