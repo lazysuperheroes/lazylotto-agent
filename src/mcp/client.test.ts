@@ -6,6 +6,7 @@ import {
   mapEvCalculation,
   mapUserState,
   mapSystemInfo,
+  BUY_TOOL_BY_ACTION,
 } from './client.js';
 
 // ── mapPoolSummary ──────────────────────────────────────────────
@@ -495,5 +496,41 @@ describe('mapSystemInfo', () => {
       tokens: { lazyDecimals: 8 },
     });
     assert.equal(result.lazyDecimals, 3);
+  });
+});
+
+// ── BUY_TOOL_BY_ACTION dispatch table ───────────────────────────
+// Locks in the Phase 1.12 mapping so we don't silently regress to the
+// legacy lazylotto_buy_entries(action) shape if someone touches client.ts.
+
+describe('BUY_TOOL_BY_ACTION', () => {
+  it("maps 'buy' to lotto_buy_entries", () => {
+    assert.equal(BUY_TOOL_BY_ACTION.buy, 'lotto_buy_entries');
+  });
+
+  it("maps 'buy_and_roll' to lotto_buy_and_roll", () => {
+    assert.equal(BUY_TOOL_BY_ACTION.buy_and_roll, 'lotto_buy_and_roll');
+  });
+
+  it("maps 'buy_and_redeem' to lotto_buy_and_redeem", () => {
+    assert.equal(BUY_TOOL_BY_ACTION.buy_and_redeem, 'lotto_buy_and_redeem');
+  });
+
+  it('has exactly the three documented actions and no legacy lazylotto_* targets', () => {
+    assert.deepEqual(Object.keys(BUY_TOOL_BY_ACTION).sort(), [
+      'buy',
+      'buy_and_redeem',
+      'buy_and_roll',
+    ]);
+    for (const target of Object.values(BUY_TOOL_BY_ACTION)) {
+      assert.ok(
+        target.startsWith('lotto_'),
+        `dispatch target '${target}' should use canonical lotto_* prefix`,
+      );
+      assert.ok(
+        !target.startsWith('lazylotto_'),
+        `dispatch target '${target}' must not use legacy lazylotto_* prefix`,
+      );
+    }
   });
 });

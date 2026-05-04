@@ -110,7 +110,7 @@ export interface PoolDetail extends PoolSummary {
 
 /**
  * A specific NFT (or batch of serials from the same collection) won in a pool.
- * Shape matches lazylotto_get_user_state.pendingPrizes[].nfts as documented in
+ * Shape matches lotto_get_user_state.pendingPrizes[].nfts as documented in
  * lazy-dapp-v3/docs/features/MCP_NFT_PRIZE_ENRICHMENT.md
  */
 export interface NftPrizeRef {
@@ -275,18 +275,18 @@ export async function listPools(
   offset = 0,
   limit = 20
 ): Promise<PoolSummary[]> {
-  const raw = await callTool<any[]>('lazylotto_list_pools', { type, offset, limit });
+  const raw = await callTool<any[]>('lotto_list_pools', { type, offset, limit });
   const arr = Array.isArray(raw) ? raw : (raw as any)?.pools ?? [];
   return arr.map(mapPoolSummary);
 }
 
 export async function getPool(poolId: number): Promise<PoolDetail> {
-  const raw = await callTool<any>('lazylotto_get_pool', { poolId });
+  const raw = await callTool<any>('lotto_get_pool', { poolId });
   return mapPoolDetail(raw);
 }
 
 export async function getUserState(address: string): Promise<UserState> {
-  const raw = await callTool<any>('lazylotto_get_user_state', { address });
+  const raw = await callTool<any>('lotto_get_user_state', { address });
   return mapUserState(raw);
 }
 
@@ -296,12 +296,12 @@ export async function calculateEv(
 ): Promise<EvCalculation> {
   const args: Record<string, unknown> = { poolId };
   if (address) args.address = address;
-  const raw = await callTool<any>('lazylotto_calculate_ev', args);
+  const raw = await callTool<any>('lotto_calculate_ev', args);
   return mapEvCalculation(raw);
 }
 
 export async function getSystemInfo(): Promise<SystemInfo> {
-  const raw = await callTool<any>('lazylotto_get_system_info');
+  const raw = await callTool<any>('lotto_get_system_info');
   return mapSystemInfo(raw);
 }
 
@@ -311,7 +311,7 @@ export async function checkPrerequisites(
   action: string,
   count = 1
 ): Promise<unknown[]> {
-  return callTool('lazylotto_check_prerequisites', {
+  return callTool('lotto_check_prerequisites', {
     address,
     poolId,
     action,
@@ -319,19 +319,34 @@ export async function checkPrerequisites(
   });
 }
 
+// Phase 1.12 split: dApp replaced lazylotto_buy_entries(action) with three
+// dedicated tools (lotto_buy_entries, lotto_buy_and_roll, lotto_buy_and_redeem)
+// that take {poolId, count, address} — no action param. We keep this wrapper's
+// signature so callers (LottoAgent) don't need to change, and route by action.
+// Exported for the dispatch test in client.test.ts.
+export const BUY_TOOL_BY_ACTION: Record<string, string> = {
+  buy: 'lotto_buy_entries',
+  buy_and_roll: 'lotto_buy_and_roll',
+  buy_and_redeem: 'lotto_buy_and_redeem',
+};
+
 export async function buyEntries(
   poolId: number,
   count: number,
   action: string,
   address: string
 ) {
-  return callTool('lazylotto_buy_entries', { poolId, count, action, address });
+  const toolName = BUY_TOOL_BY_ACTION[action];
+  if (!toolName) {
+    throw new Error(`buyEntries: unknown action '${action}'`);
+  }
+  return callTool(toolName, { poolId, count, address });
 }
 
 export async function roll(poolId: number, address: string, count?: number) {
   const args: Record<string, unknown> = { poolId, address };
   if (count !== undefined) args.count = count;
-  return callTool('lazylotto_roll', args);
+  return callTool('lotto_roll', args);
 }
 
 export async function closeMcpClient(): Promise<void> {
