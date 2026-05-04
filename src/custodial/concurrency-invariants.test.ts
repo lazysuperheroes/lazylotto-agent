@@ -263,7 +263,77 @@ describe('Cross-Lambda invariant: refund replay protection', () => {
   });
 });
 
-// ── Invariant 5: withUserLock contract ─────────────────────────
+// ── Invariant 5: creditDeposit acquires the same lock as refund / play / withdraw
+
+describe('Cross-Lambda invariant: creditDeposit lost-update protection', () => {
+  it('creditDeposit fails closed when the user lock is held by another caller', async () => {
+    // Scenario: deposit watcher tries to credit for user X while
+    // a play (or refund, or withdraw) is in flight for X on a
+    // different Lambda. Pre-fix, creditDeposit had no lock → both
+    // paths could read user.balances locally and last-writer-wins
+    // would lose one of the updates. Post-fix, creditDeposit waits
+    // up to ~6.85s on the same SET-NX-EX lock and throws on timeout
+    // so the deposit watcher dead-letters the tx for retry.
+    const { acquireUserLock, releaseUserLock } = await import('../lib/locks.js');
+
+    // Acquire the lock from the "play" side first.
+    const playToken = await acquireUserLock('locked-user', 60);
+    assert.ok(playToken, 'play side acquires the lock');
+
+    try {
+      // Now construct a minimal UserLedger and try creditDeposit.
+      // We only need enough store stubbing to exercise the lock path.
+      const { UserLedger } = await import('./UserLedger.js');
+      let creditAttempted = false;
+
+      const fakeStore = {
+        getUser() { creditAttempted = true; return undefined; },
+        async tryClaimTransaction() { return true; },
+        async releaseTransactionClaim() {},
+        async refreshUser() {},
+        async flush() {},
+        updateBalance: () => ({ tokens: {} }),
+        updateOperator: () => ({}),
+        recordDeposit: () => {},
+        getOperator: () => ({}),
+      } as unknown as Parameters<typeof UserLedger>[0];
+
+      const fakeAccounting = {
+        async recordDeposit() {},
+        async recordRake() {},
+      } as unknown as Parameters<typeof UserLedger>[1];
+
+      const ledger = new UserLedger(fakeStore, fakeAccounting, '0.0.agent');
+
+      // Override the backoff loop's time penalty by patching setTimeout
+      // for this test only — we don't want the test to wait 6.85s for
+      // the failure mode. Use a microtask delay.
+      const originalSetTimeout = globalThis.setTimeout;
+      globalThis.setTimeout = ((fn: () => void) => {
+        return originalSetTimeout(fn, 0);
+      }) as unknown as typeof setTimeout;
+
+      try {
+        await assert.rejects(
+          () => ledger.creditDeposit('locked-user', 100, 'tx-locked', 1, 'hbar'),
+          /could not acquire lock/i,
+        );
+      } finally {
+        globalThis.setTimeout = originalSetTimeout;
+      }
+
+      // Critically: creditDeposit MUST NOT have proceeded to refresh
+      // the user (which would precede mutation). The lock blocked it
+      // before that point.
+      assert.equal(creditAttempted, false,
+        'creditDeposit must not touch user.balances when lock is held');
+    } finally {
+      await releaseUserLock('locked-user', playToken!);
+    }
+  });
+});
+
+// ── Invariant 6: withUserLock contract ─────────────────────────
 
 describe('Cross-Lambda invariant: withUserLock contract', () => {
   it('refreshUser is called before the body, flush before release — locking up the no-stale-read + no-pending-write windows', async () => {

@@ -3,6 +3,7 @@ import type { AccountingService } from './AccountingService.js';
 import type { UserAccount, UserBalances } from './types.js';
 import { InsufficientBalanceError, UserNotFoundError, UserInactiveError, emptyTokenEntry } from './types.js';
 import { roundForToken } from '../utils/math.js';
+import { acquireUserLock, releaseUserLock } from '../lib/locks.js';
 
 // ── UserLedger ──────────────────────────────────────────────────
 //
@@ -68,19 +69,60 @@ export class UserLedger {
       return this.getUserOrThrow(userId).balances;
     }
 
-    // Track whether the deposit record has been persisted. After step 6
-    // we hold partial state; a rollback would risk a double-credit on
-    // retry. Before step 6, releasing the claim lets a retry recover.
+    // 2. Per-user lock — defends against the lost-update race where
+    //    creditDeposit (deposit watcher, no lock pre-0.3.3) raced
+    //    `processRefund` / `playForUser` / `processWithdrawal`
+    //    (per-user lock) on the same `user.balances` object. Both
+    //    paths read local cache, mutated locally, and `redis.set` was
+    //    last-writer-wins — losing one of the updates. Now both sides
+    //    serialise on the same lock key.
+    //
+    //    Backoff: ~6.85s total. Plays/withdrawals run 5-30s typically;
+    //    if we can't acquire after the backoff window, release the tx
+    //    claim and throw — the next pollDepositsOnce will retry.
+    const backoffMs = [50, 100, 200, 500, 1000, 2000, 3000];
+    let lockToken: string | null = null;
+    for (const delay of [0, ...backoffMs]) {
+      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+      lockToken = await acquireUserLock(userId, 30);
+      if (lockToken) break;
+    }
+    if (!lockToken) {
+      // Release the claim so a future poll can retry. The watcher's
+      // dead-letter on the throw is the operator's signal.
+      try {
+        await this.store.releaseTransactionClaim(txId);
+      } catch (releaseErr) {
+        console.error(
+          `[UserLedger] failed to release claim after lock contention for ${txId}:`,
+          releaseErr,
+        );
+      }
+      throw new Error(
+        `creditDeposit: could not acquire lock for ${userId} after ` +
+        `~6.85s backoff. Tx ${txId} deferred — will retry on next poll.`,
+      );
+    }
+
+    // Track whether the deposit record has been persisted. After step 5
+    // we hold partial state; releasing the tx claim then would risk a
+    // double-credit on retry. Before step 5, releasing the claim lets
+    // a retry recover.
     let recorded = false;
     try {
-      // 2. Validate user exists
+      // 3. Refresh local cache so we don't write a stale-overwrite on
+      //    top of another Lambda's recent updates.
+      await this.store.refreshUser(userId);
+
+      // 4. Validate user exists (post-refresh — deregistration may
+      //    have happened concurrently).
       const user = this.getUserOrThrow(userId);
 
-      // 3. Calculate rake split (rounded to token's decimal precision)
+      // Calculate rake split (rounded to token's decimal precision)
       const rakeAmount = roundForToken(grossAmount * (rakePercent / 100), token);
       const netAmount = roundForToken(grossAmount - rakeAmount, token);
 
-      // 4. Credit user balance
+      // Credit user balance
       const newBalances = this.store.updateBalance(userId, (b) => {
         const entry = b.tokens[token] ?? emptyTokenEntry();
         return {
@@ -96,14 +138,14 @@ export class UserLedger {
         };
       });
 
-      // 5. Credit operator (platform) rake
+      // Credit operator (platform) rake
       this.store.updateOperator((op) => ({
         ...op,
         balances: { ...op.balances, [token]: (op.balances[token] ?? 0) + rakeAmount },
         totalRakeCollected: { ...op.totalRakeCollected, [token]: (op.totalRakeCollected[token] ?? 0) + rakeAmount },
       }));
 
-      // 6. Persist deposit record
+      // 5. Persist deposit record
       this.store.recordDeposit({
         transactionId: txId,
         userId,
@@ -116,7 +158,7 @@ export class UserLedger {
       });
       recorded = true;
 
-      // 7. Fire HCS-20 accounting (non-blocking)
+      // 6. Fire HCS-20 accounting (non-blocking)
       //
       // Pass the underlying token (HBAR / LAZY / token id) so the on-chain
       // record carries the asset identity. Without it, the audit reader
@@ -141,13 +183,14 @@ export class UserLedger {
         );
       }
 
-      // Flush immediately for financial durability (bypass debounce)
+      // 7. Flush BEFORE releasing the lock so the next acquirer reads
+      //    a fully-consistent Redis state.
       await this.store.flush();
 
       return newBalances;
     } catch (err) {
       // Only roll back the claim if we threw BEFORE writing the deposit
-      // record. After step 6 the partial state is the lesser evil — a
+      // record. After step 5 the partial state is the lesser evil — a
       // released claim could let another Lambda credit the same tx
       // again on top of our partial state.
       if (!recorded) {
@@ -161,6 +204,9 @@ export class UserLedger {
         }
       }
       throw err;
+    } finally {
+      // Always release the user lock, even on throw.
+      await releaseUserLock(userId, lockToken);
     }
   }
 
