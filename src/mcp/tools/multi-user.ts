@@ -16,6 +16,7 @@ import { z } from 'zod';
 import type { MultiUserAgent } from '../../custodial/MultiUserAgent.js';
 import { getOperatorAccountId } from '../../hedera/wallet.js';
 import { withChecksum } from '../../utils/checksum.js';
+import { withUserLock } from '../../lib/locks.js';
 import type { ServerContext } from './types.js';
 
 // Kill switch is now enforced at the domain layer (MultiUserAgent.playForUser,
@@ -216,20 +217,24 @@ export function registerMultiUserTools(
       if (!userId) return errorResult('userId is required');
 
       try {
-        // Check for new deposits before playing
+        // Check for new deposits BEFORE the user lock so creditDeposit
+        // (which now acquires the same per-user lock) doesn't deadlock
+        // against the play handler. The withUserLock's mandatory
+        // refreshUser will pick up any deposits credited concurrently.
         await checkDeposits();
 
-        // Distributed lock with fence token — release only releases if the
-        // token still matches, preventing accidental release of a newer owner
-        // after our lease would have expired.
-        const lockToken = await acquireUserLock(userId);
-        if (!lockToken) return errorResult('Operation in progress for this user. Try again shortly.');
-        try {
-          const result = await multiUser.playForUser(userId);
-          return json({ sessions: [result] });
-        } finally {
-          await releaseUserLock(userId, lockToken);
+        // withUserLock: refresh local cache, drain pendingLedger
+        // debits, run, flush before release. Closes cross-Lambda
+        // staleness + lock-released-before-flush + refund-then-play
+        // double-spend windows.
+        const store = multiUser.getStoreInstance();
+        const locked = await withUserLock(store, userId, async () =>
+          multiUser.playForUser(userId),
+        );
+        if ('lockHeld' in locked) {
+          return errorResult('Operation in progress for this user. Try again shortly.');
         }
+        return json({ sessions: [locked.result] });
       } catch (e) {
         return errorResult(`Play failed: ${errorMsg(e)}`);
       }
@@ -262,15 +267,16 @@ export function registerMultiUserTools(
       if (!userId) return errorResult('userId is required');
 
       try {
-        // Distributed lock with fence token
-        const lockToken = await acquireUserLock(userId);
-        if (!lockToken) return errorResult('Operation in progress for this user. Try again shortly.');
-        try {
-          const record = await multiUser.processWithdrawal(userId, amount, token);
-          return json(record);
-        } finally {
-          await releaseUserLock(userId, lockToken);
+        // Same withUserLock contract as the dashboard's /api/user/withdraw
+        // route — closes the same three exposures.
+        const store = multiUser.getStoreInstance();
+        const locked = await withUserLock(store, userId, async () =>
+          multiUser.processWithdrawal(userId, amount, token),
+        );
+        if ('lockHeld' in locked) {
+          return errorResult('Operation in progress for this user. Try again shortly.');
         }
+        return json(locked.result);
       } catch (e) {
         return errorResult(`Withdrawal failed: ${errorMsg(e)}`);
       }

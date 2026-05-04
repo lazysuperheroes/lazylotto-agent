@@ -29,6 +29,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { getRedis, KEY_PREFIX } from '../auth/redis.js';
+import type { IStore } from '../custodial/IStore.js';
 
 const USER_LOCK_PREFIX = KEY_PREFIX.lockUser;
 const OPERATOR_LOCK_PREFIX = KEY_PREFIX.lockOperator;
@@ -82,6 +83,77 @@ export async function releaseUserLock(
   } catch (err) {
     // Lock release is best-effort — worst case it TTL-expires naturally
     console.warn('[locks] user release failed:', err);
+  }
+}
+
+/**
+ * Higher-level user-lock helper that closes three subtle exposures the
+ * raw `acquireUserLock` / `releaseUserLock` pair leaves open:
+ *
+ * 1. **Stale local cache.** When a different Lambda releases the lock
+ *    after a balance update, our local `users[userId]` still holds the
+ *    pre-update view. `await store.refreshUser(userId)` fetches the
+ *    canonical Redis state before the body runs.
+ *
+ * 2. **Pending-ledger drift.** Refunds that couldn't acquire the lock
+ *    queue a debit to `pendingLedger`. Pre-fix, drain only ran on the
+ *    hourly reconcile cron — leaving an up-to-1-hour window where the
+ *    user could withdraw the refunded funds again. We drain matching
+ *    entries inside this lock so the body sees the post-drain balance.
+ *
+ * 3. **Lock release before flush.** The route's `releaseUserLock`
+ *    used to fire BEFORE `withStore`'s outer-finally `flush()`,
+ *    letting the next acquirer read pre-flush Redis state. We
+ *    `await store.flush()` before releasing so the next holder
+ *    always sees a consistent post-write Redis snapshot.
+ *
+ * Returns either the body's result OR `{ lockHeld: true }` on lock
+ * contention. Callers translate `lockHeld` to a 409 response.
+ */
+export async function withUserLock<T>(
+  store: IStore,
+  userId: string,
+  fn: () => Promise<T>,
+  options?: { ttlSec?: number },
+): Promise<{ lockHeld: true } | { result: T }> {
+  const ttlSec = options?.ttlSec ?? 300;
+  const token = await acquireUserLock(userId, ttlSec);
+  if (!token) return { lockHeld: true };
+
+  try {
+    // 1. Refresh local cache from Redis. Defeats cross-Lambda
+    //    staleness — another Lambda may have just released the lock
+    //    after writing updates we don't have locally.
+    await store.refreshUser(userId);
+
+    // 2. Apply pending-ledger debits queued for THIS user (refunds
+    //    that failed to acquire the lock previously). Lazy import
+    //    keeps the locks module free of custodial deps in test mocks.
+    try {
+      const { applyPendingLedgerForUser } = await import(
+        '../custodial/pendingLedger.js'
+      );
+      await applyPendingLedgerForUser(store, userId);
+    } catch (err) {
+      // Non-fatal — log and continue. Worst case the cron drain
+      // catches this entry on the next reconcile.
+      console.warn(
+        '[withUserLock] applyPendingLedgerForUser failed:',
+        err instanceof Error ? err.message : err,
+      );
+    }
+
+    const result = await fn();
+
+    // 3. Flush pending writes BEFORE releasing the lock so the next
+    //    acquirer reads a fully-consistent Redis state. Without
+    //    this, write-through `this.fire(...)` writes can still be
+    //    in-flight when the lock is released.
+    await store.flush();
+
+    return { result };
+  } finally {
+    await releaseUserLock(userId, token);
   }
 }
 

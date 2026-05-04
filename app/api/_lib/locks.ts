@@ -8,6 +8,7 @@
 export {
   acquireUserLock,
   releaseUserLock,
+  withUserLock,
   acquireOperatorLock,
   releaseOperatorLock,
 } from '~/lib/locks';

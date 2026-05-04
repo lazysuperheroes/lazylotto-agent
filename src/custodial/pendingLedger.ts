@@ -136,6 +136,104 @@ export interface DrainResult {
  * Safe to call concurrently — the per-user lock serializes writes.
  * Call at the start of reconciliation and expose via an admin route.
  */
+/**
+ * Apply pending ledger adjustments for a SINGLE user. The caller MUST
+ * already hold `acquireUserLock(userId)` — this function does not
+ * acquire it. Called from `withUserLock` (eager drain on every lock
+ * acquisition) so refund-queued debits land before the lock holder
+ * reads `user.balances`.
+ *
+ * Without this, the gap between a refund queueing a pending debit
+ * (because it couldn't acquire the user lock) and the next reconcile
+ * cron (~hourly) was a window in which the user could withdraw the
+ * refunded funds again — double-spend.
+ *
+ * Failure mode: if Redis is unreachable we return zero counts. The
+ * caller's `await store.refreshUser` runs first, so a Redis failure
+ * here doesn't poison the local cache.
+ */
+export async function applyPendingLedgerForUser(
+  store: IStore,
+  userId: string,
+): Promise<{ applied: number; failed: number }> {
+  let applied = 0;
+  let failed = 0;
+
+  let redis;
+  try {
+    redis = await getRedis();
+  } catch {
+    return { applied: 0, failed: 0 };
+  }
+
+  const rawEntries = await redis
+    .lrange(LIST_KEY, 0, -1)
+    .catch(() => [] as unknown[]);
+
+  for (const row of rawEntries) {
+    let entry: PendingLedgerAdjustment;
+    try {
+      const parsed = typeof row === 'string' ? JSON.parse(row) : row;
+      if (!isPendingLedgerAdjustment(parsed)) {
+        failed++;
+        continue;
+      }
+      entry = parsed;
+    } catch {
+      failed++;
+      continue;
+    }
+
+    // Filter to the requested user only.
+    if (entry.userId !== userId) continue;
+
+    try {
+      const user = store.getUser(entry.userId);
+      if (!user) {
+        const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
+        await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
+        failed++;
+        logger.warn('pending ledger entry dropped — user not found', {
+          component: 'PendingLedger',
+          userId: entry.userId,
+          sourceTx: entry.sourceTx,
+        });
+        continue;
+      }
+
+      store.updateBalance(entry.userId, (b) => {
+        const tokenEntry = b.tokens[entry.tokenKey];
+        if (!tokenEntry) return b;
+        tokenEntry.available = Math.max(0, tokenEntry.available - entry.amount);
+        return b;
+      });
+
+      const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
+      await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
+
+      applied++;
+      logger.info('pending ledger adjustment applied (eager)', {
+        component: 'PendingLedger',
+        event: 'pending_ledger_applied_eager',
+        userId: entry.userId,
+        amount: entry.amount,
+        token: entry.tokenKey,
+        sourceTx: entry.sourceTx,
+      });
+    } catch (err) {
+      failed++;
+      logger.error('eager pending ledger apply failed', {
+        component: 'PendingLedger',
+        userId: entry.userId,
+        sourceTx: entry.sourceTx,
+        error: err,
+      });
+    }
+  }
+
+  return { applied, failed };
+}
+
 export async function drainPendingLedgerAdjustments(
   store: IStore,
 ): Promise<DrainResult> {

@@ -263,7 +263,95 @@ describe('Cross-Lambda invariant: refund replay protection', () => {
   });
 });
 
-// ── Invariant 4: dead-letter upsert ────────────────────────────
+// ── Invariant 5: withUserLock contract ─────────────────────────
+
+describe('Cross-Lambda invariant: withUserLock contract', () => {
+  it('refreshUser is called before the body, flush before release — locking up the no-stale-read + no-pending-write windows', async () => {
+    // Construct a store-shaped object that records the order of
+    // refreshUser/getUser/flush/releaseUserLock calls so we can
+    // assert the contract.
+    const events: string[] = [];
+    const fakeStore = {
+      async refreshUser(_userId: string): Promise<void> {
+        events.push('refreshUser');
+      },
+      async refreshUserIndex(): Promise<void> {},
+      async refreshOperator(): Promise<void> {},
+      async refreshDeadLetters(): Promise<void> {},
+      async refreshPlaysForUser(): Promise<void> {},
+      async refreshDepositsForUser(): Promise<void> {},
+      async refreshWithdrawalsForUser(): Promise<void> {},
+      async refreshGasForUser(): Promise<void> {},
+      getUser(_userId: string) {
+        events.push('getUser');
+        return undefined;
+      },
+      async flush(): Promise<void> {
+        events.push('flush');
+      },
+      // Stubs to satisfy the IStore type checker for the helper. None
+      // of these are called by withUserLock itself.
+      load: async () => {},
+      close: async () => {},
+      getUserByMemo: () => undefined,
+      getUserByAccountId: () => undefined,
+      getAllUsers: () => [],
+      saveUser: () => {},
+      updateBalance: () => ({ tokens: {} }),
+      getOperator: () => ({} as unknown as never),
+      updateOperator: () => ({} as unknown as never),
+      isTransactionProcessed: () => false,
+      tryClaimTransaction: async () => true,
+      releaseTransactionClaim: async () => {},
+      isDepositCredited: async () => false,
+      recordDeposit: () => {},
+      getDepositsForUser: () => [],
+      recordPlaySession: () => {},
+      getPlaySessionsForUser: () => [],
+      recordWithdrawal: () => {},
+      upsertDeadLetter: async () => {},
+      getDeadLetters: () => [],
+      recordGas: () => {},
+      getGasForUser: () => [],
+      getAllGasRecords: () => [],
+      getWatermark: () => '',
+      setWatermark: () => {},
+      seedAgentSeq: async () => {},
+      nextAgentSeq: async () => 0,
+      rotateRecords: async () => {},
+    };
+
+    const { withUserLock } = await import('../lib/locks.js');
+    const result = await withUserLock(
+      fakeStore as unknown as Parameters<typeof withUserLock>[0],
+      'user-1',
+      async () => {
+        events.push('body');
+        return 'OK';
+      },
+    );
+
+    if ('lockHeld' in result) {
+      assert.fail('expected lock to be acquired in test environment');
+    }
+    assert.equal(result.result, 'OK');
+
+    // Critical ordering: refreshUser BEFORE body (defeats stale local
+    // cache); flush AFTER body (so all writes hit Redis); release
+    // happens implicitly after flush (no explicit event but the
+    // releaseUserLock call follows the flush in the helper).
+    const refreshIdx = events.indexOf('refreshUser');
+    const bodyIdx = events.indexOf('body');
+    const flushIdx = events.indexOf('flush');
+    assert.ok(refreshIdx >= 0, 'refreshUser was called');
+    assert.ok(bodyIdx >= 0, 'body was called');
+    assert.ok(flushIdx >= 0, 'flush was called');
+    assert.ok(refreshIdx < bodyIdx, 'refreshUser must run before body');
+    assert.ok(bodyIdx < flushIdx, 'flush must run after body (before release)');
+  });
+});
+
+// ── Invariant 6: dead-letter upsert ────────────────────────────
 
 describe('Cross-Lambda invariant: dead-letter resolution', () => {
   it('upsertDeadLetter replaces by transactionId — no duplicate "resolved" rows', async () => {

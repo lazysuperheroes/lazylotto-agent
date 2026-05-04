@@ -12,8 +12,7 @@ import { z } from 'zod';
 import type { MultiUserAgent } from '../../custodial/MultiUserAgent.js';
 import { withChecksum } from '../../utils/checksum.js';
 import {
-  acquireUserLock,
-  releaseUserLock,
+  withUserLock,
   acquireOperatorLock,
   releaseOperatorLock,
 } from '../../lib/locks.js';
@@ -213,32 +212,47 @@ export function registerOperatorTools(
       const performedBy =
         'auth' in authResult ? authResult.auth.accountId : 'unknown';
 
-      // Acquire the per-user distributed lock for the duration of the
-      // recovery so two operators (or the same operator from two tabs)
-      // hitting different Lambdas can't both attempt recovery and both
-      // write resolved-dead-letter rows. Same lock primitive that
-      // serialises play and withdraw — recovery is now consistent with
-      // every other write path that mutates a single user's ledger.
-      // 5 min TTL: the contract call + retry ladder + audit write fits
-      // comfortably; lock auto-releases if the Lambda dies mid-flight.
-      const lockToken = execute ? await acquireUserLock(userId, 300) : null;
-      if (execute && !lockToken) {
+      // Dry-run is read-only — no lock, no refresh, no flush.
+      if (!execute) {
+        try {
+          const result = await multiUser.recoverStuckPrizesForUser(userId, {
+            dryRun: true,
+            reason,
+            performedBy,
+          });
+          return json(result);
+        } catch (e) {
+          return errorResult(`Recovery failed: ${errorMsg(e)}`);
+        }
+      }
+
+      // Execute path: same withUserLock contract as play/withdraw —
+      // refresh local cache + drain pendingLedger + run + flush before
+      // release. Without these, two operators (or this operator + a
+      // user play in flight) could see stale balances and produce
+      // duplicate resolution rows / double prize transfers.
+      const store = multiUser.getStoreInstance();
+      const locked = await withUserLock(
+        store,
+        userId,
+        async () => {
+          return multiUser.recoverStuckPrizesForUser(userId, {
+            dryRun: false,
+            reason,
+            performedBy,
+          });
+        },
+        { ttlSec: 300 },
+      );
+      if ('lockHeld' in locked) {
         return errorResult(
           'Operation in progress for this user. Try again shortly.',
         );
       }
-
       try {
-        const result = await multiUser.recoverStuckPrizesForUser(userId, {
-          dryRun: !execute,
-          reason,
-          performedBy,
-        });
-        return json(result);
+        return json(locked.result);
       } catch (e) {
         return errorResult(`Recovery failed: ${errorMsg(e)}`);
-      } finally {
-        if (lockToken) await releaseUserLock(userId, lockToken);
       }
     }
   );

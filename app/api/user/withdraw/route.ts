@@ -21,7 +21,7 @@ import { getStore } from '../../_lib/store';
 import { withStore } from '../../_lib/withStore';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { getAgentContext } from '../../_lib/mcp';
-import { acquireUserLock, releaseUserLock } from '../../_lib/locks';
+import { withUserLock } from '../../_lib/locks';
 import { assertRedisHealthy, RedisDegradedError } from '~/lib/redisHealth';
 
 export async function OPTIONS() {
@@ -64,6 +64,9 @@ export const POST = withStore(async (request: Request) => {
       );
     }
 
+    // Capture narrowed const so the async closure inside withUserLock
+    // sees a definitely-`number` rather than the original `number | undefined`.
+    const amount = body.amount;
     const token = body.token ?? 'hbar';
 
     // Resolve userId from authenticated accountId
@@ -83,33 +86,30 @@ export const POST = withStore(async (request: Request) => {
       );
     }
 
-    // Distributed lock with fence token (same pattern as multi_user_withdraw MCP tool)
-    const lockToken = await acquireUserLock(user.userId);
-    if (!lockToken) {
+    // withUserLock: refresh local cache + apply pendingLedger debits
+    // before the body, flush before releasing. Closes the
+    // refund-then-withdraw double-spend window (refund queues debit,
+    // next withdraw drains it before reading balance) and the lock-
+    // released-before-flush double-spend window.
+    const locked = await withUserLock(store, user.userId, async () => {
+      const { multiUser } = await getAgentContext();
+      const record = await multiUser.processWithdrawal(user.userId, amount, token);
+      await store.refreshUser(user.userId);
+      const refreshed = store.getUser(user.userId);
+      return {
+        record,
+        balances: refreshed?.balances ?? user.balances,
+      };
+    });
+
+    if ('lockHeld' in locked) {
       return NextResponse.json(
         { error: 'Operation in progress for this user. Try again shortly.' },
         { status: 409, headers: CORS_HEADERS },
       );
     }
 
-    try {
-      const { multiUser } = await getAgentContext();
-      const record = await multiUser.processWithdrawal(user.userId, body.amount, token);
-
-      // Refresh user so the response carries the post-withdrawal balance
-      await store.refreshUser(user.userId);
-      const refreshed = store.getUser(user.userId);
-
-      return NextResponse.json(
-        {
-          record,
-          balances: refreshed?.balances ?? user.balances,
-        },
-        { headers: CORS_HEADERS },
-      );
-    } finally {
-      await releaseUserLock(user.userId, lockToken);
-    }
+    return NextResponse.json(locked.result, { headers: CORS_HEADERS });
   } catch (err) {
     if (err instanceof RedisDegradedError) {
       return NextResponse.json(

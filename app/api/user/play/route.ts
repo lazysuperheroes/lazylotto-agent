@@ -23,7 +23,7 @@ import { getStore } from '../../_lib/store';
 import { withStore } from '../../_lib/withStore';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { getAgentContext } from '../../_lib/mcp';
-import { acquireUserLock, releaseUserLock } from '../../_lib/locks';
+import { withUserLock } from '../../_lib/locks';
 import { KillSwitchError } from '~/lib/killswitch';
 import { assertRedisHealthy, RedisDegradedError } from '~/lib/redisHealth';
 
@@ -72,52 +72,44 @@ export const POST = withStore(async (request: Request) => {
       );
     }
 
-    // Distributed lock so two concurrent /api/user/play calls (or a
-    // play + withdraw) can't interleave on the same user. Acquired
-    // BEFORE the deposit poll so two racing plays can't both poll
-    // (and each see the deposit, leading to duplicate work) — only
-    // the lock holder runs the critical section.
-    const lockToken = await acquireUserLock(user.userId);
-    if (!lockToken) {
+    const { multiUser } = await getAgentContext();
+
+    // Pick up any pending deposits BEFORE acquiring the user lock so
+    // creditDeposit (which now acquires the same per-user lock for its
+    // balance update) doesn't deadlock against our own play handler.
+    // The fresh credit will be visible to the play via withUserLock's
+    // mandatory `refreshUser` step. Non-critical: failure here just
+    // means the play runs against whatever balance was already credited.
+    try {
+      await multiUser.pollDepositsOnce();
+    } catch {
+      /* proceed with whatever balance we have */
+    }
+
+    // withUserLock closes three exposures the raw acquire/release pair
+    // had: stale local cache after lock acquire, pending-ledger debits
+    // not applied before the body runs, and lock release before flush
+    // completes. See `src/lib/locks.ts:withUserLock` JSDoc.
+    const locked = await withUserLock(store, user.userId, async () => {
+      const session = await multiUser.playForUser(user.userId);
+      // Refresh after the play so the response carries the
+      // post-session balance.
+      await store.refreshUser(user.userId);
+      const refreshed = store.getUser(user.userId);
+      return {
+        session,
+        balances: refreshed?.balances ?? user.balances,
+      };
+    });
+
+    if ('lockHeld' in locked) {
       return NextResponse.json(
         { error: 'Operation in progress for this user. Try again shortly.' },
         { status: 409, headers: CORS_HEADERS },
       );
     }
 
-    try {
-      // Single getAgentContext() call for the whole critical section.
-      // The previous version called it twice (once for the unlocked
-      // poll, once for play) — same cached context, but sloppy and
-      // forced ordering implications. One call, one binding.
-      const { multiUser } = await getAgentContext();
-
-      // Pick up any pending deposits before playing — the user might
-      // have just funded and hit Play, and we want that balance to count.
-      // Non-critical: failure here just means the play runs against
-      // whatever balance was already credited.
-      try {
-        await multiUser.pollDepositsOnce();
-      } catch {
-        /* proceed with whatever balance we have */
-      }
-
-      const session = await multiUser.playForUser(user.userId);
-
-      // Refresh user so the response carries the post-session balance
-      await store.refreshUser(user.userId);
-      const refreshed = store.getUser(user.userId);
-
-      return NextResponse.json(
-        {
-          session,
-          balances: refreshed?.balances ?? user.balances,
-        },
-        { headers: CORS_HEADERS },
-      );
-    } finally {
-      await releaseUserLock(user.userId, lockToken);
-    }
+    return NextResponse.json(locked.result, { headers: CORS_HEADERS });
   } catch (err) {
     // Kill switch — translate to 503 + reason so the dashboard banner
     // can render the "Agent temporarily closed" state cleanly.
