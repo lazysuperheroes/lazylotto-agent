@@ -1,5 +1,5 @@
 import './styles/globals.css';
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import { Heebo, Unbounded, Press_Start_2P } from 'next/font/google';
 import { Sidebar } from './components/Sidebar';
 import { ToastProvider } from './components/Toast';
@@ -41,43 +41,60 @@ const pressStart = Press_Start_2P({
 // Metadata
 // ---------------------------------------------------------------------------
 
+const SITE_URL =
+  process.env.NEXT_PUBLIC_APP_URL || 'https://testnet-agent.lazysuperheroes.com';
+
+const OG_DESCRIPTION =
+  'Autonomous lottery agent on Hedera. Authenticate to play, manage funds, and track prizes.';
+
+const OG_IMAGE = {
+  url: 'https://lsh-cache.b-cdn.net/twitterHD.png',
+  width: 1200,
+  height: 630,
+  alt: 'LazyLotto Agent — autonomous lottery agent on Hedera',
+};
+
 export const metadata: Metadata = {
   title: {
     default: 'LazyLotto Agent',
     template: '%s | LazyLotto Agent',
   },
-  description:
-    'Autonomous lottery agent on Hedera. Authenticate to play, manage funds, and track prizes.',
-  metadataBase: new URL(
-    process.env.NEXT_PUBLIC_APP_URL || 'https://testnet-agent.lazysuperheroes.com',
-  ),
+  description: OG_DESCRIPTION,
+  metadataBase: new URL(SITE_URL),
   icons: {
     icon: '/favicon.svg',
   },
   openGraph: {
     title: 'LazyLotto Agent',
-    description:
-      'Autonomous lottery agent on Hedera. Authenticate to play, manage funds, and track prizes.',
+    description: OG_DESCRIPTION,
     siteName: 'LazyLotto Agent',
-    images: [
-      {
-        url: 'https://lsh-cache.b-cdn.net/twitterHD.png',
-        width: 1200,
-        height: 630,
-      },
-    ],
+    url: SITE_URL,
+    locale: 'en_US',
+    images: [OG_IMAGE],
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
     site: '@SuperheroesLazy',
     creator: '@SuperheroesLazy',
-    images: ['https://lsh-cache.b-cdn.net/twitterHD.png'],
+    title: 'LazyLotto Agent',
+    description: OG_DESCRIPTION,
+    images: [{ url: OG_IMAGE.url, alt: OG_IMAGE.alt }],
   },
+  // index=true + follow=false is intentional: the landing page is fine
+  // for crawlers, but the auth-walled surfaces (/dashboard, /audit,
+  // /admin) shouldn't be indexed via outbound links from here.
   robots: {
     index: true,
     follow: false,
   },
+};
+
+// themeColor lives on `viewport` per Next 14+. Matches --color-background
+// in app/styles/globals.css so mobile chrome (Safari address bar etc.)
+// blends with the page.
+export const viewport: Viewport = {
+  themeColor: '#09090b',
 };
 
 // ---------------------------------------------------------------------------
