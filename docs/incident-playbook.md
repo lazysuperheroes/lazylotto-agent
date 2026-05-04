@@ -567,6 +567,67 @@ X-RateLimit-Identity:  <token prefix or IP>
 
 ---
 
+## Symptom 11 — Duplicate deposit / rake ops on HCS-20 audit topic
+
+**You'll see this from**: the audit page showing the same on-chain
+deposit transaction id (memo) recorded twice — two `deposit` ops, two
+matching `rake` ops, doubled `Deposited` and `Rake` totals on the user
+header. The play loop is unaffected because plays hold a per-user
+Redis lock; deposits did not.
+
+### Cause (fixed in 0.3.2)
+
+`RedisStore.isTransactionProcessed()` historically read only an
+in-process `Set`. The `deposits:processed` Redis set IS maintained on
+write but the read path didn't consult it. Two warm Vercel Lambdas
+holding independent caches could each see "not processed" for the same
+on-chain tx and both call `creditDeposit` → both write HCS-20
+`deposit` + `rake` ops → user balance + operator rake doubled.
+
+The race window opened when both `/api/user/check-deposits` (no lock)
+and `/api/user/play` (lock-protected) raced on the same fresh deposit,
+or when two concurrent `check-deposits` requests landed on different
+warm Lambdas.
+
+### Fix
+
+`UserLedger.creditDeposit` now goes through `IStore.tryClaimTransaction`
+which is backed by Redis `SADD` (atomic across Lambdas). The first
+caller wins; subsequent callers short-circuit with the already-credited
+balance. See `src/custodial/UserLedger.ts:60` and the regression tests
+in `src/custodial/RedisStore.test.ts` (cross-Lambda race) +
+`src/custodial/UserLedger.test.ts` ("creditDeposit: concurrent calls
+for the same txId credit exactly once").
+
+### If you see it again post-0.3.2
+
+It would mean the atomic claim is being bypassed. Investigate:
+
+1. Did someone add a new code path that writes `deposit`/`rake` HCS-20
+   ops without going through `UserLedger.creditDeposit`? Grep for
+   `accounting.recordDeposit` callers.
+2. Is `tryClaimTransaction` being called correctly? Look at the
+   `creditDeposit` implementation — the claim must be the FIRST await,
+   before any balance mutation.
+3. Did a Redis flush race leak the SADD? Unlikely (Upstash is strongly
+   consistent for SADD), but check Vercel logs for Redis errors during
+   the relevant time window.
+
+### Reconciliation
+
+The HCS-20 topic is immutable, so duplicate ops cannot be unwritten.
+Two options:
+
+- **Forward-fix**: write a `refund` op for the duplicate's net amount
+  via `operator_refund` to bring the user's ledger back to truth. The
+  audit trail clearly shows the duplicate plus the corrective refund.
+- **Rebuild Redis from HCS-20**: re-run the v2 reader with a
+  `Set<txId>` dedup filter on `deposit` ops, write the corrected
+  balance back to Redis. Disaster-recovery territory; document the
+  delta before and after.
+
+---
+
 ## When in doubt
 
 1. **Engage the kill switch first** — it's almost never the wrong move

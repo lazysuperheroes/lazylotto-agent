@@ -504,6 +504,24 @@ export class RedisStore implements IStore {
     return this.processedTxIds.has(txId);
   }
 
+  /**
+   * Atomic claim via Redis `SADD`. Returns `true` iff the txId was
+   * newly added — i.e. this caller is the first to claim it across all
+   * Lambdas. Local fast-path: if our in-memory set already has it, we
+   * know SADD would return 0, so skip the round-trip.
+   */
+  async tryClaimTransaction(txId: string): Promise<boolean> {
+    if (this.processedTxIds.has(txId)) return false;
+    const added = await this.redis.sadd(k('deposits', 'processed'), txId);
+    if (added === 1) this.processedTxIds.add(txId);
+    return added === 1;
+  }
+
+  async releaseTransactionClaim(txId: string): Promise<void> {
+    this.processedTxIds.delete(txId);
+    await this.redis.srem(k('deposits', 'processed'), txId);
+  }
+
   recordDeposit(record: DepositRecord): void {
     record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.processedTxIds.add(record.transactionId);

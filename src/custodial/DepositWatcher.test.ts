@@ -140,6 +140,14 @@ function createMockStore(initial?: Partial<MockStoreState>): PersistentStore & {
     isTransactionProcessed(txId: string): boolean {
       return state.processedTxIds.has(txId);
     },
+    async tryClaimTransaction(txId: string): Promise<boolean> {
+      if (state.processedTxIds.has(txId)) return false;
+      state.processedTxIds.add(txId);
+      return true;
+    },
+    async releaseTransactionClaim(txId: string): Promise<void> {
+      state.processedTxIds.delete(txId);
+    },
     recordDeposit(record: DepositRecord): void {
       state.processedTxIds.add(record.transactionId);
       state.deposits.push(record);

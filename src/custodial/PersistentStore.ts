@@ -384,6 +384,20 @@ export class PersistentStore implements IStore {
     return this.processedTxIds.has(txId);
   }
 
+  /**
+   * Single-process semantics: the in-memory set IS the source of truth.
+   * Returns `true` iff this is the first call for this txId.
+   */
+  async tryClaimTransaction(txId: string): Promise<boolean> {
+    if (this.processedTxIds.has(txId)) return false;
+    this.processedTxIds.add(txId);
+    return true;
+  }
+
+  async releaseTransactionClaim(txId: string): Promise<void> {
+    this.processedTxIds.delete(txId);
+  }
+
   recordDeposit(record: DepositRecord): void {
     record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.processedTxIds.add(record.transactionId);

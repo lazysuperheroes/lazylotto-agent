@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.2] - 2026-05-04
+
+### Fixed
+- **Cross-Lambda deposit-credit race (duplicate HCS-20 ops).** `RedisStore.isTransactionProcessed()` previously read only an in-process `Set`, so two warm Vercel Lambdas holding independent caches could each see "not processed" for the same on-chain deposit tx and both call `creditDeposit`, doubling the user's credited balance and writing two `deposit` + two `rake` ops to the HCS-20 audit topic. Observed on testnet 2026-05-04 against a fresh user where the dashboard's `check-deposits` background refresh raced with the play route's pre-play poll. Fix: `UserLedger.creditDeposit` now routes through a new `IStore.tryClaimTransaction(txId)` method backed by Redis `SADD` (atomic across all Lambdas) — the first caller wins, the rest short-circuit. The pre-fix `isTransactionProcessed` is kept for the deposit-watcher's pre-loop short-circuit and the refund flow's deposit-only validation, but is now documented as soft-cache-only and unsafe for cross-Lambda dedup. See `docs/incident-playbook.md` Symptom 11.
+
+### Added
+- `IStore.tryClaimTransaction(txId)` — atomic claim. `RedisStore` implements via `SADD` (returns true iff newly added across all instances); `PersistentStore` via the in-process `Set` (single-process, set IS the source of truth).
+- `IStore.releaseTransactionClaim(txId)` — rollback path. Called from `creditDeposit`'s catch block when the credit fails BEFORE the deposit record is written, so a retry can pick up the same txId. After `recordDeposit` writes the row, the claim is intentionally NOT released (partial state is the lesser evil vs. a possible double-credit on retry).
+- 10 new regression tests: `RedisStore.test.ts` (4 — single-instance claim, cross-Lambda race with shared mock Redis, local fast-path skip, release-and-reclaim), `PersistentStore.test.ts` (3 — claim, release, in-process race), `UserLedger.test.ts` (3 — concurrent same-txId, pre-record failure releases claim, post-record failure keeps claim).
+
 ## [0.3.1] - 2026-05-04
 
 ### Changed

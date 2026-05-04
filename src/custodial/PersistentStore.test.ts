@@ -155,6 +155,53 @@ describe('PersistentStore', () => {
     await store2.close();
   });
 
+  it('tryClaimTransaction returns true on first call, false on duplicate', async () => {
+    dir = makeTempDir();
+    const store = new PersistentStore(dir);
+    await store.load();
+
+    assert.equal(await store.tryClaimTransaction('tx-claim-1'), true);
+    assert.equal(await store.tryClaimTransaction('tx-claim-1'), false);
+    assert.equal(store.isTransactionProcessed('tx-claim-1'), true);
+
+    // Independent txId still claims successfully
+    assert.equal(await store.tryClaimTransaction('tx-claim-2'), true);
+
+    await store.close();
+  });
+
+  it('releaseTransactionClaim allows the same txId to be re-claimed', async () => {
+    dir = makeTempDir();
+    const store = new PersistentStore(dir);
+    await store.load();
+
+    assert.equal(await store.tryClaimTransaction('tx-rollback'), true);
+    assert.equal(await store.tryClaimTransaction('tx-rollback'), false);
+
+    await store.releaseTransactionClaim('tx-rollback');
+    assert.equal(store.isTransactionProcessed('tx-rollback'), false);
+    assert.equal(await store.tryClaimTransaction('tx-rollback'), true);
+
+    await store.close();
+  });
+
+  it('concurrent tryClaimTransaction: only one wins', async () => {
+    dir = makeTempDir();
+    const store = new PersistentStore(dir);
+    await store.load();
+
+    // Fire 8 concurrent claims for the same txId. JS event loop is
+    // single-threaded so this is a fair single-process race test.
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => store.tryClaimTransaction('tx-race')),
+    );
+
+    const winners = results.filter((r) => r === true).length;
+    assert.equal(winners, 1, 'exactly one caller wins the claim');
+
+    await store.close();
+  });
+
   it('tracks processed transaction IDs', async () => {
     dir = makeTempDir();
     const store = new PersistentStore(dir);

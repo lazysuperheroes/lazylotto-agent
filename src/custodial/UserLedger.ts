@@ -56,82 +56,112 @@ export class UserLedger {
     rakePercent: number,
     token: string,
   ): Promise<UserBalances> {
-    // 1. Idempotency check
-    if (this.store.isTransactionProcessed(txId)) {
+    // 1. Atomic claim — returns true iff this caller is the first to
+    //    claim this on-chain txId. Backed by Redis SADD on RedisStore
+    //    (atomic across Lambdas) and by the in-process Set on
+    //    PersistentStore. The pre-fix `isTransactionProcessed()` check
+    //    was per-Lambda only and caused the duplicate-deposit incident
+    //    documented in `docs/incident-playbook.md` — two warm Vercel
+    //    functions could each see "not processed" for the same tx and
+    //    both credit + write HCS-20 ops.
+    if (!(await this.store.tryClaimTransaction(txId))) {
       return this.getUserOrThrow(userId).balances;
     }
 
-    // 2. Validate user exists
-    const user = this.getUserOrThrow(userId);
+    // Track whether the deposit record has been persisted. After step 6
+    // we hold partial state; a rollback would risk a double-credit on
+    // retry. Before step 6, releasing the claim lets a retry recover.
+    let recorded = false;
+    try {
+      // 2. Validate user exists
+      const user = this.getUserOrThrow(userId);
 
-    // 3. Calculate rake split (rounded to token's decimal precision)
-    const rakeAmount = roundForToken(grossAmount * (rakePercent / 100), token);
-    const netAmount = roundForToken(grossAmount - rakeAmount, token);
+      // 3. Calculate rake split (rounded to token's decimal precision)
+      const rakeAmount = roundForToken(grossAmount * (rakePercent / 100), token);
+      const netAmount = roundForToken(grossAmount - rakeAmount, token);
 
-    // 4. Credit user balance
-    const newBalances = this.store.updateBalance(userId, (b) => {
-      const entry = b.tokens[token] ?? emptyTokenEntry();
-      return {
-        tokens: {
-          ...b.tokens,
-          [token]: {
-            ...entry,
-            available: entry.available + netAmount,
-            totalDeposited: entry.totalDeposited + grossAmount,
-            totalRake: entry.totalRake + rakeAmount,
+      // 4. Credit user balance
+      const newBalances = this.store.updateBalance(userId, (b) => {
+        const entry = b.tokens[token] ?? emptyTokenEntry();
+        return {
+          tokens: {
+            ...b.tokens,
+            [token]: {
+              ...entry,
+              available: entry.available + netAmount,
+              totalDeposited: entry.totalDeposited + grossAmount,
+              totalRake: entry.totalRake + rakeAmount,
+            },
           },
-        },
-      };
-    });
+        };
+      });
 
-    // 5. Credit operator (platform) rake
-    this.store.updateOperator((op) => ({
-      ...op,
-      balances: { ...op.balances, [token]: (op.balances[token] ?? 0) + rakeAmount },
-      totalRakeCollected: { ...op.totalRakeCollected, [token]: (op.totalRakeCollected[token] ?? 0) + rakeAmount },
-    }));
+      // 5. Credit operator (platform) rake
+      this.store.updateOperator((op) => ({
+        ...op,
+        balances: { ...op.balances, [token]: (op.balances[token] ?? 0) + rakeAmount },
+        totalRakeCollected: { ...op.totalRakeCollected, [token]: (op.totalRakeCollected[token] ?? 0) + rakeAmount },
+      }));
 
-    // 6. Persist deposit record
-    this.store.recordDeposit({
-      transactionId: txId,
-      userId,
-      grossAmount,
-      rakeAmount,
-      netAmount,
-      tokenId: token === 'hbar' ? null : token,
-      memo: user.depositMemo,
-      timestamp: new Date().toISOString(),
-    });
+      // 6. Persist deposit record
+      this.store.recordDeposit({
+        transactionId: txId,
+        userId,
+        grossAmount,
+        rakeAmount,
+        netAmount,
+        tokenId: token === 'hbar' ? null : token,
+        memo: user.depositMemo,
+        timestamp: new Date().toISOString(),
+      });
+      recorded = true;
 
-    // 7. Fire HCS-20 accounting (non-blocking)
-    //
-    // Pass the underlying token (HBAR / LAZY / token id) so the on-chain
-    // record carries the asset identity. Without it, the audit reader
-    // would have to fall back to a LLCRED→HBAR heuristic and lose all
-    // LAZY deposits — see the v1 message types section in
-    // docs/hcs20-v2-schema.md for the rationale.
-    try {
-      await this.accounting.recordDeposit(user.hederaAccountId, netAmount, txId, token);
+      // 7. Fire HCS-20 accounting (non-blocking)
+      //
+      // Pass the underlying token (HBAR / LAZY / token id) so the on-chain
+      // record carries the asset identity. Without it, the audit reader
+      // would have to fall back to a LLCRED→HBAR heuristic and lose all
+      // LAZY deposits — see the v1 message types section in
+      // docs/hcs20-v2-schema.md for the rationale.
+      try {
+        await this.accounting.recordDeposit(user.hederaAccountId, netAmount, txId, token);
+      } catch (err) {
+        console.warn(
+          `[UserLedger] HCS-20 recordDeposit failed for user ${userId}, txId ${txId}:`,
+          err,
+        );
+      }
+
+      try {
+        await this.accounting.recordRake(user.hederaAccountId, this.agentAccountId, rakeAmount, token);
+      } catch (err) {
+        console.warn(
+          `[UserLedger] HCS-20 recordRake failed for user ${userId}, txId ${txId}:`,
+          err,
+        );
+      }
+
+      // Flush immediately for financial durability (bypass debounce)
+      await this.store.flush();
+
+      return newBalances;
     } catch (err) {
-      console.warn(
-        `[UserLedger] HCS-20 recordDeposit failed for user ${userId}, txId ${txId}:`,
-        err,
-      );
+      // Only roll back the claim if we threw BEFORE writing the deposit
+      // record. After step 6 the partial state is the lesser evil — a
+      // released claim could let another Lambda credit the same tx
+      // again on top of our partial state.
+      if (!recorded) {
+        try {
+          await this.store.releaseTransactionClaim(txId);
+        } catch (releaseErr) {
+          console.error(
+            `[UserLedger] failed to release claim for ${txId} after credit error:`,
+            releaseErr,
+          );
+        }
+      }
+      throw err;
     }
-
-    try {
-      await this.accounting.recordRake(user.hederaAccountId, this.agentAccountId, rakeAmount, token);
-    } catch (err) {
-      console.warn(
-        `[UserLedger] HCS-20 recordRake failed for user ${userId}, txId ${txId}:`,
-        err,
-      );
-    }
-
-    // Flush immediately for financial durability (bypass debounce)
-    await this.store.flush();
-
-    return newBalances;
   }
 
   // ── Reserve / Settle / Release ────────────────────────────────

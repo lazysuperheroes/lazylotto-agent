@@ -88,6 +88,14 @@ function createMockStore(initial?: Partial<MockStoreData>): PersistentStore {
     isTransactionProcessed(txId: string): boolean {
       return processedTxIds.has(txId);
     },
+    async tryClaimTransaction(txId: string): Promise<boolean> {
+      if (processedTxIds.has(txId)) return false;
+      processedTxIds.add(txId);
+      return true;
+    },
+    async releaseTransactionClaim(txId: string): Promise<void> {
+      processedTxIds.delete(txId);
+    },
     recordDeposit(record: DepositRecord): void {
       processedTxIds.add(record.transactionId);
       deposits.push(record);
@@ -167,6 +175,108 @@ describe('UserLedger', () => {
     // Balances should be identical -- second call is a no-op.
     assert.deepStrictEqual(first, second);
     assert.equal(first.tokens.hbar.available, 100 + 99);
+  });
+
+  // ── Race regression: duplicate-deposit incident ────────────────
+  // The pre-fix idempotency check was an in-process Set lookup on the
+  // RedisStore, so two warm Lambdas could each see "not processed" for
+  // the same on-chain tx and both credit + write HCS-20 ops. The fix
+  // routes through `tryClaimTransaction` (atomic SADD on Redis,
+  // claim-on-first-call on the in-process store). These tests lock the
+  // single-call-wins property so we cannot regress.
+
+  it('creditDeposit: concurrent calls for the same txId credit exactly once', async () => {
+    // Fire 5 concurrent credits for the same txId. With the atomic
+    // claim, exactly one should win and update balances; the rest
+    // should short-circuit and return the already-credited balance.
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        ledger.creditDeposit('user-1', 100, 'tx-race', 1, 'hbar'),
+      ),
+    );
+
+    // All five calls must agree on the final balance.
+    for (const r of results) {
+      assert.deepStrictEqual(r, results[0]);
+    }
+
+    // Balance reflects ONE credit (initial 100 + net 99), not five.
+    assert.equal(results[0].tokens.hbar.available, 199);
+    assert.equal(results[0].tokens.hbar.totalDeposited, 100);
+    assert.equal(results[0].tokens.hbar.totalRake, 1);
+
+    // Operator collected ONE rake (1, not 5).
+    const op = store.getOperator();
+    assert.equal(op.balances.hbar, 1);
+    assert.equal(op.totalRakeCollected.hbar, 1);
+
+    // Accounting fired exactly once for deposit and once for rake.
+    const depositCalls = accounting.calls.filter((c) => c.method === 'recordDeposit');
+    const rakeCalls = accounting.calls.filter((c) => c.method === 'recordRake');
+    assert.equal(depositCalls.length, 1, 'HCS-20 recordDeposit fires once for the winning claim');
+    assert.equal(rakeCalls.length, 1, 'HCS-20 recordRake fires once for the winning claim');
+  });
+
+  it('creditDeposit: failure before recordDeposit releases the claim so retry can succeed', async () => {
+    // Construct a store whose updateBalance throws on first call only —
+    // this simulates a transient failure between the atomic claim and
+    // the deposit-record write. The catch path should release the claim
+    // so the next attempt can proceed.
+    const users = new Map<string, UserAccount>();
+    const user = makeUser({
+      balances: { tokens: { hbar: { available: 100, reserved: 0, totalDeposited: 0, totalWithdrawn: 0, totalRake: 0 } } },
+    });
+    users.set(user.userId, user);
+
+    let updateBalanceCalls = 0;
+    const failingStore = createMockStore({ users });
+    const realUpdate = failingStore.updateBalance.bind(failingStore);
+    failingStore.updateBalance = (userId, updater) => {
+      updateBalanceCalls++;
+      if (updateBalanceCalls === 1) throw new Error('transient updateBalance failure');
+      return realUpdate(userId, updater);
+    };
+
+    const failingAccounting = createMockAccounting();
+    const failingLedger = new UserLedger(failingStore, failingAccounting, AGENT_ACCOUNT);
+
+    // First attempt throws — claim should be released.
+    await assert.rejects(
+      () => failingLedger.creditDeposit('user-1', 100, 'tx-retry', 1, 'hbar'),
+      /transient updateBalance failure/,
+    );
+    assert.equal(failingStore.isTransactionProcessed('tx-retry'), false, 'claim released after pre-record failure');
+
+    // Retry now succeeds.
+    const balances = await failingLedger.creditDeposit('user-1', 100, 'tx-retry', 1, 'hbar');
+    assert.equal(balances.tokens.hbar.available, 199);
+    assert.equal(failingStore.isTransactionProcessed('tx-retry'), true);
+  });
+
+  it('creditDeposit: claim is NOT released when failure happens after recordDeposit', async () => {
+    // If the deposit row is already written, releasing the claim would
+    // expose us to a double-credit on retry. Confirm the claim stays.
+    const users = new Map<string, UserAccount>();
+    const user = makeUser({
+      balances: { tokens: { hbar: { available: 100, reserved: 0, totalDeposited: 0, totalWithdrawn: 0, totalRake: 0 } } },
+    });
+    users.set(user.userId, user);
+
+    const failingStore = createMockStore({ users });
+    failingStore.flush = async () => {
+      throw new Error('flush failed after recordDeposit');
+    };
+
+    const failingAccounting = createMockAccounting();
+    const failingLedger = new UserLedger(failingStore, failingAccounting, AGENT_ACCOUNT);
+
+    await assert.rejects(
+      () => failingLedger.creditDeposit('user-1', 100, 'tx-no-rollback', 1, 'hbar'),
+      /flush failed/,
+    );
+
+    // Claim STAYS — partial state is the lesser evil.
+    assert.equal(failingStore.isTransactionProcessed('tx-no-rollback'), true);
   });
 
   // -- reserve ----------------------------------------------------------------

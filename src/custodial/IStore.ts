@@ -90,7 +90,39 @@ export interface IStore {
   updateOperator(updater: (s: OperatorState) => OperatorState): OperatorState;
 
   // ── Deposits ───────────────────────────────────────────────────
+  /**
+   * Soft check — reads the in-memory cache only. Used by the deposit
+   * watcher's pre-loop short-circuit and by the refund flow to verify a
+   * txId came in via the deposit path. NOT safe for cross-Lambda
+   * dedup: warm Vercel functions hold independent caches.
+   *
+   * For first-claim semantics in the credit path, use
+   * `tryClaimTransaction` instead.
+   */
   isTransactionProcessed(txId: string): boolean;
+
+  /**
+   * Atomically claim a transaction id. Returns `true` iff this caller is
+   * the first to claim it across ALL store instances (Lambdas, processes).
+   * Subsequent calls for the same txId return `false` until either the
+   * claim is released (`releaseTransactionClaim`) or the underlying set
+   * is rebuilt by `load()`.
+   *
+   * Backed by Redis `SADD` (atomic) on `RedisStore`; by the in-process
+   * `Set` on `PersistentStore` (which is single-process so the local set
+   * IS the source of truth).
+   */
+  tryClaimTransaction(txId: string): Promise<boolean>;
+
+  /**
+   * Release a previously-acquired claim. Called from `creditDeposit`'s
+   * catch path when a credit fails BEFORE the deposit record is written,
+   * so the next poll can retry the same txId. After `recordDeposit` has
+   * written the deposit row, do NOT release — the partial state is the
+   * lesser evil compared to a possible double-credit on retry.
+   */
+  releaseTransactionClaim(txId: string): Promise<void>;
+
   recordDeposit(record: DepositRecord): void;
   getDepositsForUser(userId: string): DepositRecord[];
 
