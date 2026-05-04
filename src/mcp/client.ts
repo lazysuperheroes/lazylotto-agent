@@ -19,7 +19,12 @@ export async function getMcpClient(): Promise<McpClient> {
   }
   mcpClient = new McpClient({ name: 'lazylotto-agent', version });
 
-  const headers: Record<string, string> = {};
+  // Opt into the dApp's autonomous intent mode (Phase 1 of the v3 envelope):
+  // dApp skips the Redis intent-record write and omits executeUrl. We sign and
+  // submit locally via Hedera SDK, so the executeUrl was never used anyway.
+  const headers: Record<string, string> = {
+    'X-MCP-Intent-Mode': 'autonomous',
+  };
   const apiKey = process.env.LAZYLOTTO_MCP_API_KEY;
   if (apiKey) {
     headers['Authorization'] = `Bearer ${apiKey}`;

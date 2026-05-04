@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-05-04
+
+### Changed
+- MCP client uses the dApp's canonical `lotto_*` tool names (Phase 1 of the v3 envelope). The seven read tools (`lotto_list_pools`, `lotto_get_pool`, `lotto_get_user_state`, `lotto_calculate_ev`, `lotto_get_system_info`, `lotto_check_prerequisites`, `lotto_roll`) and the buy-side split (`lotto_buy_entries` / `lotto_buy_and_roll` / `lotto_buy_and_redeem`) replace the legacy `lazylotto_*` names. The dApp's alias map keeps the old names working during the deprecation window; the agent now calls the new names directly so deprecation warnings stop firing on the dApp side.
+- `buyEntries` is now a dispatch wrapper: callers still pass `action: 'buy' | 'buy_and_roll' | 'buy_and_redeem'`, internally routed to the matching dedicated tool. Public signature preserved so `LottoAgent` is unchanged.
+- MCP client sends `X-MCP-Intent-Mode: autonomous`, opting into the dApp's autonomous intent mode so the dApp skips the Redis intent-record write and omits `executeUrl`. The agent never used `executeUrl` (we sign and submit via Hedera SDK), so this is a soft optimisation on the dApp side with no agent-side behaviour change.
+
+### Added
+- `IntentResponse` extended with five optional v3 envelope fields (`mcpSchemaVersion`, `domain`, `kind`, `intentMode`, `signature`) and exported `IntentDomain` / `IntentMode` types. Pure type additions — runtime ignores them. The HMAC `signature` is exposed for inspection only; we do not verify (the dApp's signing key is theirs, not ours).
+- `BUY_TOOL_BY_ACTION` dispatch table exported from `src/mcp/client.ts` with a regression test in `src/mcp/client.test.ts` to lock the action → tool name mapping.
+
+### Fixed
+- `src/auth/auth.test.ts`: ten pre-existing `tsc --noEmit` errors caused by `next/types/global.d.ts` declaring `process.env.NODE_ENV` as `readonly`. The `assertProductionRedis` describe block now casts `process.env` once to a mutable `Record<string, string | undefined>`. Same runtime behaviour; full suite still 464 / 464 green.
+
+### Documentation
+- README and `docs/getting-started.md` note the dApp v3 envelope alignment, the canonical `lotto_*` tool family, and the `X-MCP-Intent-Mode: autonomous` header.
+
 ## [0.3.0] - 2026-05-03
 
 ### Added

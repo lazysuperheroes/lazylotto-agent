@@ -389,6 +389,20 @@ schedule, accepted deposit tokens, and all available endpoints.
 | Testnet | `https://testnet-dapp.lazysuperheroes.com/api/mcp` |
 | Mainnet | `https://dapp.lazysuperheroes.com/api/mcp` |
 
+The agent calls the dApp's `lotto_*` tool family
+(`lotto_list_pools`, `lotto_get_pool`, `lotto_calculate_ev`,
+`lotto_buy_entries` / `lotto_buy_and_roll` / `lotto_buy_and_redeem`,
+`lotto_roll`, etc.) over the v3 envelope. The legacy `lazylotto_*` names
+are accepted by the dApp during a deprecation window but the agent uses
+the canonical names directly.
+
+The MCP client sends `X-MCP-Intent-Mode: autonomous` so the dApp skips
+its Redis intent-record write and omits `executeUrl` -- the agent signs
+and submits transactions locally via the Hedera SDK, so the execute page
+was never used. The v3 envelope additions (`mcpSchemaVersion`, `domain`,
+`kind`, `intentMode`, `signature`) are exposed on the agent's
+`IntentResponse` type but ignored at runtime.
+
 **Agent endpoints (WRITE side -- the hosted agent itself):**
 
 | Endpoint | Purpose |

@@ -48,6 +48,9 @@ The agent operates in **three deployment modes**:
 ```
 
 **Reads** happen via MCP (Model Context Protocol) connected to the LazyLotto dApp.
+Compatible with the dApp MCP v3 envelope (canonical `lotto_*` tool names,
+`X-MCP-Intent-Mode: autonomous`). The legacy `lazylotto_*` names still resolve
+on the dApp side during the deprecation window but are not used by this agent.
 **Writes** happen via direct Hedera SDK contract calls signed by the agent wallet.
 
 ### Multi-User Hosted Mode
