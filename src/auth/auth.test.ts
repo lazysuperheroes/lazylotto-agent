@@ -288,54 +288,57 @@ describe('resolveAuth', () => {
 
 describe('assertProductionRedis', () => {
   // Tests run with UPSTASH_* unset and NODE_ENV unset (or 'test').
+  // next/types/global.d.ts declares NODE_ENV as readonly; cast to a mutable
+  // record so the tests can manipulate it without TS2540 / TS2704.
+  const env = process.env as Record<string, string | undefined>;
 
   it("does not throw when NODE_ENV is unset and Upstash is missing (local dev)", () => {
-    delete process.env.NODE_ENV;
+    delete env.NODE_ENV;
     assertProductionRedis();
   });
 
   it("does not throw when NODE_ENV='development' and Upstash is missing", () => {
-    const original = process.env.NODE_ENV;
-    process.env.NODE_ENV = 'development';
+    const original = env.NODE_ENV;
+    env.NODE_ENV = 'development';
     try {
       assertProductionRedis();
     } finally {
-      if (original === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = original;
+      if (original === undefined) delete env.NODE_ENV;
+      else env.NODE_ENV = original;
     }
   });
 
   it("THROWS with PRODUCTION_REDIS_REQUIRED when NODE_ENV='production' and Upstash is missing", () => {
-    const original = process.env.NODE_ENV;
+    const original = env.NODE_ENV;
     // Make doubly sure Upstash is unset
-    delete process.env.UPSTASH_REDIS_REST_URL;
-    delete process.env.UPSTASH_REDIS_REST_TOKEN;
-    delete process.env.KV_REST_API_URL;
-    delete process.env.KV_REST_API_TOKEN;
-    process.env.NODE_ENV = 'production';
+    delete env.UPSTASH_REDIS_REST_URL;
+    delete env.UPSTASH_REDIS_REST_TOKEN;
+    delete env.KV_REST_API_URL;
+    delete env.KV_REST_API_TOKEN;
+    env.NODE_ENV = 'production';
     try {
       assert.throws(
         () => assertProductionRedis(),
         /PRODUCTION_REDIS_REQUIRED/,
       );
     } finally {
-      if (original === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = original;
+      if (original === undefined) delete env.NODE_ENV;
+      else env.NODE_ENV = original;
     }
   });
 
   it("does not throw when NODE_ENV='production' and Upstash IS configured", () => {
-    const original = process.env.NODE_ENV;
-    process.env.NODE_ENV = 'production';
-    process.env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
-    process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    const original = env.NODE_ENV;
+    env.NODE_ENV = 'production';
+    env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
     try {
       assertProductionRedis();
     } finally {
-      if (original === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = original;
-      delete process.env.UPSTASH_REDIS_REST_URL;
-      delete process.env.UPSTASH_REDIS_REST_TOKEN;
+      if (original === undefined) delete env.NODE_ENV;
+      else env.NODE_ENV = original;
+      delete env.UPSTASH_REDIS_REST_URL;
+      delete env.UPSTASH_REDIS_REST_TOKEN;
     }
   });
 });
