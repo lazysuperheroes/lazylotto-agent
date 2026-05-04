@@ -117,7 +117,17 @@ export const POST = withStore(async (request: Request) => {
         { status: 503, headers: CORS_HEADERS },
       );
     }
+    // 0.3.3: velocity-check Redis failure surfaces as a sentinel
+    // error message from MultiUserAgent.checkWithdrawalVelocity. Map
+    // to 503 redis_degraded so the dashboard's "agent temporarily
+    // unavailable" banner picks it up uniformly.
     const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith('velocity_check_unavailable')) {
+      return NextResponse.json(
+        { error: message, reason: 'redis_degraded' },
+        { status: 503, headers: CORS_HEADERS },
+      );
+    }
     return NextResponse.json(
       { error: message },
       { status: 400, headers: CORS_HEADERS },

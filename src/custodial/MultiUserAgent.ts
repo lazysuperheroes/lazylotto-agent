@@ -1692,17 +1692,29 @@ export class MultiUserAgent {
       recordRedisSuccess();
       return cap - proposed; // positive = remaining
     } catch (e) {
-      // F6: record the failure so the breaker can detect sustained outages.
-      // We still fail open here (allowing the withdrawal) — the breaker
-      // is what catches the stack-up. The route layer's assertRedisHealthy()
-      // gate will reject the withdrawal entirely once enough failures
-      // accumulate.
+      // Record the failure so the breaker can detect sustained outages.
       try {
         const { recordRedisFailure } = await import('../lib/redisHealth.js');
         recordRedisFailure();
       } catch { /* nothing to do if we can't even import the breaker module */ }
-      console.warn('[velocity] check failed (allowing withdrawal — breaker will catch sustained outage):', e);
-      return cap; // fail-open per-call; breaker catches sustained issues
+
+      // 0.3.3 hardening: FAIL CLOSED on a velocity-check Redis error.
+      // Pre-fix this path returned `cap` (full allowance), so a single
+      // 50ms transient Redis failure between the route's
+      // `assertRedisHealthy()` and this check disabled the daily cap
+      // for that one withdrawal. Combined with rapid retries timed to
+      // brief Redis hiccups, an attacker (or compromised session)
+      // could blast through the cap. The breaker only catches
+      // sustained outages, not single-call failures.
+      //
+      // Throwing now: the route's catch block translates this to a
+      // 503 `redis_degraded` response — same UX as the breaker's
+      // sustained-outage 503 but covers single-call failures too.
+      console.error('[velocity] check failed — failing closed:', e);
+      throw new Error(
+        'velocity_check_unavailable: cannot verify withdrawal velocity ' +
+        'cap (Redis unreachable); refusing withdrawal until backend recovers',
+      );
     }
   }
 

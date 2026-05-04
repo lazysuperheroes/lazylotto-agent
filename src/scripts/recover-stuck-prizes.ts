@@ -38,6 +38,7 @@ import { toEvmAddress } from '../utils/format.js';
 import { transferAllPrizesWithRetry } from '../hedera/contracts.js';
 import { getUserState, getSystemInfo } from '../mcp/client.js';
 import { AccountingService } from '../custodial/AccountingService.js';
+import { acquireUserLock, releaseUserLock } from '../lib/locks.js';
 
 interface CliArgs {
   userAccountId: string;
@@ -150,6 +151,22 @@ async function main() {
     process.exit(0);
   }
 
+  // 0.3.3: acquire a recovery-scope lock on the hedera account ID
+  // so two concurrent CLI invocations on the same target serialize.
+  // This does NOT coordinate with the production MCP tool's
+  // recover-stuck-prizes (that lock is keyed by INTERNAL userId,
+  // resolved via the store). Operators should not run this CLI
+  // while production is actively processing the same account; the
+  // dry-run preview above is the safe inspection path.
+  const recoveryLockKey = `recover-cli:${userAccountId}`;
+  const lockToken = await acquireUserLock(recoveryLockKey, 300);
+  if (!lockToken) {
+    console.error(
+      `  ✗ Another recover-stuck-prizes run is in progress for ${userAccountId}. Aborting.`,
+    );
+    process.exit(3);
+  }
+
   console.log('');
   console.log('  → Calling contract...');
   let txResult;
@@ -161,6 +178,7 @@ async function main() {
       agentState.pendingPrizesCount,
     );
   } catch (err) {
+    await releaseUserLock(recoveryLockKey, lockToken);
     const message = err instanceof Error ? err.message : String(err);
     const attemptsLog = (err as Error & { attemptsLog?: unknown[] }).attemptsLog;
     console.error('');
@@ -221,6 +239,7 @@ async function main() {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('  Recovery complete.');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  await releaseUserLock(recoveryLockKey, lockToken);
   process.exit(0);
 }
 

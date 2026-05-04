@@ -296,12 +296,12 @@ describe('Cross-Lambda invariant: creditDeposit lost-update protection', () => {
         updateOperator: () => ({}),
         recordDeposit: () => {},
         getOperator: () => ({}),
-      } as unknown as Parameters<typeof UserLedger>[0];
+      } as unknown as ConstructorParameters<typeof UserLedger>[0];
 
       const fakeAccounting = {
         async recordDeposit() {},
         async recordRake() {},
-      } as unknown as Parameters<typeof UserLedger>[1];
+      } as unknown as ConstructorParameters<typeof UserLedger>[1];
 
       const ledger = new UserLedger(fakeStore, fakeAccounting, '0.0.agent');
 

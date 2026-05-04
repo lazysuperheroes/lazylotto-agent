@@ -14,6 +14,7 @@ import { getStore } from '../../_lib/store';
 import { getAgentContext } from '../../_lib/mcp';
 import { acquireOperatorLock, releaseOperatorLock } from '../../_lib/locks';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
+import { withStore } from '../../_lib/withStore';
 import { reconcile } from '~/custodial/Reconciliation';
 
 export async function OPTIONS() {
@@ -26,7 +27,11 @@ export async function OPTIONS() {
   });
 }
 
-export async function POST(request: Request) {
+// withStore: production-Redis preflight + uniform error shape +
+// post-handler flush. Brings this route to parity with every other
+// mutating route — the missing wrap was a hardening gap surfaced by
+// the 0.3.3 adversarial audit.
+export const POST = withStore(async (request: Request) => {
   try {
     // Reconcile is expensive (mirror node + Redis pipeline) — modest limit
     if (!(await checkRateLimit({ request, action: 'admin-reconcile', limit: 6, windowSec: 60 }))) {
@@ -75,4 +80,4 @@ export async function POST(request: Request) {
       { status: 500, headers: CORS_HEADERS },
     );
   }
-}
+});
