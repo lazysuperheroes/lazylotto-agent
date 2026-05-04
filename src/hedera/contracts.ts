@@ -28,8 +28,36 @@ export interface TransactionIntent {
   payableHumanReadable: string;
 }
 
+/**
+ * Domains the dApp MCP server addresses (v3 envelope, Phase 1).
+ * See lazy-dapp-v3/src/server/mcp/core/envelope.ts.
+ */
+export type IntentDomain =
+  | 'lotto'
+  | 'staking'
+  | 'mints'
+  | 'swap'
+  | 'vote'
+  | 'farms'
+  | 'allowances'
+  | 'delegate'
+  | 'wallet';
+
+export type IntentMode = 'human' | 'autonomous';
+
 export interface IntentResponse {
   type: 'transaction_intent';
+  // ── v3 envelope additions (Phase 1) — all optional for backwards
+  //    compatibility with v2 dApps. We don't act on them; they're here so
+  //    consumers that want to inspect them have a typed surface.
+  mcpSchemaVersion?: number;
+  domain?: IntentDomain;
+  /** Free-form sub-kind, e.g. 'lotto.buy_and_roll'. */
+  kind?: string;
+  intentMode?: IntentMode;
+  /** HMAC-SHA256(canonicalJson(intent), dApp's signing key), base64. We do not verify. */
+  signature?: string;
+  // ── v2 envelope (existing) ────────────────────────────────────
   chain: string;
   intent: TransactionIntent;
   abi: unknown[];
