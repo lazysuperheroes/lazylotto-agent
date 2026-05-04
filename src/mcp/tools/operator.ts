@@ -11,6 +11,7 @@ import { z } from 'zod';
 
 import type { MultiUserAgent } from '../../custodial/MultiUserAgent.js';
 import { withChecksum } from '../../utils/checksum.js';
+import { acquireUserLock, releaseUserLock } from '../../lib/locks.js';
 import type { ServerContext, AuthResult } from './types.js';
 
 // ── Registration ────────────────────────────────────────────────
@@ -191,6 +192,22 @@ export function registerOperatorTools(
       // passes, authResult is guaranteed to have an `auth` field.
       const performedBy =
         'auth' in authResult ? authResult.auth.accountId : 'unknown';
+
+      // Acquire the per-user distributed lock for the duration of the
+      // recovery so two operators (or the same operator from two tabs)
+      // hitting different Lambdas can't both attempt recovery and both
+      // write resolved-dead-letter rows. Same lock primitive that
+      // serialises play and withdraw — recovery is now consistent with
+      // every other write path that mutates a single user's ledger.
+      // 5 min TTL: the contract call + retry ladder + audit write fits
+      // comfortably; lock auto-releases if the Lambda dies mid-flight.
+      const lockToken = execute ? await acquireUserLock(userId, 300) : null;
+      if (execute && !lockToken) {
+        return errorResult(
+          'Operation in progress for this user. Try again shortly.',
+        );
+      }
+
       try {
         const result = await multiUser.recoverStuckPrizesForUser(userId, {
           dryRun: !execute,
@@ -200,6 +217,8 @@ export function registerOperatorTools(
         return json(result);
       } catch (e) {
         return errorResult(`Recovery failed: ${errorMsg(e)}`);
+      } finally {
+        if (lockToken) await releaseUserLock(userId, lockToken);
       }
     }
   );

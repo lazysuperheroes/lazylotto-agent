@@ -160,15 +160,6 @@ export interface IStore {
    * stays consistent after replacement.
    */
   upsertDeadLetter(entry: DeadLetterEntry): Promise<void>;
-
-  /**
-   * @deprecated Use `upsertDeadLetter` instead. Retained as a
-   * fire-and-forget shim during the migration window so callsites
-   * that haven't been updated still compile. Removed in the same
-   * commit that migrates the last caller.
-   */
-  recordDeadLetter(entry: DeadLetterEntry): void;
-
   getDeadLetters(): DeadLetterEntry[];
 
   // ── Gas ────────────────────────────────────────────────────────

@@ -649,16 +649,6 @@ export class RedisStore implements IStore {
     await pipeline.exec();
   }
 
-  /**
-   * @deprecated Fire-and-forget shim that delegates to upsertDeadLetter.
-   * Kept temporarily so existing callers compile during the migration
-   * window — Group B removes this and migrates every caller to await
-   * upsertDeadLetter.
-   */
-  recordDeadLetter(entry: DeadLetterEntry): void {
-    this.fire(this.upsertDeadLetter(entry));
-  }
-
   getDeadLetters(): DeadLetterEntry[] {
     return this.deadLetters;
   }

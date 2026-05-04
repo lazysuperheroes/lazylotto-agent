@@ -738,7 +738,7 @@ export class MultiUserAgent {
       // in the agent wallet until an operator runs the recovery.
       if (transferOutcome?.status === 'failed') {
         try {
-          this.store.recordDeadLetter({
+          await this.store.upsertDeadLetter({
             transactionId: sessionId, // sessionId is the natural key for prize failures
             timestamp: new Date().toISOString(),
             error: transferOutcome.error,
@@ -1477,13 +1477,19 @@ export class MultiUserAgent {
       });
     }
 
-    // 8. Mark dead-letter entries as resolved. The store's
-    //    recordDeadLetter is an upsert by transactionId so writing the
-    //    same entry with resolvedAt set updates it in place.
+    // 8. Mark dead-letter entries as resolved. `upsertDeadLetter` is a
+    //    genuine upsert by transactionId — writing the same entry with
+    //    resolvedAt set replaces the unresolved row in-place. (The
+    //    pre-0.3.3 `recordDeadLetter` was an append, which silently
+    //    duplicated dead-letter rows on every recovery; see
+    //    docs/incident-playbook.md Symptom 12.) The wider race — two
+    //    operators running recovery simultaneously — is closed by the
+    //    per-user lock around `recoverStuckPrizesForUser` at the MCP
+    //    tool layer (operator.ts).
     let resolvedDeadLetters = 0;
     for (const entry of affectedEntries) {
       try {
-        this.store.recordDeadLetter({
+        await this.store.upsertDeadLetter({
           ...entry,
           resolvedAt: new Date().toISOString(),
           resolvedBy: options.performedBy,

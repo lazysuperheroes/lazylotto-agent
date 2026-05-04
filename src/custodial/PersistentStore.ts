@@ -463,16 +463,6 @@ export class PersistentStore implements IStore {
     this.scheduleDirtyFlush();
   }
 
-  /**
-   * @deprecated Synchronous shim that calls upsertDeadLetter on a
-   * promise we deliberately don't await. Kept during the migration
-   * window so existing fire-and-forget callsites compile. Removed in
-   * the same commit that migrates the last caller.
-   */
-  recordDeadLetter(entry: DeadLetterEntry): void {
-    void this.upsertDeadLetter(entry);
-  }
-
   getDeadLetters(): DeadLetterEntry[] {
     return this.deadLetters ?? [];
   }

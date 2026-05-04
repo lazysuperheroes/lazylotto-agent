@@ -166,14 +166,6 @@ function createMockStore(initial?: Partial<MockStoreState>): PersistentStore & {
       if (idx >= 0) state.deadLetters[idx] = entry;
       else state.deadLetters.push(entry);
     },
-    // Deprecated shim — matches the real IStore contract during the
-    // migration window. Fire-and-forget delegate to upsertDeadLetter so
-    // existing test code that calls recordDeadLetter directly still works.
-    recordDeadLetter(entry: { transactionId: string; timestamp: string; error: string }): void {
-      const idx = state.deadLetters.findIndex((e) => e.transactionId === entry.transactionId);
-      if (idx >= 0) state.deadLetters[idx] = entry;
-      else state.deadLetters.push(entry);
-    },
     getDeadLetters() {
       return state.deadLetters;
     },
@@ -298,10 +290,10 @@ describe('DepositWatcher', () => {
   // ── Dead Letters ─────────────────────────────────────────────
 
   describe('dead-letter recording', () => {
-    it('records dead-letter entries on the store', () => {
+    it('records dead-letter entries on the store', async () => {
       mockStore = createMockStore();
 
-      mockStore.recordDeadLetter({
+      await mockStore.upsertDeadLetter({
         transactionId: 'tx-fail-1',
         timestamp: '1700000000.000000001',
         error: 'Unexpected format',
@@ -313,15 +305,15 @@ describe('DepositWatcher', () => {
       assert.equal(letters[0].error, 'Unexpected format');
     });
 
-    it('accumulates multiple dead-letter entries', () => {
+    it('accumulates multiple dead-letter entries', async () => {
       mockStore = createMockStore();
 
-      mockStore.recordDeadLetter({
+      await mockStore.upsertDeadLetter({
         transactionId: 'tx-fail-1',
         timestamp: '1700000000.000000001',
         error: 'Error A',
       });
-      mockStore.recordDeadLetter({
+      await mockStore.upsertDeadLetter({
         transactionId: 'tx-fail-2',
         timestamp: '1700000000.000000002',
         error: 'Error B',

@@ -182,7 +182,7 @@ export class DepositWatcher {
           });
           // Add to dead-letter queue for operator review.
           // Capture sender + memo so users can find their stuck deposits.
-          this.store.recordDeadLetter({
+          await this.store.upsertDeadLetter({
             transactionId: tx.transaction_id,
             timestamp: tx.consensus_timestamp,
             error: err instanceof Error ? err.message : String(err),
@@ -275,7 +275,7 @@ export class DepositWatcher {
         memo,
         txId: tx.transaction_id,
       });
-      this.store.recordDeadLetter({
+      await this.store.upsertDeadLetter({
         transactionId: tx.transaction_id,
         timestamp: tx.consensus_timestamp,
         error: `Deposit to inactive/deregistered user ${user.userId}. Funds in agent wallet.`,
@@ -309,7 +309,7 @@ export class DepositWatcher {
       });
       // Funds stay in wallet for manual handling — record so operators
       // can see this without scraping logs.
-      this.store.recordDeadLetter({
+      await this.store.upsertDeadLetter({
         transactionId: tx.transaction_id,
         timestamp: tx.consensus_timestamp,
         error: `Deposit ${credit.amount} ${credit.token} would exceed max balance for user ${user.userId} (current: ${currentAvailable}, max: ${this.config.maxUserBalance}).`,
