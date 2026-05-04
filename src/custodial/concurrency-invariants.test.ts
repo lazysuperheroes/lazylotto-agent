@@ -263,6 +263,71 @@ describe('Cross-Lambda invariant: refund replay protection', () => {
   });
 });
 
+// ── Invariant: withdrawal request idempotency ─────────────────
+
+describe('Cross-Lambda invariant: withdrawal request idempotency', () => {
+  it('withIdempotency: same key called twice runs the body exactly once', async () => {
+    const { withIdempotency } = await import('../lib/idempotency.js');
+
+    let callCount = 0;
+    const body = async () => {
+      callCount++;
+      return { transactionId: 'tx-once', amount: 50 };
+    };
+
+    // First call — fresh execution.
+    const first = await withIdempotency('withdraw:user-1', 'idem-key-A', body);
+    assert.equal(first.kind, 'fresh');
+    if (first.kind !== 'fresh') return; // type narrow
+    assert.equal(first.result.transactionId, 'tx-once');
+    assert.equal(callCount, 1);
+
+    // Second call with the SAME key — must return cached result, not re-execute.
+    const second = await withIdempotency('withdraw:user-1', 'idem-key-A', body);
+    assert.equal(second.kind, 'duplicate');
+    if (second.kind !== 'duplicate') return; // type narrow
+    assert.deepStrictEqual(second.result, first.result);
+    assert.equal(callCount, 1, 'body must NOT have run a second time');
+  });
+
+  it('withIdempotency: failure releases claim so retry can succeed', async () => {
+    const { withIdempotency } = await import('../lib/idempotency.js');
+
+    let attempt = 0;
+    const flaky = async () => {
+      attempt++;
+      if (attempt === 1) throw new Error('transient failure');
+      return { transactionId: 'tx-retry-success' };
+    };
+
+    await assert.rejects(
+      () => withIdempotency('withdraw:user-2', 'idem-retry', flaky),
+      /transient failure/,
+    );
+
+    // Retry with the SAME key should succeed (the failed claim was released).
+    const retry = await withIdempotency('withdraw:user-2', 'idem-retry', flaky);
+    assert.equal(retry.kind, 'fresh');
+  });
+
+  it('withIdempotency: null key opts out of replay protection', async () => {
+    const { withIdempotency } = await import('../lib/idempotency.js');
+
+    let callCount = 0;
+    const body = async () => {
+      callCount++;
+      return callCount;
+    };
+
+    // No key → every call executes.
+    const a = await withIdempotency('withdraw:user-3', null, body);
+    const b = await withIdempotency('withdraw:user-3', null, body);
+    assert.equal(a.kind, 'fresh');
+    assert.equal(b.kind, 'fresh');
+    assert.equal(callCount, 2);
+  });
+});
+
 // ── Invariant 5: creditDeposit acquires the same lock as refund / play / withdraw
 
 describe('Cross-Lambda invariant: creditDeposit lost-update protection', () => {
