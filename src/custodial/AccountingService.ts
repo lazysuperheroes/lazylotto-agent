@@ -16,6 +16,7 @@ import {
   computePoolsRoot,
   truncateError,
 } from './hcs20-v2.js';
+import type { IStore } from './IStore.js';
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -31,6 +32,16 @@ interface AccountingConfig {
   client: Client;
   tick: string;
   topicId?: string;
+  /**
+   * Store for the agentSeq counter. RedisStore backs the counter via
+   * SETNX (seed) + INCR (claim), so two cold-warm Lambdas writing v2
+   * messages for different users cannot emit the same agentSeq.
+   * PersistentStore (CLI mode) uses an in-memory Map. Optional only
+   * for legacy call sites that pre-date 0.3.3 — without a store the
+   * service falls back to a per-process counter and logs a warning;
+   * production code paths always pass one.
+   */
+  store?: IStore;
 }
 
 // ── Service ──────────────────────────────────────────────────
@@ -52,20 +63,35 @@ export class AccountingService {
   private readonly tick: string;
   private topicId: string | null;
   /**
-   * Monotonic per-agent counter stamped on every v2 message. Lets
-   * the audit reader detect dropped messages: if it sees agentSeq
-   * 1, 2, 3, 5, that's a gap. Recovered at startup via one mirror
-   * node scan in initializeAgentSeq() — no Redis dependency.
-   * `-1` means uninitialized; the first message will set it to 0
-   * (after recovery) or to the highest existing seq + 1.
+   * Store backing the cross-Lambda agentSeq counter. When present,
+   * `initializeAgentSeq` recovers the highest-seen value from mirror
+   * node and SETNXs it; `nextAgentSeq` then INCRs the shared counter.
+   * Two warm Lambdas writing v2 messages for different users cannot
+   * emit the same agentSeq.
+   *
+   * When absent (legacy / test paths), falls back to a per-process
+   * counter with a one-time warning. Pre-0.3.3 behaviour.
    */
-  private agentSeq = -1;
-  private agentSeqInitPromise: Promise<void> | null = null;
+  private readonly store: IStore | null;
+  /**
+   * Track which agent account IDs have run their `initializeAgentSeq`
+   * (mirror scan + SETNX seed). Per-process so cold lambdas re-scan
+   * but Redis SETNX makes the seed itself idempotent across instances.
+   */
+  private readonly agentSeqInitPromises = new Map<string, Promise<void>>();
+  /**
+   * Fallback per-process counter used only when no store is provided.
+   * Documented as deprecated; logs a warning on first use so the
+   * caller knows they're in the unsafe-on-serverless path.
+   */
+  private fallbackAgentSeqs = new Map<string, number>();
+  private fallbackWarningLogged = false;
 
   constructor(config: AccountingConfig) {
     this.client = config.client;
     this.tick = config.tick;
     this.topicId = config.topicId ?? null;
+    this.store = config.store ?? null;
   }
 
   // ── Accessors ────────────────────────────────────────────
@@ -372,13 +398,17 @@ export class AccountingService {
    * a duplicate-seq warning. Acceptable degradation.
    */
   async initializeAgentSeq(agentAccountId: string): Promise<void> {
-    if (this.agentSeqInitPromise) return this.agentSeqInitPromise;
-    this.agentSeqInitPromise = (async () => {
+    let p = this.agentSeqInitPromises.get(agentAccountId);
+    if (p) return p;
+    p = (async () => {
+      // No topic configured: seed at -1 so the first nextAgentSeq
+      // INCR returns 0. Matches pre-fix behaviour for empty topics.
       if (!this.topicId) {
-        // No topic = no scan needed; counter stays at 0
-        this.agentSeq = 0;
+        if (this.store) await this.store.seedAgentSeq(agentAccountId, -1);
+        else this.fallbackAgentSeqs.set(agentAccountId, -1);
         return;
       }
+      let highestSeq = -1;
       try {
         const network = process.env.HEDERA_NETWORK ?? 'testnet';
         const mirrorBase =
@@ -390,7 +420,6 @@ export class AccountingService {
         // messages to be at the tail of the topic, so paginate
         // descending. Stop after the first match or after a few
         // pages (~100 messages) to bound the scan.
-        let highestSeq = -1;
         let scanned = 0;
         const maxScan = 500; // hard limit so a huge topic doesn't stall startup
         let nextPath: string | null = `/topics/${this.topicId}/messages?limit=100&order=desc`;
@@ -433,31 +462,61 @@ export class AccountingService {
           // catch any racing writes — then bail out.
           if (highestSeq >= 0 && scanned > 100) break;
         }
-        this.agentSeq = highestSeq + 1;
+        // Seed via SETNX (RedisStore) or in-memory Map (PersistentStore).
+        // Two cold Lambdas can both run this scan concurrently and call
+        // seedAgentSeq with their respective values; whichever wins
+        // SETNX sets the canonical baseline.
+        if (this.store) {
+          await this.store.seedAgentSeq(agentAccountId, highestSeq);
+        } else {
+          this.fallbackAgentSeqs.set(agentAccountId, highestSeq);
+        }
         console.log(
-          `[AccountingService] agentSeq initialized to ${this.agentSeq} ` +
-            `(scanned ${scanned} messages, last seen seq ${highestSeq})`,
+          `[AccountingService] agentSeq initialized for ${agentAccountId}: ` +
+            `next=${highestSeq + 1} (scanned ${scanned} messages, ` +
+            `last seen seq ${highestSeq})`,
         );
       } catch (err) {
         console.warn(
-          `[AccountingService] agentSeq init scan failed; starting at 0. ` +
-            `Reader may flag duplicate seqs. Error: ${err instanceof Error ? err.message : err}`,
+          `[AccountingService] agentSeq init scan failed for ${agentAccountId}; ` +
+            `starting at 0. Reader may flag duplicate seqs. ` +
+            `Error: ${err instanceof Error ? err.message : err}`,
         );
-        this.agentSeq = 0;
+        if (this.store) await this.store.seedAgentSeq(agentAccountId, -1);
+        else this.fallbackAgentSeqs.set(agentAccountId, -1);
       }
     })();
-    return this.agentSeqInitPromise;
+    this.agentSeqInitPromises.set(agentAccountId, p);
+    return p;
   }
 
   /**
-   * Internal helper: claim and increment the next agentSeq value.
-   * Lazily initializes if not already done. Synchronous after init.
+   * Claim the next agentSeq for this agent. Routes through the store
+   * (Redis INCR for cross-Lambda atomicity, in-memory Map for CLI).
+   * Lazily seeds via mirror-node scan on first use per agent.
    */
   private async nextAgentSeq(agentAccountId: string): Promise<number> {
-    if (this.agentSeq < 0) {
+    if (!this.agentSeqInitPromises.has(agentAccountId)) {
       await this.initializeAgentSeq(agentAccountId);
     }
-    return this.agentSeq++;
+    if (this.store) {
+      return await this.store.nextAgentSeq(agentAccountId);
+    }
+    // Fallback path — per-process counter. Production should always
+    // pass a store; this branch exists for legacy callers that haven't
+    // been migrated yet.
+    if (!this.fallbackWarningLogged) {
+      console.warn(
+        '[AccountingService] no store configured — agentSeq is per-process. ' +
+          'On serverless this can produce duplicate sequence numbers across ' +
+          'concurrent Lambdas. Pass `store` to the constructor.',
+      );
+      this.fallbackWarningLogged = true;
+    }
+    const cur = this.fallbackAgentSeqs.get(agentAccountId) ?? -1;
+    const next = cur + 1;
+    this.fallbackAgentSeqs.set(agentAccountId, next);
+    return next;
   }
 
   /**

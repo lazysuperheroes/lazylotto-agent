@@ -628,6 +628,172 @@ Two options:
 
 ---
 
+## Symptom 12 — Duplicate dead-letter rows / recovery double-resolution
+
+**You'll see this from**: the admin dashboard's dead-letter list
+showing the same `transactionId` twice — once unresolved, once
+resolved — after a stuck-prize recovery. Or the recovery action
+running twice for the same user (audit topic shows two
+`prize_recovery` ops with the same prize totals).
+
+### Cause (fixed in 0.3.3)
+
+Two independent layers:
+
+1. `RecordDeadLetter` was an append, not an upsert, despite the
+   comment claiming otherwise. The recovery resolution path wrote
+   `{...original, resolvedAt, resolvedBy}` expecting the original
+   unresolved row to be replaced; instead a second row was added.
+2. `operator_recover_stuck_prizes` had no per-user lock. Two
+   operators (or one operator from two tabs) hitting different
+   Lambdas both passed the `!resolvedAt` filter against their local
+   caches, both attempted recovery on chain.
+
+### Fix
+
+`IStore.upsertDeadLetter` is a genuine upsert keyed by
+`transactionId` (RedisStore: per-id key + LREM-then-RPUSH on the
+index list). The `operator_recover_stuck_prizes` MCP tool wraps the
+execute path in `acquireUserLock(userId, 300)` — the per-user lock
+already used by play and withdraw. See
+`docs/concurrency-invariants.md` invariants #7 + #8.
+
+### Diagnosis
+
+If you see this post-0.3.3:
+
+1. Check the dead-letter row's `kind` field — if it's
+   `prize_transfer_failed`, that came through
+   `MultiUserAgent.upsertDeadLetter`. If it's `deposit_failed` or
+   absent, that came through the deposit watcher (also using
+   `upsertDeadLetter` post-0.3.3).
+2. Run `npx tsx src/scripts/test-v2-reader.ts` against the topic
+   and confirm the agentSeq sequence is contiguous around the
+   recovery — if the agentSeq has gaps for the resolved entries,
+   one of the Lambdas died mid-flight before completing the audit
+   write.
+
+### Reconciliation
+
+The dead-letter ledger duplication is local to Redis (and the
+in-memory cache). Either:
+- Delete one of the duplicate rows manually via a Redis CLI session
+  (`LREM lla:{network}:store:deadletters 1 <full JSON>`).
+- Run a one-shot compaction script that re-reads the dead-letter
+  list, deduplicates by `transactionId`, and rewrites.
+
+The HCS-20 audit topic itself is unaffected — `prize_recovery`
+messages are correctly emitted only when the lock is held.
+
+---
+
+## Symptom 13 — Refund double-execution / 30-day refund block
+
+**You'll see this from**: an HBAR transfer to the same sender
+appearing on chain twice (operator double-clicked admin refund), OR
+a legitimate refund request being rejected with "already refunded"
+when no actual refund happened (chain-tx failed but the marker stuck).
+
+### Cause (fixed in 0.3.3)
+
+Two separate races:
+
+1. **Double-execution** (severity HIGH). The pre-fix replay
+   protection was a GET-then-SET pattern around the on-chain refund:
+   `redis.get(refundLockKey)` → mirror-node lookup → on-chain
+   transfer → `redis.set(refundLockKey, refundTxId)`. Multi-second
+   TOCTOU window covering the irreversible transfer. Two clicks
+   landing on different Lambdas both saw `null`, both refunded.
+2. **30-day block on retry** (severity MEDIUM). The pre-fix marker
+   was only written on success; a chain-tx failure left the marker
+   in place if it had been written, OR no marker if the failure was
+   pre-write — but combined with the new atomic claim there was no
+   release on failure, so a transient mirror-node error left the
+   `'pending'` marker stuck for 30 days.
+
+### Fix
+
+`SET refundLockKey 'pending' NX EX 30d` BEFORE the on-chain
+transfer. On success: overwrite with the actual `refundTxId`. On
+pre-transfer failure: `DEL` the marker so retries are immediate. See
+`src/hedera/refund.ts`, `docs/concurrency-invariants.md` invariants
+#5 + #6.
+
+### Diagnosis
+
+For "rejected legitimate refund":
+
+1. `redis-cli GET lla:{network}:store:refunds:{txId}` — if the
+   value is `'pending'`, a previous attempt failed mid-flight. DEL
+   the key to allow retry: `redis-cli DEL <same key>`.
+2. If the value is a transaction ID, check it on Hashscan — if the
+   refund actually succeeded the operator just needs to confirm.
+
+For "double-refund detected":
+
+1. This shouldn't happen post-0.3.3. If it does, capture both refund
+   transaction IDs and the originating txId.
+2. Check the dApp Vercel logs for two `processRefund` invocations
+   with the same `transactionId` arg — that's the smoking gun.
+3. The on-chain refunds are real. Reconciliation: deduct the duplicate
+   refund amount from the operator's balance via a manual
+   `operator_withdraw_fees` adjustment OR document the loss in the
+   incident postmortem.
+
+---
+
+## Symptom 14 — Duplicate or out-of-order `agentSeq` on the audit topic
+
+**You'll see this from**: the v2 reader's `agentSeqGaps` stat being
+non-empty for sessions that succeeded, OR two HCS-20 v2 messages
+from the same agent carrying the same `agentSeq` value, OR an audit
+walker's "monotonic per-agent counter" assumption failing.
+
+### Cause (fixed in 0.3.3)
+
+`AccountingService` held `agentSeq` as a private numeric field
+seeded once per process via mirror-node scan, then incremented
+locally. Two warm Lambdas writing v2 messages for DIFFERENT users
+(per-user lock doesn't serialise across users) both called
+`nextAgentSeq()` and got the same number from their independent
+counters. The schema doc + CLAUDE.md state "monotonic per-agent
+counter"; the implementation delivered "monotonic per-Lambda-process."
+
+### Fix
+
+`AccountingService.nextAgentSeq` now routes through
+`IStore.nextAgentSeq(agentAccountId)` which does Redis `INCR` on
+`agentSeq:{accountId}` — atomic across all Lambdas. Cold-start
+seeding is a separate `SETNX` from the mirror-scan baseline; two
+cold Lambdas converge to the same canonical seed. See
+`src/custodial/AccountingService.ts`, `docs/concurrency-invariants.md`
+invariants #3 + #4.
+
+### Diagnosis
+
+If you see post-0.3.3:
+
+1. Confirm the v2 reader is actually flagging duplicates (not gaps).
+   `npx tsx src/scripts/test-v2-reader.ts` prints the gap analysis.
+2. Check `redis-cli GET lla:{network}:store:agentSeq:{accountId}` —
+   if it's lower than the highest seq on the topic, the Lambda hasn't
+   re-hydrated the counter. This shouldn't happen with INCR semantics
+   but worth ruling out.
+3. If the duplicates predate 0.3.3 deploy, they're in the audit
+   trail forever (immutable). Document the cutover timestamp and
+   note in any external auditor communication that pre-0.3.3
+   `agentSeq` is best-effort, post-0.3.3 is hard-monotonic.
+
+### Reconciliation
+
+The audit topic is immutable. Duplicate `agentSeq` values pre-fix
+are noise the reader handles with a warning; they don't corrupt
+session state (sessions match by `sessionId`, not `agentSeq`).
+External auditors using `agentSeq` for ordering should use
+`consensus_timestamp` as the tiebreaker, which is always unique.
+
+---
+
 ## When in doubt
 
 1. **Engage the kill switch first** — it's almost never the wrong move

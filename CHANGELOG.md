@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.3] - 2026-05-04
+
+### Fixed
+- **Dead-letter resolution silently double-wrote rows.** `RecordDeadLetter` was an append, not the upsert the recovery path's comment claimed. Two operators (or one operator from two tabs) running `operator_recover_stuck_prizes` concurrently both passed the `!resolvedAt` filter against their independent local caches and both attempted recovery. Fixed by: (a) replacing `recordDeadLetter` with a genuine `upsertDeadLetter` keyed by `transactionId` (RedisStore: per-id key + LREM-then-RPUSH on the index list), (b) wrapping the recovery MCP tool's execute path in `acquireUserLock(userId, 300)` — the same per-user lock used by play and withdraw. See `docs/incident-playbook.md` Symptom 12.
+- **Refund replay protection had a multi-second TOCTOU window.** Pre-fix pattern was GET-then-SET around the on-chain refund: `redis.get(refundLockKey)` → mirror-node lookup → on-chain transfer → `redis.set(refundLockKey, refundTxId)`. Two admin clicks landing on different Lambdas both read null and both executed the refund. Fixed by atomic `SET refundLockKey 'pending' NX EX 30d` BEFORE the transfer; overwrite with `refundTxId` on success; `DEL` on pre-transfer failure so retries are immediate (the pre-fix path also lacked release-on-failure, leaving a 30-day stuck marker on transient errors). See `docs/incident-playbook.md` Symptom 13.
+- **Refund deposit-validation rejected legitimate refunds on cache-cold Lambdas.** `refund.ts:100` called `isTransactionProcessed` (local-cache) instead of consulting Redis. A Lambda whose cache was empty at startup would refuse to refund a recently-credited deposit until its cache hydrated. Now uses `await isDepositCredited` which falls back to Redis `SISMEMBER` and backfills the local cache on hit.
+- **HCS-20 `agentSeq` was per-Lambda-process, not per-agent.** `AccountingService` held `agentSeq` as a private numeric field. Two warm Lambdas writing v2 messages for different users (per-user lock doesn't serialise across users) both called `nextAgentSeq()` from their independent counters and emitted duplicate sequence numbers. Schema doc + CLAUDE.md state "monotonic per-agent counter" — code now matches the spec via Redis `INCR` on `agentSeq:{accountId}`. Cold-start seeding via `SETNX` is idempotent across racing Lambdas. See `docs/incident-playbook.md` Symptom 14.
+- **Operator-level admin operations had no operator lock.** Two concurrent `reconcile` runs (cron + admin click, or two admin clicks) walked the same state and could write conflicting outputs. `migrate-schema` was similarly unprotected. Both now wrap in `acquireOperatorLock` (5 min TTL for reconcile, 10 min for migrate-schema). The cron path skips silently with `{ skipped: true }` on lock contention so a benign race doesn't page an operator.
+
+### Added
+- `IStore.isDepositCredited(txId)` — async, cross-Lambda hard check via Redis `SISMEMBER` on RedisStore. Replaces the unsafe `isTransactionProcessed` for correctness-critical reads. The sync method is retained as a soft cache for the deposit watcher's pre-loop short-circuit.
+- `IStore.upsertDeadLetter(entry)` — async, genuine upsert by `transactionId`. Replaces `recordDeadLetter` (which was incorrectly named — it was an append).
+- `IStore.seedAgentSeq(agentAccountId, value)` + `IStore.nextAgentSeq(agentAccountId)` — cross-Lambda monotonic counter via SETNX (seed) + INCR (claim) on RedisStore; in-memory Map on PersistentStore.
+- `AccountingService` constructor accepts a `store` parameter and routes `agentSeq` through it. Without a store the service falls back to a per-process counter and logs a one-time warning so the unsafe path is visible.
+- **`docs/concurrency-invariants.md`** — canonical doc explaining the bug class, the three primitives (SADD claim, SET NX EX, INCR), and a table of live invariants with their source files. Required reading before adding any new shared-state read to the custodial layer.
+- **`src/custodial/concurrency-invariants.test.ts`** — single home for cross-Lambda concurrency regression tests. Each invariant in the doc has a test here. The pattern: shared mock Redis state, two store instances, `Promise.all([...])`, assert on outcome. Adding a new shared-state read requires a new test here.
+- `docs/incident-playbook.md` Symptoms 12 (dead-letter double-resolution), 13 (refund double-execution / 30-day block), 14 (agentSeq duplicates) with cause / fix / diagnosis / reconciliation sections.
+- CLAUDE.md Multi-User Security Rule #13 documenting the cross-Lambda dedup contract.
+
+### Changed
+- `recordDeadLetter` removed from the `IStore` interface and both implementations. Five callsites migrated to `await upsertDeadLetter`.
+- `IStore.isTransactionProcessed` now explicitly documented as cache-only and unsafe for cross-Lambda dedup; only safe uses are the deposit watcher's pre-loop short-circuit and any path where a downstream atomic check catches the race.
+
+### Tests
+- 25 new tests across this release: 13 in `RedisStore.test.ts` + 6 in `PersistentStore.test.ts` (Group A — IStore primitive semantics) and 7 in the new `concurrency-invariants.test.ts` (Groups D + G — cross-Lambda invariants). 478 → 503 total node tests, 118 vitest unchanged. All green.
+
 ## [0.3.2] - 2026-05-04
 
 ### Fixed

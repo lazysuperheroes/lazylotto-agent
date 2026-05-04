@@ -37,6 +37,7 @@ import { NextResponse } from 'next/server';
 import { getClient } from '../../_lib/hedera';
 import { getStore } from '../../_lib/store';
 import { getAgentContext } from '../../_lib/mcp';
+import { acquireOperatorLock, releaseOperatorLock } from '../../_lib/locks';
 import { withStore } from '../../_lib/withStore';
 import { reconcile, type ReconciliationResult } from '~/custodial/Reconciliation';
 import { isAuthorizedCron, escapeMrkdwn } from './helpers';
@@ -71,6 +72,19 @@ export const GET = withStore(async (request: Request) => {
     );
   }
 
+  // Operator lock so cron + manual operator click don't both walk
+  // state at once. If we can't acquire (another reconcile in flight),
+  // skip this run silently — cron fires every hour, the next run
+  // will pick up. NOT 503 because that would page the operator for a
+  // benign concurrency event.
+  const lockToken = await acquireOperatorLock('reconcile', 300);
+  if (!lockToken) {
+    return NextResponse.json(
+      { skipped: true, reason: 'reconcile already in progress' },
+      { headers: CORS_HEADERS },
+    );
+  }
+
   let result: ReconciliationResult;
   try {
     // Process any pending deposits before reconciling so the ledger
@@ -87,6 +101,7 @@ export const GET = withStore(async (request: Request) => {
 
     result = await reconcile(client, store);
   } catch (err) {
+    await releaseOperatorLock('reconcile', lockToken);
     const message = err instanceof Error ? err.message : String(err);
     console.error('[cron/reconcile] reconcile threw:', err);
     // Reconcile itself failed (mirror node down, Redis unavailable,
@@ -97,6 +112,9 @@ export const GET = withStore(async (request: Request) => {
       { status: 500, headers: CORS_HEADERS },
     );
   }
+  // Release the lock once reconcile + insolvency check are done.
+  // Webhook firing happens after, but doesn't need to hold the lock.
+  await releaseOperatorLock('reconcile', lockToken);
 
   // Webhook on failure (best-effort, never blocks the response).
   // Fire-and-forget so a slow webhook receiver doesn't make the

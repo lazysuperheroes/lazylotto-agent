@@ -26,6 +26,7 @@
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
+import { acquireOperatorLock, releaseOperatorLock } from '../../_lib/locks';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { withStore } from '../../_lib/withStore';
 import { CURRENT_SCHEMA_VERSION } from '~/custodial/types';
@@ -51,6 +52,19 @@ export const POST = withStore(async (request: Request) => {
 
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
+
+    // Operator lock: migrate-schema walks the entire user list and
+    // saves each one. Two concurrent runs would do the same work
+    // twice and could race on saveUser write-through. 10 min TTL —
+    // this is a forward-only migration; partial completion + retry
+    // is safe (saveUser is idempotent on schema version).
+    const lockToken = await acquireOperatorLock('migrate-schema', 600);
+    if (!lockToken) {
+      return NextResponse.json(
+        { error: 'Schema migration already in progress.' },
+        { status: 409, headers: CORS_HEADERS },
+      );
+    }
 
     const store = await getStore();
 
@@ -99,22 +113,26 @@ export const POST = withStore(async (request: Request) => {
       console.warn('[migrate-schema] Failed to re-save operator:', err);
     }
 
-    // Wait for any in-flight write-throughs to settle so the response
-    // reflects the actual persisted state.
-    await store.flush();
+    try {
+      // Wait for any in-flight write-throughs to settle so the response
+      // reflects the actual persisted state.
+      await store.flush();
 
-    return NextResponse.json(
-      {
-        currentVersion: CURRENT_SCHEMA_VERSION,
-        usersTotal: usersBefore.length,
-        usersAtCurrentBefore,
-        usersBehindBefore,
-        usersMigrated,
-        operatorAtCurrentBefore,
-        operatorMigrated,
-      },
-      { headers: CORS_HEADERS },
-    );
+      return NextResponse.json(
+        {
+          currentVersion: CURRENT_SCHEMA_VERSION,
+          usersTotal: usersBefore.length,
+          usersAtCurrentBefore,
+          usersBehindBefore,
+          usersMigrated,
+          operatorAtCurrentBefore,
+          operatorMigrated,
+        },
+        { headers: CORS_HEADERS },
+      );
+    } finally {
+      await releaseOperatorLock('migrate-schema', lockToken);
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(

@@ -231,6 +231,11 @@ export class MultiUserAgent {
       client: this.client,
       tick: this.config.hcs20Tick,
       topicId: this.config.hcs20TopicId ?? undefined,
+      // 0.3.3: route agentSeq through the store so two warm Lambdas
+      // writing v2 messages for different users cannot emit the same
+      // sequence number. RedisStore uses SETNX + INCR; PersistentStore
+      // uses an in-memory Map (single-process).
+      store: this.store,
     });
 
     this.gasTracker = new GasTracker(this.store);

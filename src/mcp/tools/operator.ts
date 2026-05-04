@@ -11,7 +11,12 @@ import { z } from 'zod';
 
 import type { MultiUserAgent } from '../../custodial/MultiUserAgent.js';
 import { withChecksum } from '../../utils/checksum.js';
-import { acquireUserLock, releaseUserLock } from '../../lib/locks.js';
+import {
+  acquireUserLock,
+  releaseUserLock,
+  acquireOperatorLock,
+  releaseOperatorLock,
+} from '../../lib/locks.js';
 import type { ServerContext, AuthResult } from './types.js';
 
 // ── Registration ────────────────────────────────────────────────
@@ -94,11 +99,26 @@ export function registerOperatorTools(
       const authResult = await requireAuth(auth_token);
       const denied = requireOperator(authResult);
       if (denied) return denied;
+
+      // Operator-level lock: reconcile walks the entire user list and
+      // can take >60s on a populated store. Two concurrent reconciles
+      // (cron + admin click, or two admin clicks) walking the same
+      // state could write conflicting outputs. 5 min TTL is enough
+      // for the walk + mirror-node calls; lock auto-releases if the
+      // Lambda dies mid-flight.
+      const lockToken = await acquireOperatorLock('reconcile', 300);
+      if (!lockToken) {
+        return errorResult(
+          'Reconcile already in progress. Try again in a few minutes.',
+        );
+      }
       try {
         const result = await multiUser.reconcile();
         return json(result);
       } catch (e) {
         return errorResult(`Reconciliation failed: ${errorMsg(e)}`);
+      } finally {
+        await releaseOperatorLock('reconcile', lockToken);
       }
     }
   );
