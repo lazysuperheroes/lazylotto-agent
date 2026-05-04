@@ -123,6 +123,20 @@ export interface IStore {
    */
   releaseTransactionClaim(txId: string): Promise<void>;
 
+  /**
+   * Hard cross-Lambda check: was this txId credited as a user deposit?
+   * Unlike `isTransactionProcessed` (which reads only the in-process
+   * cache), this consults Redis directly via `SISMEMBER` so a Lambda
+   * with a stale local cache still gets the correct answer. Use this
+   * in any path where correctness across Lambda instances matters
+   * (e.g. refund eligibility check). The local-cache `isTransactionProcessed`
+   * remains useful as a soft optimisation (the deposit watcher's
+   * pre-loop short-circuit) where a false-negative just costs an extra
+   * trip through the credit path that's then short-circuited by
+   * `tryClaimTransaction`.
+   */
+  isDepositCredited(txId: string): Promise<boolean>;
+
   recordDeposit(record: DepositRecord): void;
   getDepositsForUser(userId: string): DepositRecord[];
 
@@ -134,7 +148,27 @@ export interface IStore {
   recordWithdrawal(record: WithdrawalRecord): void;
 
   // ── Dead letters ───────────────────────────────────────────────
+  /**
+   * Upsert a dead-letter entry keyed by `transactionId`. If an entry
+   * with the same `transactionId` already exists it is REPLACED, not
+   * appended — so the resolution path can write `{ ...original,
+   * resolvedAt, resolvedBy, resolutionTxId }` and have the original
+   * unresolved row vanish atomically.
+   *
+   * Async because the Redis implementation needs an awaited
+   * pipeline (per-id SET + index LREM-then-RPUSH) so the index list
+   * stays consistent after replacement.
+   */
+  upsertDeadLetter(entry: DeadLetterEntry): Promise<void>;
+
+  /**
+   * @deprecated Use `upsertDeadLetter` instead. Retained as a
+   * fire-and-forget shim during the migration window so callsites
+   * that haven't been updated still compile. Removed in the same
+   * commit that migrates the last caller.
+   */
   recordDeadLetter(entry: DeadLetterEntry): void;
+
   getDeadLetters(): DeadLetterEntry[];
 
   // ── Gas ────────────────────────────────────────────────────────
@@ -145,6 +179,34 @@ export interface IStore {
   // ── Watermark ──────────────────────────────────────────────────
   getWatermark(): string;
   setWatermark(timestamp: string): void;
+
+  // ── HCS-20 v2 agentSeq counter ─────────────────────────────────
+  /**
+   * Seed the per-agent monotonic sequence counter, idempotently.
+   * Backed by Redis `SETNX` on `RedisStore` so two cold Lambdas can
+   * both run their mirror-node scans concurrently and call this with
+   * (potentially different) seeded values; whichever Lambda wins SETNX
+   * sets the canonical baseline, and both then `nextAgentSeq` against
+   * the shared counter via INCR.
+   *
+   * `value` is the LAST-SEEN agentSeq from the mirror scan; the next
+   * `nextAgentSeq` call returns `value + 1`. Pass `-1` for an empty
+   * topic so the first emitted seq is `0`.
+   */
+  seedAgentSeq(agentAccountId: string, value: number): Promise<void>;
+
+  /**
+   * Atomically increment the per-agent counter and return the new
+   * value (post-increment). Each call returns a unique sequence
+   * number across ALL store instances. RedisStore implements via
+   * `INCR`; PersistentStore via in-memory `Map` (single-process).
+   *
+   * Caller MUST have already invoked `seedAgentSeq` for this
+   * `agentAccountId` (or relied on `AccountingService.initializeAgentSeq`
+   * to do so), otherwise the counter starts at 1 instead of the
+   * mirror-recovered baseline + 1.
+   */
+  nextAgentSeq(agentAccountId: string): Promise<number>;
 
   // ── Rotation ───────────────────────────────────────────────────
   rotateRecords(): Promise<void>;

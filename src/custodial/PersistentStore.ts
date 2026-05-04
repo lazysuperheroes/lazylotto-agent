@@ -11,7 +11,7 @@ import type {
   GasRecord,
 } from './types.js';
 import { emptyOperatorState, UserNotFoundError, CURRENT_SCHEMA_VERSION } from './types.js';
-import type { IStore } from './IStore.js';
+import type { IStore, DeadLetterEntry } from './IStore.js';
 
 // ── File names ───────────────────────────────────────────────────
 
@@ -69,7 +69,7 @@ export class PersistentStore implements IStore {
   private plays: PlaySessionResult[] = [];
   private withdrawals: WithdrawalRecord[] = [];
   private gasLog: GasRecord[] = [];
-  private deadLetters: { transactionId: string; timestamp: string; error: string }[] = [];
+  private deadLetters: DeadLetterEntry[] = [];
   private watermarkTimestamp = '';
 
   // Dirty tracking
@@ -398,6 +398,15 @@ export class PersistentStore implements IStore {
     this.processedTxIds.delete(txId);
   }
 
+  /**
+   * Single-process: in-memory Set IS the source of truth, so a hit is
+   * the canonical answer. (RedisStore needs to consult Redis on a
+   * local miss; we don't.)
+   */
+  async isDepositCredited(txId: string): Promise<boolean> {
+    return this.processedTxIds.has(txId);
+  }
+
   recordDeposit(record: DepositRecord): void {
     record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.processedTxIds.add(record.transactionId);
@@ -434,14 +443,37 @@ export class PersistentStore implements IStore {
 
   // ── Dead Letters ─────────────────────────────────────────────
 
-  recordDeadLetter(entry: { transactionId: string; timestamp: string; error: string }): void {
+  /**
+   * Genuine upsert keyed by `transactionId`. Single-process so the
+   * in-memory array is the source of truth. Replaces an existing
+   * entry with the same id (so resolution writes
+   * `{...original, resolvedAt, ...}` and the unresolved row vanishes).
+   */
+  async upsertDeadLetter(entry: DeadLetterEntry): Promise<void> {
     if (!this.deadLetters) this.deadLetters = [];
-    this.deadLetters.push(entry);
+    const idx = this.deadLetters.findIndex(
+      (e) => e.transactionId === entry.transactionId,
+    );
+    if (idx >= 0) {
+      this.deadLetters[idx] = entry;
+    } else {
+      this.deadLetters.push(entry);
+    }
     this.dirtyDeadLetters = true;
     this.scheduleDirtyFlush();
   }
 
-  getDeadLetters(): { transactionId: string; timestamp: string; error: string }[] {
+  /**
+   * @deprecated Synchronous shim that calls upsertDeadLetter on a
+   * promise we deliberately don't await. Kept during the migration
+   * window so existing fire-and-forget callsites compile. Removed in
+   * the same commit that migrates the last caller.
+   */
+  recordDeadLetter(entry: DeadLetterEntry): void {
+    void this.upsertDeadLetter(entry);
+  }
+
+  getDeadLetters(): DeadLetterEntry[] {
     return this.deadLetters ?? [];
   }
 
@@ -472,6 +504,29 @@ export class PersistentStore implements IStore {
     this.watermarkTimestamp = timestamp;
     this.dirtyWatermark = true;
     this.scheduleDirtyFlush();
+  }
+
+  // ── HCS-20 v2 agentSeq counter ───────────────────────────────
+  //
+  // Single-process: in-memory Map IS the source of truth. Not
+  // persisted to disk — recomputed from mirror node on each process
+  // boot via `AccountingService.initializeAgentSeq` (same behaviour
+  // as the pre-fix in-process counter).
+
+  private agentSeqs = new Map<string, number>();
+
+  /** SETNX semantics: only seed if not already set. */
+  async seedAgentSeq(agentAccountId: string, value: number): Promise<void> {
+    if (!this.agentSeqs.has(agentAccountId)) {
+      this.agentSeqs.set(agentAccountId, value);
+    }
+  }
+
+  /** Atomic increment + return new value. Single-process is naturally atomic. */
+  async nextAgentSeq(agentAccountId: string): Promise<number> {
+    const next = (this.agentSeqs.get(agentAccountId) ?? -1) + 1;
+    this.agentSeqs.set(agentAccountId, next);
+    return next;
   }
 
   // ── Private helpers ──────────────────────────────────────────

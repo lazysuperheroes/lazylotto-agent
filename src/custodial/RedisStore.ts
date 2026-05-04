@@ -522,6 +522,22 @@ export class RedisStore implements IStore {
     await this.redis.srem(k('deposits', 'processed'), txId);
   }
 
+  /**
+   * Hard cross-Lambda check via Redis `SISMEMBER`. Local fast-path: if
+   * we already know it locally, return true without hitting Redis. On
+   * a local miss we MUST consult Redis — another Lambda may have
+   * claimed/recorded the deposit and our cache is stale.
+   */
+  async isDepositCredited(txId: string): Promise<boolean> {
+    if (this.processedTxIds.has(txId)) return true;
+    const present = await this.redis.sismember(k('deposits', 'processed'), txId);
+    if (present === 1) {
+      this.processedTxIds.add(txId); // backfill local cache
+      return true;
+    }
+    return false;
+  }
+
   recordDeposit(record: DepositRecord): void {
     record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.processedTxIds.add(record.transactionId);
@@ -568,9 +584,79 @@ export class RedisStore implements IStore {
 
   // ── Dead Letters ─────────────────────────────────────────────
 
+  /**
+   * Upsert a dead-letter entry keyed by `transactionId`. Replaces an
+   * existing entry with the same id (so the resolution path can write
+   * `{...original, resolvedAt, resolvedBy, resolutionTxId}` and have
+   * the unresolved row vanish).
+   *
+   * Storage:
+   *   - `deadletters` LIST holds JSON entries in insertion order
+   *     (unchanged on-the-wire from the previous shape, so `load()`
+   *     keeps working).
+   *   - `deadletters:by_id:{txId}` per-id key holds the latest JSON
+   *     for fast LREM-by-content on subsequent upserts.
+   *
+   * Concurrency: cross-Lambda concurrent upserts for the SAME txId
+   * are NOT atomic without an external lock — both could race the
+   * GET-then-LREM-then-RPUSH and produce a duplicated entry. The
+   * resolution call site (`recoverStuckPrizesForUser`) is gated by a
+   * per-user Redis lock, which is the architectural answer. New-entry
+   * writes (deposit watcher failure paths) don't conflict on txId
+   * because deposit dedup via `tryClaimTransaction` upstream
+   * guarantees only one Lambda writes a given dead-letter.
+   */
+  async upsertDeadLetter(entry: DeadLetterEntry): Promise<void> {
+    // In-memory: replace by transactionId, otherwise append
+    const idx = this.deadLetters.findIndex(
+      (e) => e.transactionId === entry.transactionId,
+    );
+    if (idx >= 0) {
+      this.deadLetters[idx] = entry;
+    } else {
+      this.deadLetters.push(entry);
+    }
+
+    const newJson = JSON.stringify(entry);
+    const byIdKey = k('deadletters', 'by_id', entry.transactionId);
+
+    // Lookup the previous JSON via the by_id pointer, falling back to a
+    // LIST scan for the migration window (entries written before
+    // upsertDeadLetter shipped have no by_id key yet).
+    let oldJson: string | null = await this.redis.get<string>(byIdKey);
+    if (!oldJson) {
+      const all = await this.redis.lrange(k('deadletters'), 0, -1);
+      for (const raw of all) {
+        try {
+          const parsed = (typeof raw === 'string' ? JSON.parse(raw) : raw) as DeadLetterEntry;
+          if (parsed.transactionId === entry.transactionId) {
+            oldJson = typeof raw === 'string' ? raw : JSON.stringify(raw);
+            break;
+          }
+        } catch {
+          /* skip malformed row */
+        }
+      }
+    }
+
+    const pipeline = this.redis.pipeline();
+    if (oldJson) {
+      // LREM count=1 removes the first matching element
+      pipeline.lrem(k('deadletters'), 1, oldJson);
+    }
+    pipeline.rpush(k('deadletters'), newJson);
+    pipeline.set(byIdKey, newJson);
+    await pipeline.exec();
+  }
+
+  /**
+   * @deprecated Fire-and-forget shim that delegates to upsertDeadLetter.
+   * Kept temporarily so existing callers compile during the migration
+   * window — Group B removes this and migrates every caller to await
+   * upsertDeadLetter.
+   */
   recordDeadLetter(entry: DeadLetterEntry): void {
-    this.deadLetters.push(entry);
-    this.fire(this.redis.rpush(k('deadletters'), JSON.stringify(entry)));
+    this.fire(this.upsertDeadLetter(entry));
   }
 
   getDeadLetters(): DeadLetterEntry[] {
@@ -608,6 +694,29 @@ export class RedisStore implements IStore {
   setWatermark(timestamp: string): void {
     this.watermarkTimestamp = timestamp;
     this.fire(this.redis.set(k('watermark'), timestamp));
+  }
+
+  // ── HCS-20 v2 agentSeq counter ───────────────────────────────
+
+  /**
+   * Idempotent SETNX seed. Two cold Lambdas can both run the mirror
+   * scan and call this concurrently with their respective values; the
+   * first SETNX wins, the loser's value is discarded. Both Lambdas
+   * then INCR against the shared canonical counter.
+   */
+  async seedAgentSeq(agentAccountId: string, value: number): Promise<void> {
+    // @upstash/redis exposes setnx as `set` with the `nx: true` option.
+    await this.redis.set(k('agentSeq', agentAccountId), value, { nx: true });
+  }
+
+  /**
+   * Atomic INCR on the per-agent counter. Returns the new
+   * (post-increment) value. Each call returns a unique number across
+   * all Lambdas sharing this Redis cluster — closes the cross-Lambda
+   * duplicate-agentSeq race that the previous in-process counter had.
+   */
+  async nextAgentSeq(agentAccountId: string): Promise<number> {
+    return await this.redis.incr(k('agentSeq', agentAccountId));
   }
 
   // ── Rotation ─────────────────────────────────────────────────

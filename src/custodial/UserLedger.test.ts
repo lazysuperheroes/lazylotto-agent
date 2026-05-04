@@ -96,6 +96,9 @@ function createMockStore(initial?: Partial<MockStoreData>): PersistentStore {
     async releaseTransactionClaim(txId: string): Promise<void> {
       processedTxIds.delete(txId);
     },
+    async isDepositCredited(txId: string): Promise<boolean> {
+      return processedTxIds.has(txId);
+    },
     recordDeposit(record: DepositRecord): void {
       processedTxIds.add(record.transactionId);
       deposits.push(record);

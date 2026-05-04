@@ -202,6 +202,107 @@ describe('PersistentStore', () => {
     await store.close();
   });
 
+  it('isDepositCredited reflects local processed set', async () => {
+    dir = makeTempDir();
+    const store = new PersistentStore(dir);
+    await store.load();
+
+    assert.equal(await store.isDepositCredited('tx-credited'), false);
+    await store.tryClaimTransaction('tx-credited');
+    assert.equal(await store.isDepositCredited('tx-credited'), true);
+
+    await store.close();
+  });
+
+  it('seedAgentSeq + nextAgentSeq produces last_seen → +1, +2 sequence', async () => {
+    dir = makeTempDir();
+    const store = new PersistentStore(dir);
+    await store.load();
+
+    await store.seedAgentSeq('0.0.A', 41);
+    assert.equal(await store.nextAgentSeq('0.0.A'), 42);
+    assert.equal(await store.nextAgentSeq('0.0.A'), 43);
+
+    await store.close();
+  });
+
+  it('seedAgentSeq is idempotent — second seed does not overwrite', async () => {
+    dir = makeTempDir();
+    const store = new PersistentStore(dir);
+    await store.load();
+
+    await store.seedAgentSeq('0.0.A', 100);
+    await store.seedAgentSeq('0.0.A', 50);
+    assert.equal(await store.nextAgentSeq('0.0.A'), 101);
+
+    await store.close();
+  });
+
+  it('agentSeq counters per agentAccountId are independent', async () => {
+    dir = makeTempDir();
+    const store = new PersistentStore(dir);
+    await store.load();
+
+    await store.seedAgentSeq('0.0.X', -1);
+    await store.seedAgentSeq('0.0.Y', 99);
+
+    assert.equal(await store.nextAgentSeq('0.0.X'), 0);
+    assert.equal(await store.nextAgentSeq('0.0.Y'), 100);
+    assert.equal(await store.nextAgentSeq('0.0.X'), 1);
+
+    await store.close();
+  });
+
+  it('upsertDeadLetter replaces existing entry by transactionId', async () => {
+    dir = makeTempDir();
+    const store = new PersistentStore(dir);
+    await store.load();
+
+    await store.upsertDeadLetter({
+      transactionId: 'tx-1',
+      timestamp: '2026-01-01T00:00:00Z',
+      error: 'original',
+    });
+    await store.upsertDeadLetter({
+      transactionId: 'tx-1',
+      timestamp: '2026-01-01T00:00:00Z',
+      error: 'original',
+      resolvedAt: '2026-01-02T00:00:00Z',
+    });
+
+    const list = store.getDeadLetters();
+    assert.equal(list.length, 1, 'no duplicate row');
+    assert.equal(list[0]!.resolvedAt, '2026-01-02T00:00:00Z');
+
+    await store.close();
+  });
+
+  it('upsertDeadLetter appends distinct entries', async () => {
+    dir = makeTempDir();
+    const store = new PersistentStore(dir);
+    await store.load();
+
+    await store.upsertDeadLetter({
+      transactionId: 'tx-1',
+      timestamp: '2026-01-01T00:00:00Z',
+      error: 'first',
+    });
+    await store.upsertDeadLetter({
+      transactionId: 'tx-2',
+      timestamp: '2026-01-01T00:00:01Z',
+      error: 'second',
+    });
+
+    const list = store.getDeadLetters();
+    assert.equal(list.length, 2);
+    assert.deepStrictEqual(
+      list.map((e) => e.transactionId),
+      ['tx-1', 'tx-2'],
+    );
+
+    await store.close();
+  });
+
   it('tracks processed transaction IDs', async () => {
     dir = makeTempDir();
     const store = new PersistentStore(dir);
