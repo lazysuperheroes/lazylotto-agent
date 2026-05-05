@@ -10,6 +10,7 @@ import type {
 import { emptyBalances } from './types.js';
 import type { Strategy } from '../config/strategy.js';
 import { loadStrategy as loadSharedStrategy } from '../config/loader.js';
+import { enforceTopicMessageSizeLimit } from './hcs20-v2.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 
 // ── Constants ──────────────────────────────────────────────────
@@ -208,6 +209,15 @@ export class NegotiationHandler {
       data: JSON.stringify(msg),
       connection_topic_id: connectionTopicId,
     });
+
+    // 0.3.4 hardening: enforce the 1024-byte cap that
+    // `AccountingService.submitMessage` and `submitV2Message`
+    // already enforce. Pre-fix this path could silently fail at the
+    // HCS layer for a long error string or strategy-snapshot diff.
+    // Surface the failure so the caller's swallowed-warn at least
+    // names a concrete cap rather than an opaque SDK error.
+    const msgKind = (msg as { type?: string; op?: string }).type ?? (msg as { op?: string }).op ?? 'unknown';
+    enforceTopicMessageSizeLimit(message, `hcs-10 negotiation ${msgKind}`);
 
     await new TopicMessageSubmitTransaction()
       .setTopicId(TopicId.fromString(connectionTopicId))

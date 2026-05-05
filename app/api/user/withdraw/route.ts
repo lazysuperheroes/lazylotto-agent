@@ -58,9 +58,22 @@ export const POST = withStore(async (request: Request) => {
       token?: string;
     };
 
-    if (typeof body.amount !== 'number' || body.amount <= 0) {
+    // 0.3.4 hardening: explicit Number.isFinite + max bound. Pre-fix
+    // the check `typeof body.amount !== 'number' || body.amount <= 0`
+    // accepted NaN (typeof number, NaN <= 0 === false) and Infinity
+    // (passes both). Both reached `transferHbar(client, ..., NaN)` /
+    // `Hbar(NaN)` which throws inside the SDK — reliable DoS vector
+    // that bypasses the velocity cap (cap math relies on isFinite).
+    // Cap also at 1e9 to reject anything that smells like an
+    // overflow / typo / scale-error.
+    if (
+      typeof body.amount !== 'number' ||
+      !Number.isFinite(body.amount) ||
+      body.amount <= 0 ||
+      body.amount > 1e9
+    ) {
       return NextResponse.json(
-        { error: 'Invalid amount — must be a positive number' },
+        { error: 'Invalid amount — must be a finite positive number under 1e9' },
         { status: 400, headers: CORS_HEADERS },
       );
     }

@@ -225,7 +225,18 @@ export class DepositWatcher {
    * Process a single mirror node transaction. Returns true if a
    * deposit was successfully credited, false if skipped.
    */
-  private async processTransaction(tx: MirrorTransaction): Promise<boolean> {
+  /**
+   * Process a single mirror node transaction. Returns true if a
+   * deposit was successfully credited, false if skipped.
+   *
+   * 0.3.4: changed to `public` so the admin replay-deposit route
+   * (`POST /api/admin/replay-deposit`) can fetch a tx from mirror by
+   * id and re-run it through the same flow that the live poll uses.
+   * Bypasses the watermark — designed for operator-driven recovery
+   * of dead-lettered deposits whose original errors are now resolved
+   * (e.g. token registered after the deposit landed).
+   */
+  async processTransaction(tx: MirrorTransaction): Promise<boolean> {
     // Only process successful transactions
     if (tx.result !== 'SUCCESS') {
       this.stats.skippedNonDeposit++;

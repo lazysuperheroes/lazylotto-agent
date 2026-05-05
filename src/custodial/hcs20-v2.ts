@@ -361,3 +361,36 @@ export function truncateError(message: string, maxBytes = 200): string {
  * agent's actual play time.
  */
 export const SESSION_INFLIGHT_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Hedera Consensus Service per-message size limit. The protocol is
+ * 1024 bytes; we hard-fail anything bigger so a truncated audit
+ * message can never be silently emitted.
+ */
+export const HCS_MESSAGE_BYTE_LIMIT = 1024;
+
+/**
+ * 0.3.4 hardening: single source of truth for the 1024-byte topic
+ * message cap. Pre-fix the cap was duplicated inline at
+ * `AccountingService.submitMessage` (v1) and `submitV2Message` (v2)
+ * but missing entirely from `NegotiationHandler.sendToUser`. The
+ * security audit's debt-hunter found the gap (finding #14) — a
+ * negotiation message with a long error string or strategy diff
+ * could silently fail at the HCS layer. Funnelling all three
+ * submitters through this helper gives the cap one home.
+ *
+ * Throws if the message exceeds 1024 bytes. Caller chooses whether
+ * to swallow the throw (negotiation paths are best-effort) or
+ * propagate (audit paths are load-bearing).
+ */
+export function enforceTopicMessageSizeLimit(
+  message: string,
+  context: string,
+): void {
+  const bytes = Buffer.byteLength(message, 'utf-8');
+  if (bytes > HCS_MESSAGE_BYTE_LIMIT) {
+    throw new Error(
+      `[HCS] message exceeds ${HCS_MESSAGE_BYTE_LIMIT}-byte cap (${bytes} bytes): ${context}`,
+    );
+  }
+}

@@ -15,6 +15,7 @@ import {
   type PrizeEntry,
   computePoolsRoot,
   truncateError,
+  enforceTopicMessageSizeLimit,
 } from './hcs20-v2.js';
 import type { IStore } from './IStore.js';
 
@@ -86,6 +87,13 @@ export class AccountingService {
    */
   private fallbackAgentSeqs = new Map<string, number>();
   private fallbackWarningLogged = false;
+  /**
+   * 0.3.4 hardening: agents whose mirror-node seed scan failed after
+   * retries are marked here. `nextAgentSeq` throws when a seed-failed
+   * agent attempts a write, so `playForUser` dead-letters the session
+   * via `audit_trail_orphaned` instead of emitting a duplicate seq.
+   */
+  private agentSeqSeedFailed = new Set<string>();
 
   constructor(config: AccountingConfig) {
     this.client = config.client;
@@ -408,64 +416,81 @@ export class AccountingService {
         else this.fallbackAgentSeqs.set(agentAccountId, -1);
         return;
       }
+      // 0.3.4 hardening: retry the mirror scan up to 3 times with
+      // exponential backoff before falling back. Pre-fix a single
+      // transient mirror-node hiccup seeded at -1, so the next INCR
+      // returned 0 — duplicating any existing agentSeq on a topic
+      // that may have months of valid data. The reader rejects the
+      // duplicate session as `corrupt`. Now we retry; only on terminal
+      // failure do we mark the seed as failed and let `nextAgentSeq`
+      // throw so `playForUser`'s v2 catch dead-letters the session
+      // (audit_trail_orphaned) instead of writing a duplicate.
+      const SCAN_RETRY_DELAYS_MS = [200, 1000, 3000];
+      let lastError: unknown = undefined;
       let highestSeq = -1;
-      try {
-        const network = process.env.HEDERA_NETWORK ?? 'testnet';
-        const mirrorBase =
-          network === 'mainnet'
-            ? 'https://mainnet.mirrornode.hedera.com/api/v1'
-            : 'https://testnet.mirrornode.hedera.com/api/v1';
-
-        // Walk backwards from newest. We expect the agent's recent
-        // messages to be at the tail of the topic, so paginate
-        // descending. Stop after the first match or after a few
-        // pages (~100 messages) to bound the scan.
-        let scanned = 0;
-        const maxScan = 500; // hard limit so a huge topic doesn't stall startup
-        let nextPath: string | null = `/topics/${this.topicId}/messages?limit=100&order=desc`;
-        while (nextPath && scanned < maxScan) {
-          const url = nextPath.startsWith('/api/v1')
-            ? `${mirrorBase.replace(/\/api\/v1$/, '')}${nextPath}`
-            : `${mirrorBase}${nextPath}`;
-          const res = await fetch(url);
-          if (!res.ok) throw new Error(`Mirror node ${res.status}`);
-          const data = (await res.json()) as {
-            messages?: { message: string }[];
-            links?: { next?: string };
-          };
-          for (const m of data.messages ?? []) {
-            scanned++;
-            try {
-              const payload = JSON.parse(
-                Buffer.from(m.message, 'base64').toString('utf-8'),
-              ) as Record<string, unknown>;
-              // Match v2 messages from this agent. Session lifecycle
-              // messages carry `agent`; pool/refund/recovery don't,
-              // so we also check the `from` field where present.
-              const isFromUs =
-                payload.agent === agentAccountId ||
-                payload.from === agentAccountId ||
-                payload.performedBy === agentAccountId;
-              if (
-                isFromUs &&
-                typeof payload.agentSeq === 'number' &&
-                payload.agentSeq > highestSeq
-              ) {
-                highestSeq = payload.agentSeq;
-              }
-            } catch {
-              // Skip messages we can't decode
-            }
-          }
-          nextPath = data.links?.next ?? null;
-          // Once we've found a match, one more page is enough to
-          // catch any racing writes — then bail out.
-          if (highestSeq >= 0 && scanned > 100) break;
+      let succeeded = false;
+      for (let attempt = 0; attempt <= SCAN_RETRY_DELAYS_MS.length; attempt++) {
+        if (attempt > 0) {
+          await new Promise((r) => setTimeout(r, SCAN_RETRY_DELAYS_MS[attempt - 1]!));
+          console.warn(
+            `[AccountingService] agentSeq scan retry ${attempt}/${SCAN_RETRY_DELAYS_MS.length}`,
+          );
         }
-        // Seed via SETNX (RedisStore) or in-memory Map (PersistentStore).
-        // Two cold Lambdas can both run this scan concurrently and call
-        // seedAgentSeq with their respective values; whichever wins
-        // SETNX sets the canonical baseline.
+        try {
+          const network = process.env.HEDERA_NETWORK ?? 'testnet';
+          const mirrorBase =
+            network === 'mainnet'
+              ? 'https://mainnet.mirrornode.hedera.com/api/v1'
+              : 'https://testnet.mirrornode.hedera.com/api/v1';
+
+          let scanned = 0;
+          const maxScan = 500;
+          let attemptHighest = -1;
+          let nextPath: string | null = `/topics/${this.topicId}/messages?limit=100&order=desc`;
+          while (nextPath && scanned < maxScan) {
+            const url = nextPath.startsWith('/api/v1')
+              ? `${mirrorBase.replace(/\/api\/v1$/, '')}${nextPath}`
+              : `${mirrorBase}${nextPath}`;
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`Mirror node ${res.status}`);
+            const data = (await res.json()) as {
+              messages?: { message: string }[];
+              links?: { next?: string };
+            };
+            for (const m of data.messages ?? []) {
+              scanned++;
+              try {
+                const payload = JSON.parse(
+                  Buffer.from(m.message, 'base64').toString('utf-8'),
+                ) as Record<string, unknown>;
+                const isFromUs =
+                  payload.agent === agentAccountId ||
+                  payload.from === agentAccountId ||
+                  payload.performedBy === agentAccountId;
+                if (
+                  isFromUs &&
+                  typeof payload.agentSeq === 'number' &&
+                  payload.agentSeq > attemptHighest
+                ) {
+                  attemptHighest = payload.agentSeq;
+                }
+              } catch {
+                // Skip messages we can't decode
+              }
+            }
+            nextPath = data.links?.next ?? null;
+            if (attemptHighest >= 0 && scanned > 100) break;
+          }
+          highestSeq = attemptHighest;
+          succeeded = true;
+          break;
+        } catch (err) {
+          lastError = err;
+          // Continue to next retry attempt; if exhausted, drop out.
+        }
+      }
+
+      if (succeeded) {
         if (this.store) {
           await this.store.seedAgentSeq(agentAccountId, highestSeq);
         } else {
@@ -473,17 +498,20 @@ export class AccountingService {
         }
         console.log(
           `[AccountingService] agentSeq initialized for ${agentAccountId}: ` +
-            `next=${highestSeq + 1} (scanned ${scanned} messages, ` +
-            `last seen seq ${highestSeq})`,
+            `next=${highestSeq + 1} (last seen seq ${highestSeq})`,
         );
-      } catch (err) {
-        console.warn(
-          `[AccountingService] agentSeq init scan failed for ${agentAccountId}; ` +
-            `starting at 0. Reader may flag duplicate seqs. ` +
-            `Error: ${err instanceof Error ? err.message : err}`,
+      } else {
+        // Terminal failure after all retries. Mark this agent as
+        // seed-failed so any v2 write throws AGENT_SEQ_SEED_FAILED
+        // and `playForUser` dead-letters via the new
+        // audit_trail_orphaned path rather than emitting a duplicate
+        // sequence number into the audit topic.
+        console.error(
+          `[AccountingService] agentSeq init scan FAILED after ${SCAN_RETRY_DELAYS_MS.length + 1} attempts ` +
+            `for ${agentAccountId}. Marking as seed-failed; v2 writes for this agent will refuse. ` +
+            `Last error: ${lastError instanceof Error ? lastError.message : lastError}`,
         );
-        if (this.store) await this.store.seedAgentSeq(agentAccountId, -1);
-        else this.fallbackAgentSeqs.set(agentAccountId, -1);
+        this.agentSeqSeedFailed.add(agentAccountId);
       }
     })();
     this.agentSeqInitPromises.set(agentAccountId, p);
@@ -498,6 +526,17 @@ export class AccountingService {
   private async nextAgentSeq(agentAccountId: string): Promise<number> {
     if (!this.agentSeqInitPromises.has(agentAccountId)) {
       await this.initializeAgentSeq(agentAccountId);
+    }
+    // 0.3.4: refuse v2 writes for any agent whose seed scan failed
+    // after retries. Caller (`playForUser`'s v2 sequence) catches
+    // this and dead-letters the session via `audit_trail_orphaned`
+    // instead of emitting a duplicate sequence number.
+    if (this.agentSeqSeedFailed.has(agentAccountId)) {
+      throw new Error(
+        `AGENT_SEQ_SEED_FAILED: cannot emit v2 message for ${agentAccountId} — ` +
+        `mirror-node seed scan failed after retries. Investigate mirror-node ` +
+        `health; restart agent process to retry the scan.`,
+      );
     }
     if (this.store) {
       return await this.store.nextAgentSeq(agentAccountId);
@@ -759,18 +798,8 @@ export class AccountingService {
       return;
     }
     const message = JSON.stringify(payload);
-    if (Buffer.byteLength(message, 'utf-8') > 1024) {
-      // Hard fail on size overflow rather than silently truncating.
-      // The schema is sized to fit comfortably under 1024; if we hit
-      // this it's a real bug worth crashing on.
-      const sessionRef = 'sessionId' in payload ? payload.sessionId : 'n/a';
-      throw new Error(
-        `[AccountingService] V2 message exceeds 1024 bytes (${Buffer.byteLength(
-          message,
-          'utf-8',
-        )}): op=${payload.op}, sessionId=${sessionRef}`,
-      );
-    }
+    const sessionRef = 'sessionId' in payload ? payload.sessionId : 'n/a';
+    enforceTopicMessageSizeLimit(message, `v2 op=${payload.op}, sessionId=${sessionRef}`);
     await new TopicMessageSubmitTransaction()
       .setTopicId(TopicId.fromString(this.topicId))
       .setMessage(message)
@@ -795,20 +824,7 @@ export class AccountingService {
     }
 
     const message = JSON.stringify(payload);
-
-    // F8: enforce the 1024-byte cap on the legacy v1 path too. The v2
-    // writer above already does this; before now the legacy path could
-    // silently truncate or get rejected at the HCS layer with a less
-    // actionable error. Same hard-fail rationale as v2: a truncated
-    // audit message is worse than a dropped one — surface the bug.
-    if (Buffer.byteLength(message, 'utf-8') > 1024) {
-      throw new Error(
-        `[AccountingService] V1 message exceeds 1024 bytes (${Buffer.byteLength(
-          message,
-          'utf-8',
-        )}): op=${payload.op}`,
-      );
-    }
+    enforceTopicMessageSizeLimit(message, `v1 op=${payload.op}`);
 
     await new TopicMessageSubmitTransaction()
       .setTopicId(TopicId.fromString(this.topicId))

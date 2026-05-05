@@ -316,6 +316,18 @@ export class MultiUserAgent {
     return this.depositWatcher.pollOnce();
   }
 
+  /**
+   * 0.3.4: expose the DepositWatcher so the admin replay-deposit
+   * route can re-run a single mirror-node transaction through the
+   * normal credit flow. Bypasses the watermark — intended for
+   * operator-driven recovery of dead-lettered deposits whose
+   * underlying error is now resolved (e.g. token registered after
+   * the deposit landed).
+   */
+  getDepositWatcher(): DepositWatcher {
+    return this.depositWatcher;
+  }
+
   // ── Accounting Deployment ──────────────────────────────────────
 
   /**
