@@ -120,6 +120,16 @@ export class RedisStore implements IStore {
     this.deadLetters.length = 0;
     this.processedTxIds.clear();
 
+    // 0.3.3 hardening: defense-in-depth try/catch. Today's call path
+    // through `createStore()` discards the instance on a rejected
+    // load() so a partial hydrate state isn't reachable, but if a
+    // future code path ever calls `load()` on an existing instance
+    // (e.g. a manual reload after a Redis flap), a partial failure
+    // mid-fetch would leave a half-populated cache that returns
+    // inconsistent answers (`getOperator()` empty while users[X]
+    // is hydrated, etc). Re-clear on failure so the instance state
+    // is post-failure DEFINITELY empty rather than half-populated.
+    try {
     // 1. Load all user IDs from the set
     const userIds = await this.redis.smembers(k('users', 'all'));
 
@@ -251,6 +261,24 @@ export class RedisStore implements IStore {
         pipeline.set(k('users', user.userId), JSON.stringify(user));
       }
       await pipeline.exec();
+    }
+    } catch (err) {
+      // Re-clear caches on partial failure so the post-failure state
+      // is definitely empty rather than half-populated. Caller's load()
+      // promise rejects; createStore() discards the instance; next
+      // getStore() will retry from scratch.
+      this.users.clear();
+      this.memoIndex.clear();
+      this.accountIdIndex.clear();
+      this.deposits.length = 0;
+      this.plays.length = 0;
+      this.withdrawals.length = 0;
+      this.gasLog.length = 0;
+      this.deadLetters.length = 0;
+      this.processedTxIds.clear();
+      this.operator = emptyOperatorState();
+      this.watermarkTimestamp = '';
+      throw err;
     }
   }
 

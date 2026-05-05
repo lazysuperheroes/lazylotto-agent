@@ -1159,6 +1159,15 @@ export class MultiUserAgent {
     }
 
     try {
+    // Refresh operator state from Redis post-lock so we see the
+    // latest rake totals from any deposits credited on other Lambdas
+    // before we read tokenBalance below. Without this refresh, a
+    // freshly-credited deposit on Lambda B is invisible to Lambda A's
+    // local cache, causing Lambda A to under-withdraw the fee
+    // (annoying — operator sees a smaller-than-expected number,
+    // tries again, gets the rest). Not a double-X but worth getting
+    // right now that we hold the lock.
+    await this.store.refreshOperator();
     const operator = this.store.getOperator();
     const tokenKey = token === 'HBAR' ? 'hbar' : (process.env.LAZY_TOKEN_ID ?? 'lazy');
     const tokenBalance = operator.balances[tokenKey] ?? 0;

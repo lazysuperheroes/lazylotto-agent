@@ -658,12 +658,19 @@ export default function DashboardPage() {
       return;
     }
     setWithdrawLoading(true);
+    // Fresh UUID per submit click — request-level idempotency key.
+    // If the response packet drops (cold timeout, network blip), the
+    // user can safely retry the same body and get the cached result
+    // back instead of triggering a second on-chain transfer. See
+    // src/lib/idempotency.ts and the withdraw route handler.
+    const idempotencyKey = crypto.randomUUID();
     try {
       const res = await fetch('/api/user/withdraw', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
+          'Idempotency-Key': idempotencyKey,
         },
         body: JSON.stringify({ amount, token: withdrawToken }),
       });
