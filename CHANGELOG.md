@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.4] - 2026-05-05
+
+> Three-agent post-0.3.3 security audit (security + analyzer + debt-hunter
+> in parallel) surfaced 15 fresh exposures the cross-Lambda concurrency
+> work missed. Two were silently broken in the 0.3.3 release itself
+> (Upstash auto-decode trap on `idempotency.ts` + `killswitch.ts`),
+> defeating the very fix we just shipped. All 15 are closed in this
+> release. Testnet only — no users affected.
+
+### Fixed (CRITICAL — silently broken in 0.3.3)
+- **`withIdempotency` was returning `kind: 'in-flight'` instead of `'duplicate'`** because Upstash REST auto-decodes JSON values and `JSON.parse(<object>)` threw `SyntaxError`. Caught by inner catch, downgraded to in-flight. **Defeated the withdrawal-replay-protection contract this file was added for in 0.3.3.** Fix: `typeof raw === 'string' ? JSON.parse(raw) : raw` guard, matching the pattern used in 8 other call sites.
+- **`getKillSwitchState` was dropping operator-set metadata** (`reason`, `enabledAt`, `enabledBy`) for the same reason. Engaged kill switches showed only the generic "agent temporarily closed" toast in the dashboard. Same one-line fix.
+
+### Fixed (HIGH security)
+- **Session token accepted via `?key=` query string.** Tokens in URLs leak via browser history, OS clipboard managers, screenshare, server access logs, Referer header. Locked-session tokens become permanent attacker control once the URL leaks anywhere. `src/auth/middleware.ts:extractToken` no longer reads the query param. The dashboard's "Copy Connection URL" surface is split into separate URL + token copy fields with explicit "use as Authorization Bearer" guidance. The Claude Desktop JSON config block (already used Bearer) is unchanged.
+- **EOA-based register dedup leaked foreign user records.** Authenticated user-tier caller could submit a victim's accountId as `body.eoaAddress`; the downstream EOA-dedup returned the victim's full UserAccount (userId + depositMemo). `app/api/user/register/route.ts` now rejects any `eoaAddress` that doesn't match `auth.accountId` with 403.
+- **Strategy update bypassed `withUserLock` — same lost-update class as `creditDeposit` pre-fix.** Strategy save wrote the FULL user object, silently overwriting concurrent deposit-credit updates from another Lambda. `app/api/user/strategy/route.ts` now wraps in `withUserLock`.
+- **Play session could settle balances without on-chain audit trail.** When BOTH the v2 close write AND the abort marker fall-back failed, the session was settled locally with no HCS-20 marker. External auditors saw a phantom over-balance. Now dead-letters with new `kind: 'audit_trail_orphaned'` so the admin dashboard surfaces it for manual replay.
+- **`HEDERA_NETWORK` silent fallback to `'testnet'` (pre-mainnet hazard).** Both `src/auth/redis.ts:NET` and `src/custodial/RedisStore.ts:NET` captured `process.env.HEDERA_NETWORK ?? 'testnet'` at module-load time as a frozen module constant. A mainnet deploy without the env would have silently read/written the testnet Redis namespace. `assertProductionRedis` now hard-fails with `PRODUCTION_NETWORK_REQUIRED` if `HEDERA_NETWORK ∉ {'mainnet','testnet'}` in production.
+
+### Fixed (MEDIUM)
+- **`X-RateLimit-Identity` response header leaked 16 chars of session token** on every MCP response — deterministic deanonymization to anyone capturing a response (proxies, browser devtools captured in support transcripts, edge-logged response headers). Header removed entirely. UAT diagnostics use Redis state directly.
+- **Audit memo substring match exposed foreign HCS-20 entries.** `memo.includes(accountId)` matched short account ids against longer-suffix accounts (`0.0.12345` against `0.0.123456`). Replaced with word-boundary regex `(^|[^0-9.])<id>([^0-9]|$)`.
+- **Withdraw amount validation accepted NaN / Infinity.** `typeof body.amount !== 'number' || body.amount <= 0` passed both. Reached the Hedera SDK and threw — reliable DoS that bypassed the velocity cap. Now `Number.isFinite + > 0 + < 1e9`.
+- **Challenge message lacked domain binding (phishing pattern).** Signed text was identical across deployments — a malicious clone running this code could trick a user into signing a structurally-valid challenge. Now includes `Audience: ${AUTH_PAGE_ORIGIN}` so signed text differs per deployment.
+- **`agentSeq` mirror-scan failure seeded at -1**, so the next INCR returned 0 — duplicating any existing agentSeq on a topic with months of valid data, marking the session as `corrupt` in the reader. Now retries 3 times with backoff (200ms/1s/3s); on terminal failure, agent is flagged seed-failed and `nextAgentSeq` throws `AGENT_SEQ_SEED_FAILED` so `playForUser` dead-letters via the new `audit_trail_orphaned` kind instead of writing a duplicate.
+- **DepositWatcher dead-letters had no operator replay path.** New `POST /api/admin/replay-deposit` (admin-tier) fetches a tx from mirror node and re-runs it through `DepositWatcher.processTransaction`, bypassing the watermark. `creditDeposit`'s atomic SADD claim guarantees no double-credit even if the tx was already processed via a parallel path.
+- **HCS message size cap missing in `NegotiationHandler.sendToUser`.** Notifications with long error strings could silently fail at the HCS layer. New `enforceTopicMessageSizeLimit()` helper in `hcs20-v2.ts` is now the single source of truth — used by `submitMessage`, `submitV2Message`, AND `sendToUser`.
+- **`refund.ts` had no unit tests** despite being recently modified. New `src/hedera/refund.test.ts` covers the SET-NX-EX claim semantics, claim DEL on pre-transfer failure, post-transfer marker overwrite, and the `isDepositCredited` deposit-validation gate. Full processRefund integration test (with Hedera SDK + mirror-node mocks) is tracked as follow-up.
+
+### Added
+- `src/lib/idempotency.test.ts` — Upstash auto-decode regression tests with mock that mimics REST auto-decode behaviour.
+- `src/lib/killswitch.test.ts` — same.
+- `src/auth/challenge.ts:getAudience()` — sources `AUTH_PAGE_ORIGIN` for the audience-binding field.
+- `IStore.DeadLetterEntry.kind` extended with `'audit_trail_orphaned'`.
+- `MultiUserAgent.getDepositWatcher()` exposes the watcher for the admin replay route.
+- `DepositWatcher.processTransaction` changed from `private` to `public`.
+
+### Changed
+- `extractToken` no longer accepts `?key=` query string; the dashboard `CompleteView` shows URL + token in separate copy fields; existing extractToken `?key=` test FLIPPED to assert it's IGNORED (regression marker).
+
+### Tests
+- 478 → 521 total node tests (+13 in 0.3.4 across idempotency, killswitch, refund, audience binding, HEDERA_NETWORK assertion). 118 vitest unchanged. All green.
+
 ## [0.3.3] - 2026-05-04
 
 > Adversarial audit follow-up: the initial five fixes (dead-letter,

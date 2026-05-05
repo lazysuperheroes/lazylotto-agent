@@ -862,6 +862,132 @@ the cost of preventing a single-call cap bypass.
 
 ---
 
+## Symptom 17 — Dead-letter entries with `kind: 'audit_trail_orphaned'`
+
+**You'll see this from**: admin dashboard dead-letter list showing
+entries where `transactionId` is a session id (UUID) and `kind` is
+`audit_trail_orphaned`. Indicates a play session settled in the
+local ledger but couldn't write any HCS-20 marker (close OR
+aborted) to the topic.
+
+### Cause (introduced in 0.3.4)
+
+A play settles in three phases: (a) settlement of reservations,
+(b) v2 `play_session_close` write to HCS-20, (c) if (b) fails,
+fall-back `play_session_aborted` write. Pre-0.3.4 if BOTH (b) and
+(c) failed, only `console.warn` fired — operator had no signal.
+0.3.4 dead-letters this state explicitly.
+
+External auditors reconstructing balances from the topic see the
+user's pre-play balance — the spend is invisible on chain even
+though the local ledger has it.
+
+### Diagnosis
+
+1. Look at the dead-letter `details.closeError` and
+   `details.abortError` for the underlying HCS submit error.
+   Common causes:
+   - HCS topic temporarily unreachable
+   - `AGENT_SEQ_SEED_FAILED` (see Symptom 18)
+   - HCS-20 v2 message size overflow (rare — 1024-byte cap is
+     enforced and the schema is sized below it)
+2. Check the local `PlaySessionResult` record (admin dashboard or
+   `npm run read-accounting`) for the session id. The local
+   ledger has the truth; the topic doesn't.
+3. Once the underlying issue is resolved, manually replay by
+   submitting a fresh `play_session_close` (or `play_session_aborted`)
+   for the same session id via the operator CLI. The reader
+   tolerates late-arriving terminal markers up to
+   `SESSION_INFLIGHT_TIMEOUT_MS` (5 min) past `last_seen`.
+
+### Reconciliation
+
+The HCS-20 topic is immutable; we cannot retroactively write a
+marker for a session whose `inflight` window has passed. Two
+options:
+
+- **Forward-fix only**: leave the topic state, write a
+  `prize_recovery` or `refund` op to the topic that explicitly
+  references the orphaned session id with a "manual reconciliation"
+  reason. Reader still flags as orphaned but the operator audit
+  trail has the explanation.
+- **Out-of-band note**: document in the incident report and mention
+  in any auditor communications. Pre-0.3.4 this state was silent;
+  going forward it's at least visible in the dead-letter queue.
+
+---
+
+## Symptom 18 — `AGENT_SEQ_SEED_FAILED` thrown on every v2 write
+
+**You'll see this from**: Vercel logs spamming
+`AGENT_SEQ_SEED_FAILED` for an agent account; `playForUser` always
+dead-letters via `audit_trail_orphaned`; user-facing plays return
+HTTP 500 with the SDK error.
+
+### Cause (introduced in 0.3.4 hardening)
+
+`AccountingService.initializeAgentSeq` retries the mirror-node
+seed scan 3 times with backoff (200ms / 1s / 3s). If all retries
+fail, the agent is added to `agentSeqSeedFailed` — subsequent
+`nextAgentSeq` calls throw rather than write a duplicate sequence
+number.
+
+This is the deliberate fail-closed posture. The underlying issue is
+that the agent process can't reach the mirror node.
+
+### Diagnosis
+
+1. Confirm mirror-node reachability: `curl
+   https://mainnet.mirrornode.hedera.com/api/v1/network/nodes`
+   (or testnet equivalent). If this fails, mirror is down.
+2. Check `HEDERA_NETWORK` env. A misconfigured mainnet env hitting
+   the testnet mirror will fail the scan if the agent has no
+   testnet activity.
+3. Check Vercel function logs for the original scan error
+   (logged before the seed-failed flag was set).
+
+### Recovery
+
+Restart the agent process to retry the scan. On Vercel, redeploy
+or trigger a fresh cold start (e.g. via `vercel --force redeploy`).
+The seed-failed flag is per-process — once a fresh boot succeeds,
+the flag is cleared.
+
+---
+
+## Symptom 19 — Operator running `replay-deposit` for a dead-lettered tx
+
+**You'll see this from**: operator-driven recovery — admin clicks
+"replay" on a dead-letter (deposit failed because of a transient
+error or a missing token registration that's now resolved).
+
+### Path
+
+`POST /api/admin/replay-deposit` with `{ transactionId }` (admin
+tier). Fetches the tx from mirror node, re-runs through
+`DepositWatcher.processTransaction`. Bypasses the watermark gate.
+
+### Safety
+
+`creditDeposit`'s atomic SADD claim guarantees no double-credit.
+If the deposit was already credited via a parallel path (rare —
+only happens if the operator manually credited it before clicking
+replay), `tryClaimTransaction` returns false and the function is
+a no-op aside from incrementing the skip counter. If the underlying
+issue is still unresolved, a fresh dead-letter is written.
+
+### What to check after running replay
+
+1. The endpoint response: `credited: true` means the deposit was
+   applied; `credited: false` means it was skipped (dead-letter
+   already exists, or already credited).
+2. Admin dead-letter list — if a fresh entry appeared, the original
+   issue isn't resolved. Inspect the new entry's error and rerun
+   diagnosis.
+3. User's balance dashboard — confirm the credit landed.
+
+---
+
 ## When in doubt
 
 1. **Engage the kill switch first** — it's almost never the wrong move

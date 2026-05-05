@@ -227,28 +227,24 @@ plain English.
 3. You'll see your session token (`sk_...`) and a one-click **Copy**
    button
 
-You'll need one of these two formats depending on which client you're
-wiring up:
+Standard MCP form — URL + Authorization header:
 
-- **URL with key** (works with clients that don't support custom headers):
-  ```
-  https://testnet-agent.lazysuperheroes.com/api/mcp?key=sk_YOUR_TOKEN
-  ```
-- **URL + Authorization header** (the standard MCP way):
-  ```
-  URL:    https://testnet-agent.lazysuperheroes.com/api/mcp
-  Header: Authorization: Bearer sk_YOUR_TOKEN
-  ```
+```
+URL:    https://testnet-agent.lazysuperheroes.com/api/mcp
+Header: Authorization: Bearer sk_YOUR_TOKEN
+```
 
-Both go through the same auth middleware — pick whichever your client
-supports. The agent accepts the token from the header, the `?key=` query
-parameter, or an `auth_token` tool argument.
-
-> ⚠ **Treat the URL-with-key like a password.** Anyone who has it can
+> ⚠ **Treat your token like a password.** Anyone who has it can
 > play, withdraw, and view your history (limited to your own account —
 > they can't touch other users). Don't paste it into screenshots, public
-> chats, or shared notebooks. If it leaks, hit **Revoke** on /account
-> and re-sign in to mint a new one.
+> chats, shared notebooks, or URLs (browser history is searchable).
+> If it leaks, hit **Revoke** on /account and re-sign in to mint a new one.
+
+> ℹ **0.3.4 change**: the legacy `?key=…` query string form was REMOVED
+> for security reasons (URLs leak via browser history, OS clipboard,
+> screenshare, server logs). Use the Authorization header. Most MCP
+> clients support custom headers; the JSON config snippets below work
+> for Claude.ai web + Claude Desktop.
 
 ---
 
@@ -261,17 +257,17 @@ desktop install required.
    connector** (sometimes labelled "MCP servers" depending on your
    release)
 2. **Name**: `LazyLotto` (or anything you like)
-3. **URL**: paste the **URL with key** form:
-   ```
-   https://testnet-agent.lazysuperheroes.com/api/mcp?key=sk_YOUR_TOKEN
-   ```
-4. Save. Claude will probe the server, see ~13 tools (multi-user + a few
+3. **URL**: `https://testnet-agent.lazysuperheroes.com/api/mcp`
+4. **Headers / Authorization**: `Authorization: Bearer sk_YOUR_TOKEN`
+   (the field name varies by Claude version — sometimes "Custom
+   headers", sometimes "Authentication header")
+5. Save. Claude will probe the server, see ~13 tools (multi-user + a few
    public ones), and the connector will appear in your tool list
-5. Start a new chat and ask: *"What can you do with LazyLotto?"* —
+6. Start a new chat and ask: *"What can you do with LazyLotto?"* —
    Claude will list its tools and suggest what to try
 
-Claude.ai web doesn't always expose a custom-headers field, which is why
-the `?key=` form exists. Functionally identical to the header method.
+If your Claude.ai release doesn't expose a custom-headers field, fall
+back to Claude Desktop (Option B) which always supports them.
 
 ---
 
@@ -309,8 +305,14 @@ button to reveal the file) and add:
 }
 ```
 
-Or, if your version of Claude Desktop only supports the URL form, drop
-the headers block and use the `?key=` URL instead:
+~~Or, if your version of Claude Desktop only supports the URL form, drop
+the headers block and use the `?key=` URL instead:~~
+
+> 🚫 **Removed in 0.3.4.** The `?key=` URL form leaked tokens through
+> browser history, OS clipboards, screenshares, and server logs. Use
+> the headers form above. If your client genuinely cannot send custom
+> headers, please file a request on the dashboard and we'll add a
+> dedicated short-lived auth flow for that scenario.
 
 ```json
 {

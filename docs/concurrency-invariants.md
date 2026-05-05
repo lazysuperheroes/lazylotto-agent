@@ -191,6 +191,12 @@ Every invariant has a regression test in
 | 15 | Withdrawal requests with the same `Idempotency-Key` execute exactly once across all Lambdas — lost-response retries don't double-withdraw. | SET NX EX (`withIdempotency`) | `src/lib/idempotency.ts`, `app/api/user/withdraw/route.ts` |
 | 16 | Velocity cap fails CLOSED on Redis error — single transient hiccup can no longer disable the cap for one withdrawal. | Throw → 503 `redis_degraded` | `src/custodial/MultiUserAgent.ts:checkWithdrawalVelocity` |
 | 17 | CLI `recover-stuck-prizes` serialises with itself — two CLI invocations on the same target account block each other. | SET NX EX (`acquireUserLock(\`recover-cli:\${accountId}\`)`) | `src/scripts/recover-stuck-prizes.ts` |
+| 18 | Strategy update mutates `user.balances` under the same per-user lock as play/withdraw — no lost-update with concurrent deposit credit. | `withUserLock` | `app/api/user/strategy/route.ts` |
+| 19 | Withdrawal request retry with the same `Idempotency-Key` returns the cached result EVEN if Upstash auto-decoded the JSON body — `kind: 'duplicate'` survives the round-trip. | `typeof raw === 'string' ? JSON.parse(raw) : raw` guard | `src/lib/idempotency.ts` |
+| 20 | Kill-switch metadata (`reason`, `enabledAt`, `enabledBy`) survives Upstash auto-decode round-trip. | Same guard | `src/lib/killswitch.ts` |
+| 21 | Mainnet deploy without `HEDERA_NETWORK` hard-fails at boot rather than silently reading/writing the testnet Redis namespace. | Boot assertion in `assertProductionRedis` | `src/auth/redis.ts` |
+| 22 | Play session settle that fails BOTH v2 close AND abort-marker writes is dead-lettered as `audit_trail_orphaned` rather than silently leaving the chain trail empty. | Third-level catch | `src/custodial/MultiUserAgent.ts` |
+| 23 | `agentSeq` seed-scan terminal failure forces v2 writes to throw and dead-letter, rather than emit a duplicate sequence number. | Retry + seed-failed flag | `src/custodial/AccountingService.ts` |
 
 Adding a new entry to this table is the visible "did I do my
 homework?" signal. Drift between the table and the test file is
