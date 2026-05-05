@@ -18,6 +18,7 @@ import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
 import { withStore } from '../../_lib/withStore';
+import { withUserLock } from '../../_lib/locks';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { getAgentContext } from '../../_lib/mcp';
 import { KillSwitchError } from '~/lib/killswitch';
@@ -86,7 +87,7 @@ export const POST = withStore(async (request: Request) => {
     }
 
     // No-op if already on this strategy — return the user record
-    // unchanged. Idempotent.
+    // unchanged. Idempotent. Doesn't need the user lock.
     if (user.strategyName === strategy) {
       return NextResponse.json(
         {
@@ -99,16 +100,37 @@ export const POST = withStore(async (request: Request) => {
       );
     }
 
-    const { multiUser } = await getAgentContext();
-    const updated = await multiUser.updateUserStrategy(user.userId, strategy);
+    // 0.3.4 hardening: wrap in withUserLock. Pre-fix the strategy update
+    // read user from local cache, mutated strategySnapshot, and called
+    // saveUser() which writes the FULL user object back. NOT lock-protected,
+    // so a concurrent deposit credit on another Lambda was silently
+    // overwritten by the strategy save (read-modify-write race on
+    // user.balances). Same lost-update class as the creditDeposit fix
+    // shipped in 0.3.3 commit `ec2bfb4`. withUserLock refreshes from
+    // Redis pre-body, drains pendingLedger, runs the update, flushes
+    // before release.
+    const previousStrategy = user.strategyName;
+    const userId = user.userId;
+    const locked = await withUserLock(store, userId, async () => {
+      const { multiUser } = await getAgentContext();
+      return multiUser.updateUserStrategy(userId, strategy);
+    });
 
+    if ('lockHeld' in locked) {
+      return NextResponse.json(
+        { error: 'Operation in progress for this user. Try again shortly.' },
+        { status: 409, headers: CORS_HEADERS },
+      );
+    }
+
+    const updated = locked.result;
     return NextResponse.json(
       {
         status: 'updated',
         userId: updated.userId,
         strategyName: updated.strategyName,
         strategyVersion: updated.strategyVersion,
-        previousStrategy: user.strategyName,
+        previousStrategy,
       },
       { headers: CORS_HEADERS },
     );

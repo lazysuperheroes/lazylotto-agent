@@ -178,6 +178,24 @@ export function assertProductionRedis(): void {
       'storage, and kill-switch state would silently degrade to per-Lambda scope.',
     );
   }
+  // 0.3.4 hardening: refuse to boot a production deployment without an
+  // explicit HEDERA_NETWORK. Both `src/auth/redis.ts` and
+  // `src/custodial/RedisStore.ts` capture `NET = process.env.HEDERA_NETWORK ?? 'testnet'`
+  // at module-load time and bake it into EVERY Redis key prefix. A
+  // mainnet deploy that forgets the env reads/writes the testnet
+  // namespace silently — sessions, locks, deposit-claim sets, agentSeq
+  // counters all collide with testnet state. Hard-fail at boot.
+  if (process.env.NODE_ENV === 'production') {
+    const network = process.env.HEDERA_NETWORK;
+    if (network !== 'mainnet' && network !== 'testnet') {
+      throw new Error(
+        `PRODUCTION_NETWORK_REQUIRED: HEDERA_NETWORK must be set to ` +
+        `'mainnet' or 'testnet' in production (got: ${JSON.stringify(network)}). ` +
+        `Without it, Redis key prefixes silently default to testnet — ` +
+        `mainnet deployments would collide with testnet state.`,
+      );
+    }
+  }
 }
 
 /** Get or create the Redis client. Survives Next.js dev HMR. */

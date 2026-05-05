@@ -893,10 +893,47 @@ export class MultiUserAgent {
             lastError: errMsg,
           });
         } catch (abortErr) {
+          // 0.3.4: when BOTH the v2 close AND the aborted-marker
+          // fall-back fail, the session has been settled in the local
+          // ledger but has NO HCS-20 marker on chain. External
+          // auditors reconstructing balances from the topic see the
+          // user's pre-play balance — the spend is invisible. Pre-fix
+          // this was only console.warn'd; the operator had no signal.
+          // Now we dead-letter so the admin dashboard surfaces the
+          // session for manual replay, and reconcile can cross-check
+          // recent PlaySessionResult records against topic markers.
+          const abortErrMsg = abortErr instanceof Error ? abortErr.message : String(abortErr);
           console.warn(
-            '[MultiUserAgent] V2 aborted marker also failed (session will be orphaned in reader):',
-            abortErr instanceof Error ? abortErr.message : abortErr,
+            '[MultiUserAgent] V2 aborted marker also failed — dead-lettering session as audit_trail_orphaned:',
+            abortErrMsg,
           );
+          try {
+            await this.store.upsertDeadLetter({
+              transactionId: session.sessionId,
+              timestamp: new Date().toISOString(),
+              error: `Audit trail orphaned: v2 close failed (${errMsg}), abort marker also failed (${abortErrMsg})`,
+              kind: 'audit_trail_orphaned',
+              sender: user.hederaAccountId,
+              details: {
+                userId: user.userId,
+                sessionId: session.sessionId,
+                completedPools: v2WrittenPools,
+                totalPools: playedPools.length,
+                spentByToken: session.spentByToken,
+                closeError: errMsg,
+                abortError: abortErrMsg,
+              },
+            });
+          } catch (dlErr) {
+            // If even the dead-letter write fails we're in a really bad
+            // state — Redis is wedged. Surface loudly. Reconcile cron
+            // is the last line of defence (it cross-checks recent
+            // PlaySessionResult against topic markers).
+            console.error(
+              '[MultiUserAgent] CRITICAL: dead-letter write also failed — operator MUST inspect Redis health:',
+              dlErr,
+            );
+          }
         }
       }
 

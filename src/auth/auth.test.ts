@@ -327,11 +327,13 @@ describe('assertProductionRedis', () => {
     }
   });
 
-  it("does not throw when NODE_ENV='production' and Upstash IS configured", () => {
+  it("does not throw when NODE_ENV='production' and Upstash IS configured + HEDERA_NETWORK is valid", () => {
     const original = env.NODE_ENV;
+    const originalNet = env.HEDERA_NETWORK;
     env.NODE_ENV = 'production';
     env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
     env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    env.HEDERA_NETWORK = 'testnet'; // 0.3.4: also required in production
     try {
       assertProductionRedis();
     } finally {
@@ -339,6 +341,8 @@ describe('assertProductionRedis', () => {
       else env.NODE_ENV = original;
       delete env.UPSTASH_REDIS_REST_URL;
       delete env.UPSTASH_REDIS_REST_TOKEN;
+      if (originalNet === undefined) delete env.HEDERA_NETWORK;
+      else env.HEDERA_NETWORK = originalNet;
     }
   });
 });
@@ -540,6 +544,70 @@ describe('extractToken', () => {
 });
 
 // ── Audience binding in challenge (security finding #11) ────────
+
+describe('assertProductionRedis: HEDERA_NETWORK guard (security finding #7)', () => {
+  // next/types/global.d.ts declares NODE_ENV as readonly; cast for tests.
+  const env = process.env as Record<string, string | undefined>;
+
+  it('THROWS PRODUCTION_NETWORK_REQUIRED when production lacks HEDERA_NETWORK', () => {
+    const origN = env.NODE_ENV;
+    const origH = env.HEDERA_NETWORK;
+    env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    env.NODE_ENV = 'production';
+    delete env.HEDERA_NETWORK;
+    try {
+      assert.throws(
+        () => assertProductionRedis(),
+        /PRODUCTION_NETWORK_REQUIRED/,
+      );
+    } finally {
+      delete env.UPSTASH_REDIS_REST_URL;
+      delete env.UPSTASH_REDIS_REST_TOKEN;
+      if (origN === undefined) delete env.NODE_ENV; else env.NODE_ENV = origN;
+      if (origH !== undefined) env.HEDERA_NETWORK = origH;
+    }
+  });
+
+  it('THROWS when HEDERA_NETWORK is set to a bogus value', () => {
+    const origN = env.NODE_ENV;
+    const origH = env.HEDERA_NETWORK;
+    env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    env.NODE_ENV = 'production';
+    env.HEDERA_NETWORK = 'previewnet';
+    try {
+      assert.throws(
+        () => assertProductionRedis(),
+        /PRODUCTION_NETWORK_REQUIRED/,
+      );
+    } finally {
+      delete env.UPSTASH_REDIS_REST_URL;
+      delete env.UPSTASH_REDIS_REST_TOKEN;
+      if (origN === undefined) delete env.NODE_ENV; else env.NODE_ENV = origN;
+      if (origH === undefined) delete env.HEDERA_NETWORK; else env.HEDERA_NETWORK = origH;
+    }
+  });
+
+  it('does NOT throw when HEDERA_NETWORK is mainnet or testnet', () => {
+    const origN = env.NODE_ENV;
+    const origH = env.HEDERA_NETWORK;
+    env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    env.NODE_ENV = 'production';
+    try {
+      env.HEDERA_NETWORK = 'mainnet';
+      assertProductionRedis();
+      env.HEDERA_NETWORK = 'testnet';
+      assertProductionRedis();
+    } finally {
+      delete env.UPSTASH_REDIS_REST_URL;
+      delete env.UPSTASH_REDIS_REST_TOKEN;
+      if (origN === undefined) delete env.NODE_ENV; else env.NODE_ENV = origN;
+      if (origH === undefined) delete env.HEDERA_NETWORK; else env.HEDERA_NETWORK = origH;
+    }
+  });
+});
 
 describe('buildChallengeMessage: audience binding', () => {
   it('includes the Audience field with the configured AUTH_PAGE_ORIGIN', () => {

@@ -37,10 +37,19 @@ export type DeadLetterEntry = {
    * Discriminant for the failure type. Defaults to `deposit_failed`
    * for legacy entries that don't carry the field. Used by the admin
    * dashboard to render the right action affordance (refund vs.
-   * recover prizes) and by the recovery tool to find affected
-   * sessions.
+   * recover prizes vs. audit-trail-replay) and by the recovery tool
+   * to find affected sessions.
+   *
+   * - `deposit_failed`: the deposit watcher couldn't credit (legacy
+   *   default).
+   * - `prize_transfer_failed`: prize transfer to user EOA failed
+   *   (recovery via `operator_recover_stuck_prizes`).
+   * - `audit_trail_orphaned`: a play session settled locally but
+   *   neither the v2 close NOR the abort marker landed on the HCS-20
+   *   topic — added in 0.3.4. External auditors see a phantom
+   *   balance discrepancy until manual replay or reconcile.
    */
-  kind?: 'deposit_failed' | 'prize_transfer_failed';
+  kind?: 'deposit_failed' | 'prize_transfer_failed' | 'audit_trail_orphaned';
   /**
    * Free-form details specific to the failure kind. For prize
    * transfer failures, this carries the userId, sessionId, prize
