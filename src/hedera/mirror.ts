@@ -7,6 +7,19 @@ function baseUrl(): string {
   return HEDERA_DEFAULTS.mirrorNodeUrl[network] ?? HEDERA_DEFAULTS.mirrorNodeUrl.testnet;
 }
 
+/**
+ * Public accessor for the mirror node base URL. Used by callers that
+ * need to construct a path manually (e.g. `app/api/admin/replay-deposit`,
+ * `src/hedera/refund.ts`, `src/services/userOps.ts:replayDeposit`).
+ *
+ * 0.3.4 hardening (audit finding C20): pre-fix three call sites all
+ * hardcoded the network ternary inline. Centralizing here means a
+ * mainnet failover or alternative mirror config touches one file.
+ */
+export function getMirrorBaseUrl(): string {
+  return baseUrl();
+}
+
 async function mirrorGet<T>(path: string): Promise<T> {
   // Handle pagination next links which include /api/v1 prefix
   let url: string;
