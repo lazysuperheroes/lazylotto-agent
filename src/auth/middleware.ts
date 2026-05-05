@@ -97,11 +97,24 @@ export function satisfiesTier(auth: AuthContext | null, required: AuthTier): boo
 
 /**
  * Extract the auth token from various sources.
- * Priority: Authorization header > query param > tool parameter
+ * Priority: Authorization header > tool parameter (stdio-compat).
+ *
+ * The legacy `?key=sk_…` query-string fallback was REMOVED in 0.3.4
+ * (commit fixing security-audit finding #3). Tokens in URLs leak via
+ * browser history, OS clipboard managers, screenshare, server access
+ * logs, and the Referer header — and a locked session token in the
+ * URL becomes permanent attacker control once the URL leaks anywhere.
+ * The dashboard's "Copy Connection URL" surface is updated to display
+ * the token separately and use the standard `Authorization: Bearer`
+ * header. MCP clients (Claude Desktop) consume the JSON config block
+ * which already uses Bearer.
+ *
+ * `queryParams` is kept in the signature for backwards source
+ * compatibility with callers but is now ignored.
  */
 export function extractToken(
   headers?: Record<string, string | string[] | undefined>,
-  queryParams?: Record<string, string | undefined>,
+  _queryParams?: Record<string, string | undefined>,
   toolAuthToken?: string,
 ): string | undefined {
   // 1. Authorization: Bearer sk_...
@@ -113,12 +126,7 @@ export function extractToken(
     }
   }
 
-  // 2. ?key=sk_...
-  if (queryParams?.key) {
-    return queryParams.key;
-  }
-
-  // 3. auth_token tool parameter (legacy stdio compat)
+  // 2. auth_token tool parameter (legacy stdio compat for MCP)
   if (toolAuthToken) {
     return toolAuthToken;
   }

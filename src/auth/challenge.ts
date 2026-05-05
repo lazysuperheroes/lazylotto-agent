@@ -14,6 +14,21 @@ import { getAccountKey } from '../hedera/mirror.js';
 const CHALLENGE_TTL_SECONDS = 600; // 10 minutes — generous for first-time wallet connections
 
 /**
+ * The audience the user is authenticating WITH. Bound into the challenge
+ * text the user signs so a signature captured against one deployment
+ * cannot be replayed against another. Pre-0.3.4 the challenge text had
+ * no domain binding — a clone of this code at `evil.example` could
+ * present the same template to a phishing victim and the resulting
+ * signature was structurally valid for the legitimate agent (only
+ * bounded by the per-instance nonce namespace). Now we include the
+ * audience in the signed text and verify it server-side against the
+ * deployment origin.
+ */
+export function getAudience(): string {
+  return process.env.AUTH_PAGE_ORIGIN ?? 'https://testnet-agent.lazysuperheroes.com';
+}
+
+/**
  * Build the human-readable challenge message the user sees in their wallet.
  * This must be deterministically reproducible from the challenge fields.
  */
@@ -21,6 +36,7 @@ export function buildChallengeMessage(
   accountId: string,
   nonce: string,
   network: string,
+  audience: string = getAudience(),
 ): string {
   const networkLabel = network.charAt(0).toUpperCase() + network.slice(1);
   return [
@@ -30,6 +46,7 @@ export function buildChallengeMessage(
     '',
     `Account: ${accountId}`,
     `Network: ${network}`,
+    `Audience: ${audience}`,
     `Nonce: ${nonce}`,
   ].join('\n');
 }

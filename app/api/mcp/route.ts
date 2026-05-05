@@ -126,6 +126,14 @@ async function checkMcpRateLimit(request: Request): Promise<RateLimitState> {
  * trips because each request hits a fresh container.
  */
 function rateLimitHeaders(state: RateLimitState): Record<string, string> {
+  // 0.3.4 hardening: removed `X-RateLimit-Identity` from the response.
+  // It echoed the first 16 chars of the bearer token (the rate-limit
+  // identity key) on every response, including 429s and errors.
+  // Sixteen chars of `sk_` + hex deterministically deanonymizes the
+  // bearer to anyone capturing a response (proxies, browser devtools
+  // captured in support transcripts, edge-logged response headers).
+  // Was originally added for UAT diagnostics; production monitors use
+  // the rate-limiter's Redis state directly, not response headers.
   return {
     'X-RateLimit-Limit': String(MCP_RATE_LIMIT),
     'X-RateLimit-Remaining': String(Math.max(0, MCP_RATE_LIMIT - state.count)),
@@ -133,7 +141,6 @@ function rateLimitHeaders(state: RateLimitState): Record<string, string> {
     'X-RateLimit-Ttl': String(state.ttl),
     'X-RateLimit-Expire-Called': String(state.expireCalled),
     'X-RateLimit-Mode': state.mode,
-    'X-RateLimit-Identity': state.identity,
   };
 }
 

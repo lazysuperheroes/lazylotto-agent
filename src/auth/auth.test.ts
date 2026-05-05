@@ -507,13 +507,16 @@ describe('extractToken', () => {
     assert.equal(token, 'sk_header_token');
   });
 
-  it('extracts from ?key= query param', () => {
+  it('IGNORES the ?key= query param (security finding #3, removed in 0.3.4)', () => {
+    // Tokens in URLs leak via browser history, OS clipboard managers,
+    // screenshare, server access logs, Referer header. The fallback was
+    // removed in 0.3.4 so even a query token is now invisible.
     const token = extractToken(
       undefined,
       { key: 'sk_query_token' },
       undefined,
     );
-    assert.equal(token, 'sk_query_token');
+    assert.equal(token, undefined);
   });
 
   it('extracts from auth_token tool param', () => {
@@ -521,10 +524,10 @@ describe('extractToken', () => {
     assert.equal(token, 'sk_tool_token');
   });
 
-  it('prefers header over query param', () => {
+  it('prefers header over tool param', () => {
     const token = extractToken(
       { authorization: 'Bearer sk_from_header' },
-      { key: 'sk_from_query' },
+      undefined,
       'sk_from_tool',
     );
     assert.equal(token, 'sk_from_header');
@@ -533,5 +536,41 @@ describe('extractToken', () => {
   it('returns undefined when nothing provided', () => {
     const token = extractToken(undefined, undefined, undefined);
     assert.equal(token, undefined);
+  });
+});
+
+// ── Audience binding in challenge (security finding #11) ────────
+
+describe('buildChallengeMessage: audience binding', () => {
+  it('includes the Audience field with the configured AUTH_PAGE_ORIGIN', () => {
+    const env = process.env as Record<string, string | undefined>;
+    const original = env.AUTH_PAGE_ORIGIN;
+    env.AUTH_PAGE_ORIGIN = 'https://testnet-agent.lazysuperheroes.com';
+    try {
+      const msg = buildChallengeMessage('0.0.1234', 'nonce-abc', 'testnet');
+      assert.ok(
+        msg.includes('Audience: https://testnet-agent.lazysuperheroes.com'),
+        'challenge text must bind to the deployment audience to prevent cross-origin replay',
+      );
+    } finally {
+      if (original === undefined) delete env.AUTH_PAGE_ORIGIN;
+      else env.AUTH_PAGE_ORIGIN = original;
+    }
+  });
+
+  it('mainnet vs testnet audiences produce DIFFERENT signed text', () => {
+    const env = process.env as Record<string, string | undefined>;
+    const original = env.AUTH_PAGE_ORIGIN;
+    try {
+      env.AUTH_PAGE_ORIGIN = 'https://testnet-agent.lazysuperheroes.com';
+      const testnet = buildChallengeMessage('0.0.1234', 'nonce-1', 'testnet');
+      env.AUTH_PAGE_ORIGIN = 'https://agent.lazysuperheroes.com';
+      const mainnet = buildChallengeMessage('0.0.1234', 'nonce-1', 'mainnet');
+      assert.notEqual(testnet, mainnet,
+        'mainnet vs testnet must produce different signed text (audience binding)');
+    } finally {
+      if (original === undefined) delete env.AUTH_PAGE_ORIGIN;
+      else env.AUTH_PAGE_ORIGIN = original;
+    }
   });
 });

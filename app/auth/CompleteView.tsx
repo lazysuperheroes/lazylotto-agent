@@ -46,9 +46,21 @@ interface CompleteViewProps {
   accountId: string;
   /** True when the user just re-authenticated (had a prior session). */
   isReturning: boolean;
-  /** Full URL with ?key= suffix for MCP client config. */
+  /**
+   * Bare MCP endpoint URL (no auth params). Pre-0.3.4 this carried the
+   * session token as `?key=…`; that surface was removed because tokens
+   * in URLs leak via browser history, clipboard managers, screenshare,
+   * server access logs, and Referer header. The token is now a separate
+   * prop the UI displays alongside the URL with a "use as Bearer header"
+   * note.
+   */
   connectionUrl: string;
-  /** JSON blob for Claude Desktop config. */
+  /**
+   * Session token shown separately so the user can paste it into the
+   * Authorization header field of their MCP client configuration.
+   */
+  sessionToken: string;
+  /** JSON blob for Claude Desktop config (already uses Authorization: Bearer). */
   claudeConfig: string;
   /** ISO timestamp of session expiry, or empty string if locked/unknown. */
   expiresAt: string;
@@ -115,39 +127,44 @@ function SuccessHeader({
 
 function ClaudeIntegration({
   connectionUrl,
+  sessionToken,
   claudeConfig,
   onCopy,
 }: {
   connectionUrl: string;
+  sessionToken: string;
   claudeConfig: string;
   onCopy: (text: string, label?: string) => void | Promise<void>;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedToken, setCopiedToken] = useState(false);
   const [showJsonConfig, setShowJsonConfig] = useState(false);
 
   return (
     <div className="flex flex-col gap-4">
       <p className="type-caption">
-        Paste this URL into Claude AI or Claude Desktop as a custom MCP
-        connector. The agent handles everything — pool selection,
-        entries, prize transfer.
+        Paste the URL into Claude AI / Claude Desktop as a custom MCP
+        connector and the token into the Authorization Bearer field.
+        For Claude Desktop, the JSON config below already wires both —
+        recommended.
       </p>
 
       {/* Connection URL */}
       <div className="border-2 border-secondary bg-[var(--color-panel)] px-4 py-3">
+        <p className="type-caption mb-1">URL</p>
         <p className="break-all font-mono text-sm text-brand">{connectionUrl}</p>
       </div>
 
       <button
         type="button"
         onClick={async () => {
-          await onCopy(connectionUrl, 'Connection URL');
-          setCopied(true);
-          setTimeout(() => setCopied(false), 2000);
+          await onCopy(connectionUrl, 'URL');
+          setCopiedUrl(true);
+          setTimeout(() => setCopiedUrl(false), 2000);
         }}
         className="btn-primary-sm w-full"
       >
-        {copied ? (
+        {copiedUrl ? (
           <>
             <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
               <path
@@ -159,7 +176,38 @@ function ClaudeIntegration({
             Copied!
           </>
         ) : (
-          'Copy Connection URL'
+          'Copy URL'
+        )}
+      </button>
+
+      {/* Session token (separate from URL — header-only auth) */}
+      <div className="border-2 border-secondary bg-[var(--color-panel)] px-4 py-3">
+        <p className="type-caption mb-1">Token (use as <code>Authorization: Bearer …</code>)</p>
+        <p className="break-all font-mono text-sm text-brand">{sessionToken}</p>
+      </div>
+
+      <button
+        type="button"
+        onClick={async () => {
+          await onCopy(sessionToken, 'Token');
+          setCopiedToken(true);
+          setTimeout(() => setCopiedToken(false), 2000);
+        }}
+        className="btn-primary-sm w-full"
+      >
+        {copiedToken ? (
+          <>
+            <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+              <path
+                fillRule="evenodd"
+                d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                clipRule="evenodd"
+              />
+            </svg>
+            Copied!
+          </>
+        ) : (
+          'Copy Token'
         )}
       </button>
 
@@ -387,6 +435,7 @@ export function CompleteView(props: CompleteViewProps) {
           <div id="claude-integration-panel" className="mt-4">
             <ClaudeIntegration
               connectionUrl={props.connectionUrl}
+              sessionToken={props.sessionToken}
               claudeConfig={props.claudeConfig}
               onCopy={props.onCopy}
             />

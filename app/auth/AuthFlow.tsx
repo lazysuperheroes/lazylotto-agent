@@ -301,9 +301,15 @@ export function AuthFlow() {
       localStorage.setItem('lazylotto:accountId', acctId);
       localStorage.setItem('lazylotto:tier', verified.tier);
 
-      // Store the connection URL so already-auth state can show it later
-      const fullUrl = `${verified.mcpUrl}?key=${verified.sessionToken}`;
-      localStorage.setItem('lazylotto:mcpUrl', fullUrl);
+      // 0.3.4 hardening: store ONLY the bare MCP URL. Pre-fix we
+      // appended `?key=${sessionToken}` for a "Copy Connection URL"
+      // surface, but tokens in URLs leak via browser history, OS
+      // clipboard, screenshare, server access logs, Referer header.
+      // The dashboard now displays the URL and token separately so
+      // the user can paste them into the right header field. The
+      // JSON config block (which uses Authorization: Bearer) is
+      // unchanged.
+      localStorage.setItem('lazylotto:mcpUrl', verified.mcpUrl);
       if (verified.expiresAt) localStorage.setItem('lazylotto:expiresAt', verified.expiresAt);
 
       // 6. Complete — also update tier state so the post-verify CTA renders
@@ -668,7 +674,8 @@ export function AuthFlow() {
               rerollCharacter={rerollCharacter}
               accountId={accountId}
               isReturning={isReturning}
-              connectionUrl={`${mcpUrl}?key=${sessionToken}`}
+              connectionUrl={mcpUrl}
+              sessionToken={sessionToken}
               claudeConfig={claudeConfig}
               expiresAt={expiresAt}
               locked={locked}

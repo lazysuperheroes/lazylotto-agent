@@ -141,12 +141,22 @@ function involvesAccount(payload: Record<string, unknown>, accountId: string): b
   const user = String(payload.user ?? '');
   const agent = String(payload.agent ?? '');
 
+  // 0.3.4 hardening: word-boundary memo match. Pre-fix
+  // `memo.includes(accountId)` matched `0.0.12345` against any memo
+  // containing that sequence as a substring (e.g. `0.0.123456`,
+  // session-id refs that embed an account id, etc), exposing other
+  // users' HCS-20 entries. Account IDs in memos are typically tokenised
+  // on `:`, ` `, or end-of-string boundaries — escape the id and require
+  // a non-digit (or start/end) on each side.
+  const memoBoundaryRegex = new RegExp(
+    `(^|[^0-9.])${accountId.replace(/[.]/g, '\\.')}([^0-9]|$)`,
+  );
   if (
     to === accountId ||
     from === accountId ||
     user === accountId ||
     agent === accountId ||
-    memo.includes(accountId)
+    memoBoundaryRegex.test(memo)
   ) {
     return true;
   }

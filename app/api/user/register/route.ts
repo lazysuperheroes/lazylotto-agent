@@ -46,9 +46,29 @@ export const POST = withStore(async (request: Request) => {
       strategy?: 'conservative' | 'balanced' | 'aggressive';
     };
 
-    // Default the EOA to the authenticated account if not provided
+    // Default the EOA to the authenticated account if not provided.
+    //
+    // 0.3.4 hardening: refuse a body-supplied `eoaAddress` that doesn't
+    // match the authenticated `accountId`. Pre-fix an authenticated
+    // user-tier caller could submit a victim's accountId as `eoaAddress`
+    // and the downstream EOA-based dedup in NegotiationHandler would
+    // return that victim's full UserAccount — leaking userId +
+    // depositMemo for any account the attacker could guess. Now the
+    // EOA is locked to the session's accountId; any explicit
+    // `eoaAddress` body field must equal `auth.accountId` or we 403.
     const eoaAddress = body.eoaAddress ?? auth.accountId;
     const strategy = body.strategy ?? 'balanced';
+
+    if (eoaAddress !== auth.accountId) {
+      return NextResponse.json(
+        {
+          error:
+            'eoaAddress must match the authenticated session account. ' +
+            'Re-authenticate as the target account if you intend to register it.',
+        },
+        { status: 403, headers: CORS_HEADERS },
+      );
+    }
 
     if (!/^(0\.0\.\d+|0x[0-9a-fA-F]{40})$/.test(eoaAddress)) {
       return NextResponse.json(
