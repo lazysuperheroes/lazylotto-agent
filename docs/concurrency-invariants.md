@@ -197,6 +197,22 @@ homework?" signal. Drift between the table and the test file is
 itself a CI regression — the next test in
 `concurrency-invariants.test.ts` should match the next row here.
 
+## Items explicitly deferred from the 0.3.3 audit
+
+The 0.3.3 adversarial audit surfaced these items that were
+considered and explicitly NOT fixed. Documenting here so we don't
+re-audit them and conclude the same thing.
+
+| # | Item | Why deferred |
+|---|------|--------------|
+| D1 | `recordPlaySession` / `recordWithdrawal` are append-only | Latent only — currently safe under per-user lock. Adding upsert-by-id costs an extra Redis round trip per play with no current safety improvement. Re-evaluate if the lock contract ever changes. |
+| D2 | `deposits:processed` Redis SET unbounded growth | Math: ~10K deposits/year × 10 years × ~30 bytes ≈ 3MB. Negligible. Any cleanup re-opens the dedup window. Don't fix. |
+| D3 | Refund `'pending'` marker stuck after Lambda death | Rare edge case. 30-day TTL is the safety net; operator can `redis-cli DEL` for faster retry. Documented in incident playbook Symptom 13. Auto-recovery adds complexity for marginal value. |
+| D4 | Watermark last-write-wins (`setWatermark`) | Causes redundant mirror-node calls on rewind, but mirror is free. `tryClaimTransaction` is the dedup gate, so no double-credit possible. Skip. |
+| D5 | `DepositWatcher.upsertDeadLetter` cross-Lambda race | Visual dupes in admin dashboard, no money loss. Wrapping the watcher in a lock would defeat its fast-iteration design. Defer. |
+| D6 | Cold-start init coordination | Multiple cold Lambdas independently run their `RedisStore.load()` — extra Redis hits during cold-start storms but no correctness issue. Cost concern only. |
+| D7 | CLI vs MCP recovery cross-tool coordination | CLI uses `recover-cli:{accountId}` lock; MCP uses internal userId. They don't coordinate cross-tool. Operational practice (don't run CLI while production is processing same account) is the documented mitigation. |
+
 ## Failure modes that LOOK like concurrency bugs but aren't
 
 For triage clarity:
