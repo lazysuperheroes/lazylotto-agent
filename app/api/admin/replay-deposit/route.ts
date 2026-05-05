@@ -18,10 +18,11 @@
 
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
+import { getStore } from '../../_lib/store';
 import { getAgentContext } from '../../_lib/mcp';
 import { withStore } from '../../_lib/withStore';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
-import type { MirrorTransaction } from '~/hedera/mirror';
+import { replayDeposit, ReplayDepositMirrorError } from '~/services/userOps';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -43,61 +44,60 @@ export const POST = withStore(async (request: Request) => {
     if (isErrorResponse(auth)) return auth;
 
     const body = (await request.json().catch(() => ({}))) as { transactionId?: string };
-    if (!body.transactionId) {
-      return NextResponse.json(
-        { error: 'Missing required field: transactionId' },
-        { status: 400, headers: CORS_HEADERS },
-      );
-    }
-    const transactionId = body.transactionId;
 
-    // Fetch the transaction by id from the mirror node. We use the same
-    // base URL convention as `src/hedera/refund.ts` so an env override
-    // (HEDERA_NETWORK) flips both paths together.
-    const mirrorBase =
-      process.env.HEDERA_NETWORK === 'mainnet'
-        ? 'https://mainnet.mirrornode.hedera.com/api/v1'
-        : 'https://testnet.mirrornode.hedera.com/api/v1';
-
-    const txRes = await fetch(`${mirrorBase}/transactions/${transactionId}`);
-    if (!txRes.ok) {
-      return NextResponse.json(
-        { error: `Transaction ${transactionId} not found on mirror node (${txRes.status})` },
-        { status: 404, headers: CORS_HEADERS },
-      );
-    }
-
-    const txData = (await txRes.json()) as { transactions?: MirrorTransaction[] };
-    const tx = txData.transactions?.[0];
-    if (!tx) {
-      return NextResponse.json(
-        { error: 'Transaction not found in mirror response' },
-        { status: 404, headers: CORS_HEADERS },
-      );
-    }
-
-    // Hand off to the same processTransaction the live poll uses.
-    // creditDeposit's atomic SADD claim guarantees no double-credit:
-    // if the deposit was already credited (via a successful prior run
-    // or a parallel poll), `tryClaimTransaction` returns false and
-    // `processTransaction` is a no-op aside from the dead-letter
-    // skip-counter increment. If the underlying issue (e.g.
-    // unregistered token) is still unresolved, the same dead-letter
-    // path runs again — operator sees no change.
+    // 0.3.4: delegate to userOps.replayDeposit. transactionId format
+    // validation, mirror-fetch, idempotency-by-txId all live there.
+    const store = await getStore();
     const { multiUser } = await getAgentContext();
-    const watcher = multiUser.getDepositWatcher();
-    const credited = await watcher.processTransaction(tx);
-
-    return NextResponse.json(
-      {
-        transactionId,
-        credited,
-        note: credited
-          ? 'Deposit successfully credited.'
-          : 'Transaction was skipped — either already credited (no-op), failed validation again, or wrote a fresh dead-letter. Inspect /api/admin/dead-letters.',
-      },
-      { headers: CORS_HEADERS },
-    );
+    try {
+      const opResult = await replayDeposit(
+        { store, multiUser },
+        {
+          transactionId: body.transactionId ?? '',
+          performedBy: auth.accountId,
+        },
+      );
+      switch (opResult.kind) {
+        case 'invalid_input':
+          return NextResponse.json(
+            { error: opResult.reason },
+            { status: 400, headers: CORS_HEADERS },
+          );
+        case 'in_flight':
+          return NextResponse.json(
+            { error: 'A replay for this transactionId is already in progress.' },
+            { status: 409, headers: CORS_HEADERS },
+          );
+        case 'duplicate':
+        case 'ok':
+          return NextResponse.json(
+            {
+              transactionId: opResult.result.transactionId,
+              credited: opResult.result.credited,
+              status: opResult.result.status,
+              ...(opResult.kind === 'duplicate' ? { replayed: true } : {}),
+            },
+            { headers: CORS_HEADERS },
+          );
+        // Replay-deposit doesn't currently use user lock; access checks
+        // happen at requireTier level. These cases shouldn't fire.
+        case 'lock_held':
+        case 'access_denied':
+        case 'not_found':
+          return NextResponse.json(
+            { error: 'reason' in opResult ? opResult.reason : 'Operation rejected' },
+            { status: 409, headers: CORS_HEADERS },
+          );
+      }
+    } catch (innerErr) {
+      if (innerErr instanceof ReplayDepositMirrorError) {
+        return NextResponse.json(
+          { error: innerErr.message },
+          { status: 404, headers: CORS_HEADERS },
+        );
+      }
+      throw innerErr;
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(

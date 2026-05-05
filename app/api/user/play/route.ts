@@ -23,7 +23,7 @@ import { getStore } from '../../_lib/store';
 import { withStore } from '../../_lib/withStore';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { getAgentContext } from '../../_lib/mcp';
-import { withUserLock } from '../../_lib/locks';
+import { playForUser } from '~/services/userOps';
 import { KillSwitchError } from '~/lib/killswitch';
 import { assertRedisHealthy, RedisDegradedError } from '~/lib/redisHealth';
 
@@ -86,30 +86,57 @@ export const POST = withStore(async (request: Request) => {
       /* proceed with whatever balance we have */
     }
 
-    // withUserLock closes three exposures the raw acquire/release pair
-    // had: stale local cache after lock acquire, pending-ledger debits
-    // not applied before the body runs, and lock release before flush
-    // completes. See `src/lib/locks.ts:withUserLock` JSDoc.
-    const locked = await withUserLock(store, user.userId, async () => {
-      const session = await multiUser.playForUser(user.userId);
-      // Refresh after the play so the response carries the
-      // post-session balance.
-      await store.refreshUser(user.userId);
-      const refreshed = store.getUser(user.userId);
-      return {
-        session,
-        balances: refreshed?.balances ?? user.balances,
-      };
-    });
-
-    if ('lockHeld' in locked) {
-      return NextResponse.json(
-        { error: 'Operation in progress for this user. Try again shortly.' },
-        { status: 409, headers: CORS_HEADERS },
-      );
+    // 0.3.4: delegate to userOps service layer. Single canonical
+    // mutation entry point — same code path as multi_user_play MCP
+    // tool. See src/services/userOps.ts JSDoc.
+    const idempotencyKey = request.headers.get('Idempotency-Key');
+    const opResult = await playForUser(
+      { store, multiUser },
+      { userId: user.userId, idempotencyKey },
+    );
+    switch (opResult.kind) {
+      case 'lock_held':
+        return NextResponse.json(
+          { error: 'Operation in progress for this user. Try again shortly.' },
+          { status: 409, headers: CORS_HEADERS },
+        );
+      case 'in_flight':
+        return NextResponse.json(
+          { error: 'A previous request with this Idempotency-Key is still in progress. Retry shortly.' },
+          { status: 409, headers: CORS_HEADERS },
+        );
+      case 'not_found':
+        return NextResponse.json(
+          { error: opResult.reason ?? 'User not found' },
+          { status: 404, headers: CORS_HEADERS },
+        );
+      case 'invalid_input':
+        return NextResponse.json(
+          { error: opResult.reason },
+          { status: 400, headers: CORS_HEADERS },
+        );
+      case 'access_denied':
+        return NextResponse.json(
+          { error: opResult.reason },
+          { status: 403, headers: CORS_HEADERS },
+        );
+      case 'duplicate':
+      case 'ok': {
+        await store.refreshUser(user.userId);
+        const refreshed = store.getUser(user.userId);
+        const responseHeaders: Record<string, string> = { ...CORS_HEADERS };
+        if (opResult.kind === 'duplicate') {
+          responseHeaders['X-Idempotent-Replayed'] = 'true';
+        }
+        return NextResponse.json(
+          {
+            session: opResult.result,
+            balances: refreshed?.balances ?? user.balances,
+          },
+          { headers: responseHeaders },
+        );
+      }
     }
-
-    return NextResponse.json(locked.result, { headers: CORS_HEADERS });
   } catch (err) {
     // Kill switch — translate to 503 + reason so the dashboard banner
     // can render the "Agent temporarily closed" state cleanly.

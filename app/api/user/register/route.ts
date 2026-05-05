@@ -16,6 +16,7 @@ import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getStore } from '../../_lib/store';
 import { withStore } from '../../_lib/withStore';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
+import { registerUserOp } from '~/services/userOps';
 import { getAgentContext } from '../../_lib/mcp';
 import { getClient } from '../../_lib/hedera';
 import { getOperatorAccountId } from '~/hedera/wallet';
@@ -46,75 +47,45 @@ export const POST = withStore(async (request: Request) => {
       strategy?: 'conservative' | 'balanced' | 'aggressive';
     };
 
-    // Default the EOA to the authenticated account if not provided.
-    //
-    // 0.3.4 hardening: refuse a body-supplied `eoaAddress` that doesn't
-    // match the authenticated `accountId`. Pre-fix an authenticated
-    // user-tier caller could submit a victim's accountId as `eoaAddress`
-    // and the downstream EOA-based dedup in NegotiationHandler would
-    // return that victim's full UserAccount — leaking userId +
-    // depositMemo for any account the attacker could guess. Now the
-    // EOA is locked to the session's accountId; any explicit
-    // `eoaAddress` body field must equal `auth.accountId` or we 403.
-    const eoaAddress = body.eoaAddress ?? auth.accountId;
-    const strategy = body.strategy ?? 'balanced';
-
-    if (eoaAddress !== auth.accountId) {
-      return NextResponse.json(
-        {
-          error:
-            'eoaAddress must match the authenticated session account. ' +
-            'Re-authenticate as the target account if you intend to register it.',
-        },
-        { status: 403, headers: CORS_HEADERS },
-      );
-    }
-
-    if (!/^(0\.0\.\d+|0x[0-9a-fA-F]{40})$/.test(eoaAddress)) {
-      return NextResponse.json(
-        { error: 'Invalid eoaAddress format. Expected 0.0.X or 0x...' },
-        { status: 400, headers: CORS_HEADERS },
-      );
-    }
-
+    // 0.3.4: delegate to userOps.registerUserOp. EOA-ownership check,
+    // format validation, and dedup all live in the service layer.
     const store = await getStore();
-    await store.refreshUserIndex();
-
-    // Dedup: if this account is already registered, return existing
-    const existing = store.getUserByAccountId(auth.accountId);
-    if (existing) {
-      const agentWallet = withChecksum(getOperatorAccountId(getClient()));
-      return NextResponse.json(
-        {
-          status: 'already_registered',
-          userId: existing.userId,
-          strategy: existing.strategyName,
-          rakePercent: existing.rakePercent,
-          agentWallet,
-          depositMemo: existing.depositMemo,
-        },
-        { headers: CORS_HEADERS },
-      );
-    }
-
-    // Create the user via the MultiUserAgent (it handles strategy snapshot,
-    // memo generation, HCS-20 mint announcement, etc.)
     const { multiUser } = await getAgentContext();
-    const user = await multiUser.registerUser(auth.accountId, eoaAddress, strategy);
-
     const agentWallet = withChecksum(getOperatorAccountId(getClient()));
 
-    return NextResponse.json(
+    const opResult = await registerUserOp(
+      { store, multiUser },
       {
-        status: 'registered',
-        userId: user.userId,
-        strategy: user.strategyName,
-        rakePercent: user.rakePercent,
+        authAccountId: auth.accountId,
+        authTier: 'user',
+        eoaAddress: body.eoaAddress,
+        strategy: body.strategy,
         agentWallet,
-        depositMemo: user.depositMemo,
       },
-      { headers: CORS_HEADERS },
     );
+    switch (opResult.kind) {
+      case 'access_denied':
+        return NextResponse.json(
+          { error: opResult.reason },
+          { status: 403, headers: CORS_HEADERS },
+        );
+      case 'invalid_input':
+        return NextResponse.json(
+          { error: opResult.reason },
+          { status: 400, headers: CORS_HEADERS },
+        );
+      case 'duplicate':
+      case 'ok':
+        return NextResponse.json(opResult.result, { headers: CORS_HEADERS });
+      // register doesn't use locks/idempotency today; these aren't reachable
+      case 'lock_held':
+      case 'in_flight':
+      case 'not_found':
+        return NextResponse.json(
+          { error: 'reason' in opResult ? opResult.reason : 'Unexpected state' },
+          { status: 500, headers: CORS_HEADERS },
+        );
+    }
   } catch (err) {
     // Kill switch translates to 503 + reason so the frontend can show
     // the "Agent temporarily closed" banner cleanly instead of a 500.
