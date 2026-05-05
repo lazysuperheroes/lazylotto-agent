@@ -78,13 +78,21 @@ export async function isKillSwitchEnabled(): Promise<boolean> {
 export async function getKillSwitchState(): Promise<KillSwitchState> {
   try {
     const redis = await getRedis();
-    const raw = await redis.get<string>(KILL_KEY);
+    const raw = await redis.get<unknown>(KILL_KEY);
     recordRedisSuccess();
     if (raw === null || raw === undefined) {
       return { enabled: false };
     }
+    // Upstash REST auto-deserializes JSON values — calling JSON.parse on
+    // an already-parsed object throws SyntaxError. Pre-fix the catch
+    // silently dropped the metadata (reason / enabledAt / enabledBy),
+    // so engaged kill switches showed only the generic "agent
+    // temporarily closed" toast in the dashboard. Other call sites
+    // (RedisStore.load, auth/session.ts) use the same guard.
     try {
-      const parsed = JSON.parse(raw) as Omit<KillSwitchState, 'enabled'>;
+      const parsed = (
+        typeof raw === 'string' ? JSON.parse(raw) : raw
+      ) as Omit<KillSwitchState, 'enabled'>;
       return { enabled: true, ...parsed };
     } catch {
       // Legacy flag with no metadata

@@ -61,12 +61,21 @@ export async function withIdempotency<T>(
 
   if (claim === null) {
     // Already claimed by a previous request. Read back the stored value.
-    const existing = await redis.get<string>(fullKey);
+    //
+    // Upstash REST auto-deserializes JSON values — calling JSON.parse on an
+    // already-parsed object throws SyntaxError. Other call sites in the
+    // codebase (RedisStore loaders, auth/session.ts, etc.) explicitly guard
+    // with `typeof raw === 'string' ? JSON.parse(raw) : raw` for this reason.
+    // Without the guard the catch silently downgraded `duplicate` to
+    // `in-flight`, defeating the whole replay-protection contract this file
+    // was added to enforce.
+    const existing = await redis.get<unknown>(fullKey);
     if (!existing || existing === 'pending') {
       return { kind: 'in-flight' };
     }
     try {
-      return { kind: 'duplicate', result: JSON.parse(existing) as T };
+      const parsed = (typeof existing === 'string' ? JSON.parse(existing) : existing) as T;
+      return { kind: 'duplicate', result: parsed };
     } catch {
       // Corrupted cache value — treat as in-flight so the caller
       // can retry. Don't try to clean up; let TTL expire.
