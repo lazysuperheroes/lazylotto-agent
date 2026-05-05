@@ -16,7 +16,15 @@ import { z } from 'zod';
 import type { MultiUserAgent } from '../../custodial/MultiUserAgent.js';
 import { getOperatorAccountId } from '../../hedera/wallet.js';
 import { withChecksum } from '../../utils/checksum.js';
-import { withUserLock } from '../../lib/locks.js';
+import {
+  playForUser,
+  withdrawForUser,
+  setStrategyForUser,
+  deregisterUserOp,
+  registerUserOp,
+  isOpFailure,
+  failureMessage,
+} from '../../services/userOps.js';
 import type { ServerContext } from './types.js';
 
 // Kill switch is now enforced at the domain layer (MultiUserAgent.playForUser,
@@ -96,50 +104,51 @@ export function registerMultiUserTools(
       const { auth } = authResult;
 
       try {
-        // For user tier, auto-fill accountId from their session
-        const resolvedAccountId = auth.tier === 'user'
-          ? auth.accountId
-          : (accountId ?? getOperatorAccountId(client));
-
-        // Check if this account is already registered
-        const existing = resolveUserId(resolvedAccountId);
-        if (existing) {
-          const existingUser = multiUser.getUserStatus(existing);
-          const agentWalletChecksummed = withChecksum(getOperatorAccountId(client));
-          return json({
-            status: 'already_registered',
-            userId: existing,
-            strategy: existingUser?.strategyName ?? 'unknown',
-            rakePercent: existingUser?.rakePercent ?? 0,
-            deposit: {
-              sendTo: agentWalletChecksummed,
-              memo: existingUser?.depositMemo ?? '',
-              acceptedTokens: ['HBAR', 'LAZY'],
-            },
-            message: `This account is already registered as ${existing}. ` +
-              `Use your existing deposit memo to fund your account.`,
-          });
-        }
-
-        const user = await multiUser.registerUser(resolvedAccountId, eoaAddress, strat, rakePercent);
-        const agentWallet = getOperatorAccountId(client);
-        const agentWalletChecksummed = withChecksum(agentWallet);
+        // 0.3.4: delegate to userOps.registerUserOp. Closes 0.3.4
+        // audit C3 (MCP tool was passing raw eoaAddress to
+        // NegotiationHandler.registerUser — for user-tier callers the
+        // EOA-based dedup leaked foreign user records). The service
+        // layer enforces eoaAddress === authAccountId for user tier
+        // and passes through for admin/operator tier.
+        const store = multiUser.getStoreInstance();
+        const agentWallet = withChecksum(getOperatorAccountId(client));
+        const opResult = await registerUserOp(
+          { store, multiUser },
+          {
+            authAccountId: auth.accountId,
+            authTier: auth.tier,
+            eoaAddress,
+            accountId,
+            strategy: strat,
+            rakePercent,
+            agentWallet,
+          },
+        );
+        if (isOpFailure(opResult)) return errorResult(failureMessage(opResult));
         return json({
-          status: 'registered',
-          userId: user.userId,
-          strategy: user.strategyName,
-          rakePercent: user.rakePercent,
+          status: opResult.result.status,
+          userId: opResult.result.userId,
+          strategy: opResult.result.strategy,
+          rakePercent: opResult.result.rakePercent,
           deposit: {
-            sendTo: agentWalletChecksummed,
-            memo: user.depositMemo,
+            sendTo: agentWallet,
+            memo: opResult.result.depositMemo,
             acceptedTokens: ['HBAR', 'LAZY'],
           },
-          instructions: [
-            `User registered successfully with ${user.rakePercent}% rake fee.`,
-            `To fund the account, send HBAR or LAZY to ${agentWalletChecksummed} with memo: ${user.depositMemo}`,
-            'The deposit watcher will detect the transfer within ~15 seconds.',
-            'Once funded, use multi_user_play to start a lottery session.',
-          ],
+          ...(opResult.result.status === 'registered'
+            ? {
+                instructions: [
+                  `User registered successfully with ${opResult.result.rakePercent}% rake fee.`,
+                  `To fund the account, send HBAR or LAZY to ${agentWallet} with memo: ${opResult.result.depositMemo}`,
+                  'The deposit watcher will detect the transfer within ~15 seconds.',
+                  'Once funded, use multi_user_play to start a lottery session.',
+                ],
+              }
+            : {
+                message:
+                  `This account is already registered as ${opResult.result.userId}. ` +
+                  `Use your existing deposit memo to fund your account.`,
+              }),
         });
       } catch (e) {
         return errorResult(`Registration failed: ${errorMsg(e)}`);
@@ -223,18 +232,12 @@ export function registerMultiUserTools(
         // refreshUser will pick up any deposits credited concurrently.
         await checkDeposits();
 
-        // withUserLock: refresh local cache, drain pendingLedger
-        // debits, run, flush before release. Closes cross-Lambda
-        // staleness + lock-released-before-flush + refund-then-play
-        // double-spend windows.
+        // 0.3.4: delegate to userOps. Same code path as
+        // POST /api/user/play; symmetry test enforces the parity.
         const store = multiUser.getStoreInstance();
-        const locked = await withUserLock(store, userId, async () =>
-          multiUser.playForUser(userId),
-        );
-        if ('lockHeld' in locked) {
-          return errorResult('Operation in progress for this user. Try again shortly.');
-        }
-        return json({ sessions: [locked.result] });
+        const opResult = await playForUser({ store, multiUser }, { userId });
+        if (isOpFailure(opResult)) return errorResult(failureMessage(opResult));
+        return json({ sessions: [opResult.result] });
       } catch (e) {
         return errorResult(`Play failed: ${errorMsg(e)}`);
       }
@@ -248,11 +251,24 @@ export function registerMultiUserTools(
     'Process a withdrawal for a user. Sends funds to their Hedera account.',
     {
       userId: z.string().optional().describe('User ID (auto-resolved for user tier)'),
-      amount: z.number().positive().describe('Amount to withdraw'),
+      amount: z
+        .number()
+        .finite()
+        .positive()
+        .max(1e9)
+        .describe('Amount to withdraw (positive finite number, < 1e9)'),
       token: z.string().default('hbar').describe('Token to withdraw: "hbar" or token ID'),
+      idempotency_key: z
+        .string()
+        .optional()
+        .describe(
+          'Optional client-supplied idempotency key (UUID recommended). ' +
+            'Same key returns cached result instead of executing twice. ' +
+            'Critical for MCP clients that retry on transport hiccups.',
+        ),
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
-    async ({ userId, amount, token, auth_token }) => {
+    async ({ userId, amount, token, idempotency_key, auth_token }) => {
       const authResult = await requireAuth(auth_token);
       if ('error' in authResult) return authResult.error;
       const { auth } = authResult;
@@ -267,16 +283,21 @@ export function registerMultiUserTools(
       if (!userId) return errorResult('userId is required');
 
       try {
-        // Same withUserLock contract as the dashboard's /api/user/withdraw
-        // route — closes the same three exposures.
+        // 0.3.4: delegate to userOps.withdrawForUser. Same code path
+        // as POST /api/user/withdraw — closes 0.3.4 audit C2 (MCP
+        // tool was missing withIdempotency, allowing double-withdraw
+        // via lost-response retry). idempotency_key is now the MCP-
+        // tool equivalent of the HTTP Idempotency-Key header.
         const store = multiUser.getStoreInstance();
-        const locked = await withUserLock(store, userId, async () =>
-          multiUser.processWithdrawal(userId, amount, token),
+        const opResult = await withdrawForUser(
+          { store, multiUser },
+          { userId, amount, token, idempotencyKey: idempotency_key ?? null },
         );
-        if ('lockHeld' in locked) {
-          return errorResult('Operation in progress for this user. Try again shortly.');
-        }
-        return json(locked.result);
+        if (isOpFailure(opResult)) return errorResult(failureMessage(opResult));
+        return json({
+          ...opResult.result,
+          ...(opResult.kind === 'duplicate' ? { replayed: true } : {}),
+        });
       } catch (e) {
         return errorResult(`Withdrawal failed: ${errorMsg(e)}`);
       }
@@ -307,12 +328,14 @@ export function registerMultiUserTools(
       if (!userId) return errorResult('userId is required');
 
       try {
-        multiUser.deregisterUser(userId);
-        const user = multiUser.getUserStatus(userId);
+        // 0.3.4: delegate to userOps.deregisterUserOp — closes 0.3.4
+        // audit C4 (MCP tool was missing withUserLock, allowing
+        // concurrent deregister + play to lost-update user state).
+        const store = multiUser.getStoreInstance();
+        const opResult = await deregisterUserOp({ store, multiUser }, { userId });
+        if (isOpFailure(opResult)) return errorResult(failureMessage(opResult));
         return json({
-          deregistered: true,
-          userId,
-          remainingBalance: user?.balances.tokens ?? {},
+          ...opResult.result,
           message: 'User deactivated. They can still withdraw remaining funds.',
         });
       } catch (e) {
@@ -393,30 +416,18 @@ export function registerMultiUserTools(
       if (!userId) return errorResult('userId is required');
 
       try {
-        const current = multiUser.getUserStatus(userId);
-        if (!current) return errorResult('User not found');
-
-        // Idempotent path: same strategy, no store write, no HCS-20
-        // message. Matches the POST /api/user/strategy behaviour so
-        // the two protocols produce identical responses.
-        if (current.strategyName === strategy) {
-          return json({
-            status: 'unchanged',
-            userId,
-            strategyName: current.strategyName,
-            strategyVersion: current.strategyVersion,
-          });
-        }
-
-        const previousStrategy = current.strategyName;
-        const updated = await multiUser.updateUserStrategy(userId, strategy);
-        return json({
-          status: 'updated',
-          userId: updated.userId,
-          strategyName: updated.strategyName,
-          strategyVersion: updated.strategyVersion,
-          previousStrategy,
-        });
+        // 0.3.4: delegate to userOps.setStrategyForUser. Closes 0.3.4
+        // audit C1 (MCP tool was missing withUserLock — strategy save
+        // could lost-update concurrent deposit credits) AND C15
+        // (unchanged-fast-path now runs against canonical post-refresh
+        // state, not stale local cache).
+        const store = multiUser.getStoreInstance();
+        const opResult = await setStrategyForUser(
+          { store, multiUser },
+          { userId, strategy, performedBy: auth.accountId },
+        );
+        if (isOpFailure(opResult)) return errorResult(failureMessage(opResult));
+        return json(opResult.result);
       } catch (e) {
         return errorResult(`Strategy change failed: ${errorMsg(e)}`);
       }

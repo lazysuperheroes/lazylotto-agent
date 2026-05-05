@@ -36,7 +36,6 @@
  * for 24h and trap the user.
  */
 
-import type { Client } from '@hashgraph/sdk';
 import type { IStore } from '../custodial/IStore.js';
 import type { MultiUserAgent } from '../custodial/MultiUserAgent.js';
 import type {
@@ -63,11 +62,15 @@ export type UserOpResult<T> =
   | { kind: 'invalid_input'; reason: string }
   | { kind: 'not_found'; reason?: string };
 
-/** Shared dependencies threaded through every op. */
+/** Shared dependencies threaded through every op.
+ *
+ * Hedera SDK Client lives on the `multiUser` agent — no need to pass
+ * it separately. Routes/MCP tools instantiate `multiUser` once via
+ * `getAgentContext()` and pass it here.
+ */
 export interface UserOpDeps {
   store: IStore;
   multiUser: MultiUserAgent;
-  client: Client;
 }
 
 /** Sentinel thrown from inside `withIdempotency` body when the user
@@ -315,7 +318,7 @@ export async function registerUserOp(
   deps: UserOpDeps,
   ctx: {
     authAccountId: string;
-    authTier: 'user' | 'admin' | 'operator';
+    authTier: 'user' | 'admin' | 'operator' | 'public';
     eoaAddress?: string;
     accountId?: string; // admin/operator only
     strategy?: string;
@@ -324,6 +327,12 @@ export async function registerUserOp(
   },
 ): Promise<UserOpResult<RegisterOk>> {
   // ── Resolve target accountId ───────────────────────────────
+  // Reject unauthenticated callers explicitly — registration mints a
+  // depositMemo and writes a user record, both of which require a
+  // verified session.
+  if (ctx.authTier === 'public') {
+    return { kind: 'access_denied', reason: 'Authentication required to register' };
+  }
   // For 'user' tier: the session's accountId is the canonical target.
   // For admin/operator: body.accountId may override (defaults to agent wallet).
   const resolvedAccountId =
@@ -528,5 +537,42 @@ export class ReplayDepositMirrorError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'ReplayDepositMirrorError';
+  }
+}
+
+// ── MCP-tool response helpers ────────────────────────────────────
+//
+// Convert UserOpResult to either a json result or errorResult call.
+// MCP tools use these to avoid repeating the switch boilerplate.
+
+export function isOpFailure<T>(
+  r: UserOpResult<T>,
+): r is Extract<
+  UserOpResult<T>,
+  | { kind: 'lock_held' }
+  | { kind: 'in_flight' }
+  | { kind: 'access_denied'; reason: string }
+  | { kind: 'invalid_input'; reason: string }
+  | { kind: 'not_found'; reason?: string }
+> {
+  return r.kind !== 'ok' && r.kind !== 'duplicate';
+}
+
+/** Error message for an MCP errorResult call. */
+export function failureMessage<T>(r: UserOpResult<T>): string {
+  switch (r.kind) {
+    case 'lock_held':
+      return 'Operation in progress for this user. Try again shortly.';
+    case 'in_flight':
+      return 'A previous request with this Idempotency-Key is still in progress. Retry shortly.';
+    case 'invalid_input':
+      return r.reason;
+    case 'access_denied':
+      return r.reason;
+    case 'not_found':
+      return r.reason ?? 'Not found';
+    case 'ok':
+    case 'duplicate':
+      throw new Error('failureMessage called on ok/duplicate result');
   }
 }

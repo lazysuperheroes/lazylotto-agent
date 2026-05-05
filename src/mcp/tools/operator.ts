@@ -16,6 +16,11 @@ import {
   acquireOperatorLock,
   releaseOperatorLock,
 } from '../../lib/locks.js';
+import {
+  withdrawOperatorFees,
+  isOpFailure,
+  failureMessage,
+} from '../../services/userOps.js';
 import type { ServerContext, AuthResult } from './types.js';
 
 // ── Registration ────────────────────────────────────────────────
@@ -64,23 +69,37 @@ export function registerOperatorTools(
     'operator_withdraw_fees',
     'Withdraw accumulated rake fees from the operator platform balance.',
     {
-      amount: z.number().positive().describe('Amount to withdraw'),
+      amount: z
+        .number()
+        .finite()
+        .positive()
+        .max(1e9)
+        .describe('Amount to withdraw (positive finite number, < 1e9)'),
       to: z.string().describe('Recipient Hedera account ID'),
       token: z.enum(['HBAR', 'LAZY']).default('HBAR').describe('Token to withdraw'),
+      idempotency_key: z
+        .string()
+        .optional()
+        .describe('Optional idempotency key for retry safety.'),
       auth_token: z.string().optional().describe('Auth token (required when MCP_AUTH_TOKEN is set)'),
     },
-    async ({ amount, to, token, auth_token }) => {
+    async ({ amount, to, token, idempotency_key, auth_token }) => {
       const authResult = await requireAuth(auth_token);
       const denied = requireOperator(authResult);
       if (denied) return denied;
       try {
-        const txId = await multiUser.operatorWithdrawFees(amount, to, token);
-        const op = multiUser.getOperatorBalance();
+        // 0.3.4: delegate to userOps.withdrawOperatorFees — same code
+        // path as POST /api/admin/withdraw-fees. NaN/Infinity guard
+        // (zod .finite()) + idempotency.
+        const store = multiUser.getStoreInstance();
+        const opResult = await withdrawOperatorFees(
+          { store, multiUser },
+          { amount, to, token, idempotencyKey: idempotency_key ?? null },
+        );
+        if (isOpFailure(opResult)) return errorResult(failureMessage(opResult));
         return json({
-          withdrawn: amount,
-          to,
-          transactionId: txId,
-          remainingBalances: op.balances,
+          ...opResult.result,
+          ...(opResult.kind === 'duplicate' ? { replayed: true } : {}),
         });
       } catch (e) {
         return errorResult(`Withdrawal failed: ${errorMsg(e)}`);
