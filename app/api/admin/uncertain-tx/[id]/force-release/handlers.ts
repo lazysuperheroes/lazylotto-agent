@@ -256,10 +256,12 @@ async function handleWithdrawal(
   }
   if (!progress.auditWrittenAt) {
     try {
+      // F18: include withdrawTxId so the reader dedups.
       await ctx.accounting.recordWithdrawal(
         details.recipientAccountId ?? '',
         details.amount,
         details.tokenKey,
+        entry.transactionId,
       );
       progress.auditWrittenAt = new Date().toISOString();
       await stamp();
@@ -417,10 +419,12 @@ async function handleOperatorFee(
 
   if (!progress.auditWrittenAt) {
     try {
+      // F18: include withdrawTxId so the reader dedups.
       await ctx.accounting.recordOperatorWithdrawal(
         ctx.agentAccountId,
         details.amount,
         details.tokenKey,
+        entry.transactionId,
       );
       progress.auditWrittenAt = new Date().toISOString();
       await stamp();

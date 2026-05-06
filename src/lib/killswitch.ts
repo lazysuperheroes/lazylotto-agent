@@ -107,11 +107,61 @@ export async function getKillSwitchState(): Promise<KillSwitchState> {
   }
 }
 
-/** Engage the kill switch. Provide a reason for the audit trail. */
+/**
+ * Minimal AccountingService surface needed for the killswitch
+ * audit anchor. Defined locally so killswitch.ts doesn't import
+ * the full AccountingService (which would create a circular
+ * dependency through MultiUserAgent → Reconciliation → killswitch).
+ */
+interface KillswitchAuditWriter {
+  recordControlEvent(
+    event:
+      | 'killswitch_enabled'
+      | 'killswitch_disabled'
+      | 'force_release'
+      | 'force_release_override',
+    details: Record<string, unknown>,
+  ): Promise<void>;
+}
+
+/**
+ * Engage the kill switch.
+ *
+ * F22 (2026-05-06 audit MO-6): the HCS-20 audit anchor is written
+ * BEFORE the Redis flip. If the anchor fails, we still flip Redis
+ * (operator safety > audit completeness during an emergency) but
+ * log loudly so the operator can write the anchor manually. Without
+ * the anchor, a compromised operator could pause the agent during
+ * an attack window with zero on-chain footprint.
+ *
+ * `accounting` is optional for backward compat (CLI direct calls,
+ * tests). HTTP routes pass `multiUser.getAccountingForRecovery()`.
+ */
 export async function enableKillSwitch(
   reason: string,
   enabledBy: string,
+  accounting?: KillswitchAuditWriter,
 ): Promise<void> {
+  if (accounting) {
+    try {
+      await accounting.recordControlEvent('killswitch_enabled', {
+        reason,
+        by: enabledBy,
+      });
+    } catch (err) {
+      logger.error(
+        'kill switch HCS-20 audit anchor failed; engaging anyway — ' +
+          'manual on-chain follow-up REQUIRED',
+        {
+          component: 'KillSwitch',
+          event: 'killswitch_anchor_failed_pre_engage',
+          reason,
+          enabledBy,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
+  }
   const redis = await getRedis();
   const state: Omit<KillSwitchState, 'enabled'> = {
     reason,
@@ -122,8 +172,36 @@ export async function enableKillSwitch(
   logger.warn('kill switch ENABLED', { reason, enabledBy });
 }
 
-/** Disengage the kill switch. */
-export async function disableKillSwitch(disabledBy: string): Promise<void> {
+/**
+ * Disengage the kill switch.
+ *
+ * F22: same pattern as `enableKillSwitch` — anchor first, Redis
+ * second. The `disabled` event is just as load-bearing as the
+ * `enabled` one for an external auditor reconstructing incident
+ * timing.
+ */
+export async function disableKillSwitch(
+  disabledBy: string,
+  accounting?: KillswitchAuditWriter,
+): Promise<void> {
+  if (accounting) {
+    try {
+      await accounting.recordControlEvent('killswitch_disabled', {
+        by: disabledBy,
+      });
+    } catch (err) {
+      logger.error(
+        'kill switch disable HCS-20 audit anchor failed; disabling anyway — ' +
+          'manual on-chain follow-up REQUIRED',
+        {
+          component: 'KillSwitch',
+          event: 'killswitch_anchor_failed_pre_disengage',
+          disabledBy,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
+  }
   const redis = await getRedis();
   await redis.del(KILL_KEY);
   logger.warn('kill switch DISABLED', { disabledBy });

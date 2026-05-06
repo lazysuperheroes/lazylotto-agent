@@ -218,6 +218,26 @@ export function assertProductionRedis(): void {
       );
     }
   }
+
+  // F22 (2026-05-06 audit MO-6 / SM-11): a production deployment
+  // without RECONCILE_FAILURE_WEBHOOK_URL silently swallows every
+  // operator page from `escalateUncertainDlFailure`. The whole
+  // uncertain-tx escalation path becomes a logger.warn that nobody
+  // sees. Boot-fail rather than ship that. (Local dev / testnet are
+  // exempt because the webhook is operationally optional there.)
+  if (process.env.NODE_ENV === 'production') {
+    const webhook = process.env.RECONCILE_FAILURE_WEBHOOK_URL;
+    if (!webhook || webhook.trim() === '') {
+      throw new Error(
+        `PRODUCTION_ESCALATION_REQUIRED: RECONCILE_FAILURE_WEBHOOK_URL must ` +
+        `be set in production. Without it, every uncertain-tx escalation ` +
+        `(refund_uncertain DL write failed, malformed-DL retry-storm, ` +
+        `play_uncertain SUCCESS that needs manual settlement reconstruction) ` +
+        `degrades to logger.warn — operators never see the page. Set the ` +
+        `Slack/Discord webhook URL or accept the boot failure.`,
+      );
+    }
+  }
 }
 
 /** Get or create the Redis client. Survives Next.js dev HMR. */

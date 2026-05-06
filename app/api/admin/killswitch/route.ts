@@ -67,20 +67,17 @@ export const POST = withStore(async (request: Request) => {
       );
     }
 
-    await enableKillSwitch(reason, auth.accountId);
-
-    // Emit an on-chain audit anchor so the HCS-20 trail shows the
-    // incident. Best-effort — if the accounting service is down we
-    // still flip the flag (users safety > audit completeness).
-    try {
-      const { multiUser } = await getAgentContext();
-      await multiUser.recordControlEvent('killswitch_enabled', {
-        reason,
-        by: auth.accountId,
-      });
-    } catch (auditErr) {
-      console.warn('[killswitch] HCS-20 audit write failed:', auditErr);
-    }
+    // F22: anchor-first ordering (writes the HCS-20 control event
+    // BEFORE flipping Redis). The audit anchor inside enableKillSwitch
+    // is best-effort; an anchor failure is logged but does not block
+    // engagement (operator safety > audit completeness during an
+    // emergency).
+    const { multiUser } = await getAgentContext();
+    await enableKillSwitch(
+      reason,
+      auth.accountId,
+      multiUser.getAccountingForRecovery(),
+    );
 
     const state = await getKillSwitchState();
     return NextResponse.json(state, { headers: CORS_HEADERS });
@@ -97,18 +94,12 @@ export const DELETE = withStore(async (request: Request) => {
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
 
-    await disableKillSwitch(auth.accountId);
-
-    // Mirror the enable event on HCS-20 so the audit trail shows
-    // when the incident was resolved.
-    try {
-      const { multiUser } = await getAgentContext();
-      await multiUser.recordControlEvent('killswitch_disabled', {
-        by: auth.accountId,
-      });
-    } catch (auditErr) {
-      console.warn('[killswitch] HCS-20 audit write failed:', auditErr);
-    }
+    // F22: anchor-first ordering — see enable handler above.
+    const { multiUser } = await getAgentContext();
+    await disableKillSwitch(
+      auth.accountId,
+      multiUser.getAccountingForRecovery(),
+    );
 
     return NextResponse.json({ enabled: false }, { headers: CORS_HEADERS });
   } catch (err) {

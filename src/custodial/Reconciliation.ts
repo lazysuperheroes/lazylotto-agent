@@ -221,7 +221,7 @@ export async function reconcile(
   let uncertainPlaysVerified: PlayVerificationOutcome[] = [];
   if (ledger) {
     try {
-      uncertainPlaysVerified = await verifyUncertainPlays(store, ledger);
+      uncertainPlaysVerified = await verifyUncertainPlays(store, ledger, accounting);
     } catch (e) {
       logger.warn('play_uncertain verification failed during reconcile', {
         component: 'Reconciliation',

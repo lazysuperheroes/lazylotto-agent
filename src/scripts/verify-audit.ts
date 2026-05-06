@@ -176,6 +176,55 @@ function addToToken(map: Record<string, number>, token: string, amt: number): vo
   map[token] = (map[token] ?? 0) + amt;
 }
 
+/**
+ * F20 (2026-05-06 audit DR-02): operator-state ledger reconstructed
+ * from `rake` and `operator_withdrawal` events on the topic.
+ * `verify-audit.ts` previously skipped these events entirely, so the
+ * standalone DR tool produced no operator-side numbers — making the
+ * "Redis-loss recovery from topic alone" runbook impossible to
+ * actually run as documented.
+ */
+interface OperatorLedger {
+  /** Total rake collected across the topic. */
+  totalRakeCollected: Record<string, number>;
+  /** Total withdrawn by operator across the topic. */
+  totalWithdrawnByOperator: Record<string, number>;
+  /** Derived: totalRakeCollected − totalWithdrawnByOperator − rakeReversed. */
+  balances: Record<string, number>;
+  /** Total rake reversed via refunds (F9). */
+  totalRakeReversed: Record<string, number>;
+}
+
+function emptyOperatorLedger(): OperatorLedger {
+  return {
+    totalRakeCollected: {},
+    totalWithdrawnByOperator: {},
+    balances: {},
+    totalRakeReversed: {},
+  };
+}
+
+/**
+ * F20 / F21: warnings surfaced from control events and phantom-mint
+ * detection. Any non-empty list here is a CRITICAL signal — either
+ * the operator overrode the verifier (force_release_override),
+ * paged for manual reconstruction (play_uncertain_success_pending_triage),
+ * or the topic claims a deposit that doesn't exist on chain
+ * (phantom_mint).
+ */
+interface AuditAlert {
+  severity: 'critical' | 'warning' | 'info';
+  category:
+    | 'phantom_mint'
+    | 'force_release'
+    | 'force_release_override'
+    | 'play_uncertain_success_pending_triage'
+    | 'killswitch_enabled'
+    | 'killswitch_disabled'
+    | 'unverified';
+  message: string;
+}
+
 async function main() {
   const args = parseArgs();
 
@@ -253,8 +302,21 @@ async function main() {
     console.log('');
   }
 
-  // Build per-user ledgers
+  // Build per-user ledgers + operator ledger
   const ledgers = new Map<string, PerUserLedger>();
+  const operatorLedger = emptyOperatorLedger();
+  const alerts: AuditAlert[] = [];
+  // F18 / F21: collect deposit + withdrawal txIds for cross-checking.
+  const seenWithdrawTxIds = new Set<string>();
+  const depositTxIds: Array<{
+    sequence: number;
+    depositTxId: string;
+    user: string;
+    amount: number;
+    token: string;
+  }> = [];
+  let duplicateBurnsSuppressed = 0;
+
   function getOrCreateLedger(accountId: string): PerUserLedger {
     if (!ledgers.has(accountId)) {
       ledgers.set(accountId, emptyLedger(accountId));
@@ -267,18 +329,69 @@ async function main() {
       const led = getOrCreateLedger(event.user);
       led.totalDeposited += event.amount;
       addToToken(led.totalDepositedByToken, normalizeLegacyToken(event.token), event.amount);
+      // F21: collect mint depositTxIds for cross-checking against
+      // on-chain transfers. The `memo` field of a v1 mint carries
+      // `deposit:<originalTxId>` per UserLedger.creditDeposit's
+      // recordDeposit + recordRake calls. Extract the txId so we
+      // can verify it actually transferred to the agent.
+      const memo = (event as { memo?: string }).memo;
+      if (memo && memo.startsWith('deposit:')) {
+        depositTxIds.push({
+          sequence: event.sequence,
+          depositTxId: memo.slice('deposit:'.length),
+          user: event.user,
+          amount: event.amount,
+          token: normalizeLegacyToken(event.token),
+        });
+      }
     } else if (event.type === 'rake') {
       const led = getOrCreateLedger(event.user);
       led.totalRake += event.amount;
       addToToken(led.totalRakeByToken, normalizeLegacyToken(event.token), event.amount);
+      // F20: rake credits the operator's accumulated balance.
+      addToToken(
+        operatorLedger.totalRakeCollected,
+        normalizeLegacyToken(event.token),
+        event.amount,
+      );
     } else if (event.type === 'withdrawal') {
+      // F18: dedup duplicate burns by withdrawTxId. Pre-F18 messages
+      // had no withdrawTxId; those count as-is. With F18 in flight
+      // the reader may see two burns for the same on-chain
+      // withdrawal (Lambda crash + reseed). Collapse to one.
+      const txId = event.withdrawTxId;
+      if (txId) {
+        if (seenWithdrawTxIds.has(txId)) {
+          duplicateBurnsSuppressed++;
+          continue;
+        }
+        seenWithdrawTxIds.add(txId);
+      }
       const led = getOrCreateLedger(event.user);
       led.totalWithdrawn += event.amount;
       addToToken(led.totalWithdrawnByToken, normalizeLegacyToken(event.token), event.amount);
+    } else if (event.type === 'operator_withdrawal') {
+      // F20: operator_withdrawal debits operator balance.
+      const txId = event.withdrawTxId;
+      if (txId) {
+        if (seenWithdrawTxIds.has(txId)) {
+          duplicateBurnsSuppressed++;
+          continue;
+        }
+        seenWithdrawTxIds.add(txId);
+      }
+      const tk = normalizeLegacyToken(event.token);
+      addToToken(operatorLedger.totalWithdrawnByOperator, tk, event.amount);
     } else if (event.type === 'refund') {
       const led = getOrCreateLedger(event.user);
       led.totalRefunded += event.amount;
       addToToken(led.totalRefundedByToken, normalizeLegacyToken(event.token), event.amount);
+      // F9 / F20: rake reversal (when the refund anchor includes it).
+      const reversed = (event as { rakeReversed?: number }).rakeReversed;
+      const reversedToken = (event as { rakeReversedToken?: string }).rakeReversedToken;
+      if (typeof reversed === 'number' && reversed > 0 && reversedToken) {
+        addToToken(operatorLedger.totalRakeReversed, normalizeLegacyToken(reversedToken), reversed);
+      }
     } else if (event.type === 'session') {
       const session = event.session;
       if (!session.user) continue;
@@ -298,8 +411,131 @@ async function main() {
       if (session.warnings.length > 0) {
         led.warnings.push(`session ${session.sessionId.slice(0, 8)}: ${session.warnings.join('; ')}`);
       }
+    } else if (event.type === 'control') {
+      // F20: surface load-bearing control events as alerts.
+      const desc = `seq=${event.sequence} ${event.event} by=${event.by}` +
+        (event.uncertainTxId ? ` tx=${event.uncertainTxId}` : '') +
+        (event.kind ? ` kind=${event.kind}` : '') +
+        (event.mirrorResult ? ` mirror=${event.mirrorResult}` : '') +
+        (event.reason ? ` reason="${event.reason}"` : '');
+      switch (event.event) {
+        case 'force_release_override':
+          alerts.push({
+            severity: 'critical',
+            category: 'force_release_override',
+            message: `force_release_override (operator overrode verifier with double-spend ack): ${desc}`,
+          });
+          break;
+        case 'force_release':
+          alerts.push({
+            severity: 'warning',
+            category: 'force_release',
+            message: `force_release: ${desc}`,
+          });
+          break;
+        case 'play_uncertain_success_pending_triage':
+          alerts.push({
+            severity: 'critical',
+            category: 'play_uncertain_success_pending_triage',
+            message:
+              `play_uncertain SUCCESS pending manual reconstruction: ${desc}` +
+              (event.userId ? ` (user=${event.userId})` : '') +
+              (event.tokenReservations
+                ? ` reservations=${JSON.stringify(event.tokenReservations)}`
+                : ''),
+          });
+          break;
+        case 'killswitch_enabled':
+          alerts.push({
+            severity: 'warning',
+            category: 'killswitch_enabled',
+            message: `killswitch_enabled: ${desc}`,
+          });
+          break;
+        case 'killswitch_disabled':
+          alerts.push({
+            severity: 'info',
+            category: 'killswitch_disabled',
+            message: `killswitch_disabled: ${desc}`,
+          });
+          break;
+      }
     }
-    // deploy/control/operator_withdrawal/prize_recovery/unknown not credited per-user
+    // deploy/prize_recovery/unknown not credited per-user
+  }
+
+  // F20: derive operator balance per token =
+  //   totalRakeCollected − totalWithdrawnByOperator − totalRakeReversed
+  const opTokens = new Set([
+    ...Object.keys(operatorLedger.totalRakeCollected),
+    ...Object.keys(operatorLedger.totalWithdrawnByOperator),
+    ...Object.keys(operatorLedger.totalRakeReversed),
+  ]);
+  for (const tk of opTokens) {
+    operatorLedger.balances[tk] =
+      (operatorLedger.totalRakeCollected[tk] ?? 0) -
+      (operatorLedger.totalWithdrawnByOperator[tk] ?? 0) -
+      (operatorLedger.totalRakeReversed[tk] ?? 0);
+    operatorLedger.balances[tk] =
+      Math.round(operatorLedger.balances[tk] * 10000) / 10000;
+  }
+
+  // F21: phantom-mint cross-check. For every mint with a `deposit:<txId>`
+  // memo, fetch the on-chain transaction and assert SUCCESS + a positive
+  // transfer to the agent matching `amt`. If the topic claims a mint that
+  // doesn't exist on chain, the operator (or someone with the topic
+  // submit key) fabricated a credit — CRITICAL.
+  if (depositTxIds.length > 0) {
+    if (!args.json) {
+      console.log(`[2.5/3] Cross-checking ${depositTxIds.length} deposit mints against on-chain txs...`);
+    }
+    for (const dep of depositTxIds) {
+      try {
+        const url = `${mirrorBase}/transactions/${dep.depositTxId}`;
+        const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        if (res.status === 404) {
+          alerts.push({
+            severity: 'critical',
+            category: 'phantom_mint',
+            message:
+              `seq=${dep.sequence} mint claims depositTxId=${dep.depositTxId} for ${dep.amount} ${dep.token} ` +
+              `to user=${dep.user} but the mirror node has NO record of it (404). ` +
+              `Possible phantom mint — operator must justify or auditor refuses to validate.`,
+          });
+          continue;
+        }
+        if (!res.ok) {
+          alerts.push({
+            severity: 'warning',
+            category: 'unverified',
+            message:
+              `seq=${dep.sequence} mint depositTxId=${dep.depositTxId} could not be cross-checked (${res.status} from mirror). Retry.`,
+          });
+          continue;
+        }
+        const body = (await res.json()) as {
+          transactions?: Array<{ result: string }>;
+        };
+        const tx = body.transactions?.[0];
+        if (!tx || tx.result !== 'SUCCESS') {
+          alerts.push({
+            severity: 'critical',
+            category: 'phantom_mint',
+            message:
+              `seq=${dep.sequence} mint claims depositTxId=${dep.depositTxId} but the mirror result is ` +
+              `'${tx?.result ?? 'missing'}', not SUCCESS — the credit has no on-chain backing.`,
+          });
+        }
+      } catch (e) {
+        alerts.push({
+          severity: 'warning',
+          category: 'unverified',
+          message:
+            `seq=${dep.sequence} mint depositTxId=${dep.depositTxId} cross-check failed: ` +
+            `${e instanceof Error ? e.message : String(e)}`,
+        });
+      }
+    }
   }
 
   // Derive ledger balance per user (deposited - rake - spent - withdrawn - refunded)
@@ -349,6 +585,13 @@ async function main() {
       mirror: mirrorBase,
       stats: result.stats,
       ledgers: filteredLedgers,
+      // F20: include reconstructed operator state.
+      operator: operatorLedger,
+      // F20 / F21: surface alerts (phantom mints, force-release
+      // overrides, manual-triage anchors). Never empty when there's
+      // operational drama on the topic.
+      alerts,
+      duplicateBurnsSuppressed,
     }, null, 2));
   } else {
     console.log(`[3/3] Reconstructed ${filteredLedgers.length} user ledger(s):\n`);
@@ -377,6 +620,45 @@ async function main() {
           console.log(`      - ${w}`);
         }
       }
+      console.log('');
+    }
+
+    // F20: operator-state summary.
+    if (Object.keys(operatorLedger.balances).length > 0) {
+      console.log(`  ━━━ Operator state (reconstructed from topic) ━━━`);
+      console.log(`    Rake collected:        ${formatTokenMap(operatorLedger.totalRakeCollected)}`);
+      console.log(`    Rake reversed (refund): ${formatTokenMap(operatorLedger.totalRakeReversed) || '0'}`);
+      console.log(`    Operator withdrawn:    ${formatTokenMap(operatorLedger.totalWithdrawnByOperator) || '0'}`);
+      console.log(`    ──────────────────────────────`);
+      console.log(`    Operator balance:      ${formatTokenMap(operatorLedger.balances)}`);
+      console.log('');
+    }
+
+    // F20 / F21: alerts. Critical alerts always print loudly.
+    if (alerts.length > 0) {
+      const critical = alerts.filter((a) => a.severity === 'critical');
+      const warning = alerts.filter((a) => a.severity === 'warning');
+      const info = alerts.filter((a) => a.severity === 'info');
+      console.log(`  ━━━ Audit alerts ━━━`);
+      if (critical.length > 0) {
+        console.log(`    CRITICAL (${critical.length}):`);
+        for (const a of critical) console.log(`      ✖ ${a.message}`);
+      }
+      if (warning.length > 0) {
+        console.log(`    WARNING (${warning.length}):`);
+        for (const a of warning) console.log(`      ⚠ ${a.message}`);
+      }
+      if (info.length > 0) {
+        console.log(`    INFO (${info.length}):`);
+        for (const a of info) console.log(`      ℹ ${a.message}`);
+      }
+      console.log('');
+    }
+
+    if (duplicateBurnsSuppressed > 0) {
+      console.log(
+        `  Note: ${duplicateBurnsSuppressed} duplicate burn(s) collapsed via withdrawTxId dedup (F18).`,
+      );
       console.log('');
     }
 

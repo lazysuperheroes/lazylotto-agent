@@ -617,10 +617,13 @@ export async function verifyUncertainWithdrawals(
     // would emit a SECOND burn for the same withdrawal.
     if (accounting && !progress.auditWrittenAt) {
       try {
+        // F18: include withdrawTxId so the reader can dedup duplicate
+        // burns on Lambda-crash + reseed.
         await accounting.recordWithdrawal(
           details.recipientAccountId ?? '',
           details.amount,
           details.tokenKey,
+          withdrawTxId,
         );
         progress.auditWrittenAt = new Date().toISOString();
         await stampProgress(store, entry, progress);
@@ -632,11 +635,22 @@ export async function verifyUncertainWithdrawals(
           withdrawTxId,
           error: auditErr instanceof Error ? auditErr.message : String(auditErr),
         });
+        // F19 (2026-05-06 audit A-04): orphan must carry every
+        // parameter needed to manually replay
+        // `accounting.recordWithdrawal` — recipientAccountId is the
+        // first arg, dropping it forces the operator to JOIN against
+        // the original DL row (fragile if purged).
         await recordAuditOrphan(
           store,
           'withdrawal_uncertain',
           withdrawTxId,
-          { userId: details.userId, amount: details.amount, tokenKey: details.tokenKey },
+          {
+            userId: details.userId,
+            amount: details.amount,
+            tokenKey: details.tokenKey,
+            recipientAccountId: details.recipientAccountId ?? '',
+            withdrawTxId,
+          },
           auditErr,
         );
       }
@@ -802,10 +816,12 @@ export async function verifyUncertainOperatorFeeWithdrawals(
 
     if (accounting && !operatorProgress.auditWrittenAt) {
       try {
+        // F18: include withdrawTxId for reader dedup.
         await accounting.recordOperatorWithdrawal(
           agentAccountId,
           details.amount,
           details.tokenKey,
+          withdrawTxId,
         );
         operatorProgress.auditWrittenAt = new Date().toISOString();
         await stampProgress(store, entry, operatorProgress);
@@ -818,11 +834,19 @@ export async function verifyUncertainOperatorFeeWithdrawals(
             error: auditErr instanceof Error ? auditErr.message : String(auditErr),
           },
         );
+        // F19: include all replay params so operator can manually
+        // re-emit recordOperatorWithdrawal(agentAccountId, amount, token).
         await recordAuditOrphan(
           store,
           'operator_fee_withdraw_uncertain',
           withdrawTxId,
-          { amount: details.amount, tokenKey: details.tokenKey },
+          {
+            amount: details.amount,
+            tokenKey: details.tokenKey,
+            agentAccountId,
+            recipientAccountId: details.recipientAccountId ?? '',
+            withdrawTxId,
+          },
           auditErr,
         );
       }
@@ -861,6 +885,7 @@ export async function verifyUncertainOperatorFeeWithdrawals(
 export async function verifyUncertainPlays(
   store: IStore,
   ledger: UserLedger,
+  accounting?: AccountingService,
 ): Promise<PlayVerificationOutcome[]> {
   const outcomes: PlayVerificationOutcome[] = [];
 
@@ -974,6 +999,49 @@ export async function verifyUncertainPlays(
         tokenReservations: details.tokenReservations,
       },
     );
+
+    // F16 (2026-05-06 audit A-06 / DR-04): write the manual-triage
+    // anchor BEFORE escalating + resolving so the topic captures the
+    // spend even if Redis is wiped before manual reconstruction
+    // completes. Without this anchor, a topic-only auditor sees the
+    // user's full pre-play balance and the operator wallet short by
+    // the spend amount — silent insolvency. Best-effort: a failed
+    // anchor write is logged but does not block resolution. F15's
+    // `successTriagedAt` marker depends on the resolve write below.
+    if (accounting) {
+      try {
+        await accounting.recordControlEvent('play_uncertain_success_pending_triage', {
+          by: details.userId,
+          uncertainTxId,
+          userId: details.userId,
+          tokenReservations: details.tokenReservations,
+        });
+      } catch (anchorErr) {
+        logger.warn('play_uncertain SUCCESS triage anchor write failed', {
+          component: 'UncertainTx',
+          uncertainTxId,
+          error: anchorErr instanceof Error ? anchorErr.message : String(anchorErr),
+        });
+        try {
+          await store.upsertDeadLetter({
+            transactionId: `audit-orphan:${uncertainTxId}`,
+            timestamp: new Date().toISOString(),
+            error: `play_uncertain SUCCESS triage anchor write failed: ${anchorErr instanceof Error ? anchorErr.message : String(anchorErr)}`,
+            kind: 'audit_trail_orphaned',
+            details: {
+              sourceKind: 'play_uncertain',
+              sourceTxId: uncertainTxId,
+              userId: details.userId,
+              tokenReservations: details.tokenReservations,
+              phase: 'success_triage_anchor',
+            },
+          });
+        } catch {
+          /* logged above */
+        }
+      }
+    }
+
     await escalateUncertainDlFailure({
       kind: 'play_uncertain',
       uncertainTxId,
@@ -985,6 +1053,11 @@ export async function verifyUncertainPlays(
     try {
       await store.upsertDeadLetter({
         ...entry,
+        details: {
+          ...(entry.details ?? {}),
+          // F15 gate: force-release refuses entries already triaged.
+          successTriagedAt: new Date().toISOString(),
+        },
         resolvedAt: new Date().toISOString(),
         resolvedBy: 'reconcile-success-needs-manual-triage',
         resolutionTxId: uncertainTxId,

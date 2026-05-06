@@ -327,13 +327,15 @@ describe('assertProductionRedis', () => {
     }
   });
 
-  it("does not throw when NODE_ENV='production' and Upstash IS configured + HEDERA_NETWORK is valid", () => {
+  it("does not throw when NODE_ENV='production' and Upstash IS configured + HEDERA_NETWORK is valid + escalation webhook is set", () => {
     const original = env.NODE_ENV;
     const originalNet = env.HEDERA_NETWORK;
+    const originalWebhook = env.RECONCILE_FAILURE_WEBHOOK_URL;
     env.NODE_ENV = 'production';
     env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
     env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
     env.HEDERA_NETWORK = 'testnet'; // 0.3.4: also required in production
+    env.RECONCILE_FAILURE_WEBHOOK_URL = 'https://hooks.example.com/test'; // F22
     try {
       assertProductionRedis();
     } finally {
@@ -343,6 +345,34 @@ describe('assertProductionRedis', () => {
       delete env.UPSTASH_REDIS_REST_TOKEN;
       if (originalNet === undefined) delete env.HEDERA_NETWORK;
       else env.HEDERA_NETWORK = originalNet;
+      if (originalWebhook === undefined) delete env.RECONCILE_FAILURE_WEBHOOK_URL;
+      else env.RECONCILE_FAILURE_WEBHOOK_URL = originalWebhook;
+    }
+  });
+
+  it("THROWS with PRODUCTION_ESCALATION_REQUIRED when NODE_ENV='production' and webhook is missing (F22)", () => {
+    const original = env.NODE_ENV;
+    const originalNet = env.HEDERA_NETWORK;
+    const originalWebhook = env.RECONCILE_FAILURE_WEBHOOK_URL;
+    env.NODE_ENV = 'production';
+    env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    env.HEDERA_NETWORK = 'testnet';
+    delete env.RECONCILE_FAILURE_WEBHOOK_URL;
+    try {
+      assert.throws(
+        () => assertProductionRedis(),
+        /PRODUCTION_ESCALATION_REQUIRED/,
+      );
+    } finally {
+      if (original === undefined) delete env.NODE_ENV;
+      else env.NODE_ENV = original;
+      delete env.UPSTASH_REDIS_REST_URL;
+      delete env.UPSTASH_REDIS_REST_TOKEN;
+      if (originalNet === undefined) delete env.HEDERA_NETWORK;
+      else env.HEDERA_NETWORK = originalNet;
+      if (originalWebhook === undefined) delete env.RECONCILE_FAILURE_WEBHOOK_URL;
+      else env.RECONCILE_FAILURE_WEBHOOK_URL = originalWebhook;
     }
   });
 });
@@ -592,8 +622,10 @@ describe('assertProductionRedis: HEDERA_NETWORK guard (security finding #7)', ()
   it('does NOT throw when HEDERA_NETWORK is mainnet or testnet', () => {
     const origN = env.NODE_ENV;
     const origH = env.HEDERA_NETWORK;
+    const origW = env.RECONCILE_FAILURE_WEBHOOK_URL;
     env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
     env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    env.RECONCILE_FAILURE_WEBHOOK_URL = 'https://hooks.example.com/test'; // F22
     env.NODE_ENV = 'production';
     try {
       env.HEDERA_NETWORK = 'mainnet';
@@ -605,6 +637,8 @@ describe('assertProductionRedis: HEDERA_NETWORK guard (security finding #7)', ()
       delete env.UPSTASH_REDIS_REST_TOKEN;
       if (origN === undefined) delete env.NODE_ENV; else env.NODE_ENV = origN;
       if (origH === undefined) delete env.HEDERA_NETWORK; else env.HEDERA_NETWORK = origH;
+      if (origW === undefined) delete env.RECONCILE_FAILURE_WEBHOOK_URL;
+      else env.RECONCILE_FAILURE_WEBHOOK_URL = origW;
     }
   });
 });

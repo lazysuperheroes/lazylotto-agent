@@ -238,11 +238,22 @@ export class AccountingService {
 
   /**
    * Record a user withdrawal as an HCS-20 burn.
+   *
+   * F18 (2026-05-06 audit A-13 / DR-10 / MO-2b): the optional
+   * `withdrawTxId` is embedded in the burn message body so a reader
+   * can dedup duplicate burns for the same on-chain withdrawal. A
+   * Lambda crash mid-flight + reseed would otherwise re-run the
+   * verifier and emit a SECOND burn for the same withdrawal — the
+   * reader summing burns naively would report `totalWithdrawn = 2N`.
+   * With `withdrawTxId` in the body, duplicates collapse to one.
+   * Also closes MO-2b (compromised operator can't fabricate a burn
+   * without referencing a real on-chain tx that auditors can verify).
    */
   async recordWithdrawal(
     userAccountId: string,
     amount: number,
     token: string = 'HBAR',
+    withdrawTxId?: string,
   ): Promise<void> {
     await this.submitMessage({
       p: 'hcs-20',
@@ -252,6 +263,7 @@ export class AccountingService {
       amt: String(amount),
       from: userAccountId,
       memo: 'withdrawal',
+      ...(withdrawTxId ? { withdrawTxId } : {}),
     });
   }
 
@@ -260,11 +272,16 @@ export class AccountingService {
    *
    * This covers the case where the agent operator withdraws accumulated
    * rake fees from the platform balance.
+   *
+   * F18: same `withdrawTxId` body field as user withdrawals — reader
+   * dedups across the same key. Optional for backward compat with
+   * pre-F18 burn messages.
    */
   async recordOperatorWithdrawal(
     agentAccountId: string,
     amount: number,
     token: string = 'HBAR',
+    withdrawTxId?: string,
   ): Promise<void> {
     await this.submitMessage({
       p: 'hcs-20',
@@ -274,6 +291,7 @@ export class AccountingService {
       amt: String(amount),
       from: agentAccountId,
       memo: 'operator_withdrawal',
+      ...(withdrawTxId ? { withdrawTxId } : {}),
     });
   }
 
@@ -292,16 +310,30 @@ export class AccountingService {
       | 'killswitch_enabled'
       | 'killswitch_disabled'
       | 'force_release_override'
-      | 'force_release',
+      | 'force_release'
+      // F16 (2026-05-06 audit A-06 / DR-04): play_uncertain SUCCESS
+      // confirmation. The on-chain play landed but in-band settlement
+      // never ran; reservations stay held pending manual reconstruction.
+      // This anchor pins the event on the topic so a topic-only auditor
+      // sees the spend even before manual reconstruction completes.
+      | 'play_uncertain_success_pending_triage',
     details: {
       reason?: string;
       by: string;
-      /** For force_release: the dead-letter id being released. */
+      /** For force_release / play_uncertain_success_pending_triage: the dead-letter id. */
       uncertainTxId?: string;
       /** For force_release: the dead-letter kind. */
       kind?: string;
       /** For force_release_override: mirror outcome at time of override. */
       mirrorResult?: string;
+      /**
+       * For play_uncertain_success_pending_triage: the user whose
+       * reservations are held + the held tokenReservations array, so a
+       * topic-only auditor can see exactly which balance is owed back
+       * even if Redis is wiped before manual reconstruction completes.
+       */
+      userId?: string;
+      tokenReservations?: Array<{ token: string; amount: number }>;
     },
   ): Promise<void> {
     await this.submitMessage({
@@ -314,6 +346,10 @@ export class AccountingService {
       ...(details.uncertainTxId ? { uncertainTxId: details.uncertainTxId } : {}),
       ...(details.kind ? { kind: details.kind } : {}),
       ...(details.mirrorResult ? { mirrorResult: details.mirrorResult } : {}),
+      ...(details.userId ? { userId: details.userId } : {}),
+      ...(details.tokenReservations
+        ? { tokenReservations: details.tokenReservations }
+        : {}),
       timestamp: new Date().toISOString(),
     });
   }

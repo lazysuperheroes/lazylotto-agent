@@ -95,6 +95,14 @@ export interface NormalizedWithdrawalEvent extends BaseEvent {
   user: string;
   amount: number;
   token: string;
+  /**
+   * On-chain withdraw transaction id, when the burn message includes
+   * one. F18 (2026-05-06 audit A-13 / DR-10): reducers use this to
+   * dedup duplicate burns emitted by Lambda-crash + reseed
+   * (recordWithdrawal had no body-level idempotency before F18).
+   * Optional for backward compat with pre-F18 burns.
+   */
+  withdrawTxId?: string;
 }
 
 export interface NormalizedOperatorWithdrawalEvent extends BaseEvent {
@@ -102,6 +110,8 @@ export interface NormalizedOperatorWithdrawalEvent extends BaseEvent {
   agent: string;
   amount: number;
   token: string;
+  /** Same as NormalizedWithdrawalEvent.withdrawTxId. */
+  withdrawTxId?: string;
 }
 
 export interface NormalizedRefundEvent extends BaseEvent {
@@ -157,6 +167,18 @@ export interface NormalizedControlEvent extends BaseEvent {
   event: string;
   reason?: string;
   by: string;
+  /**
+   * F20 (2026-05-06 audit DR-06): preserve the load-bearing fields
+   * that `recordControlEvent` writes for force-release and
+   * play-uncertain triage anchors. Without these, `verify-audit.ts`
+   * cannot tell what kind of action a `force_release` event covered
+   * or which user's reservations are awaiting manual reconstruction.
+   */
+  uncertainTxId?: string;
+  kind?: string;
+  mirrorResult?: string;
+  userId?: string;
+  tokenReservations?: Array<{ token: string; amount: number }>;
 }
 
 /**
@@ -359,6 +381,16 @@ export async function parseAuditTopic(
     // ── control (v1, no shape change) ──────────────────────
     if (op === 'control') {
       stats.v1Messages++;
+      const tokenReservations = Array.isArray(msg.payload.tokenReservations)
+        ? (msg.payload.tokenReservations as Array<unknown>)
+            .filter(
+              (r): r is { token: string; amount: number } =>
+                typeof r === 'object' &&
+                r !== null &&
+                typeof (r as { token: unknown }).token === 'string' &&
+                typeof (r as { amount: unknown }).amount === 'number',
+            )
+        : undefined;
       events.push({
         sequence: msg.sequence,
         timestamp: msg.timestamp,
@@ -368,6 +400,21 @@ export async function parseAuditTopic(
           ? { reason: String(msg.payload.reason) }
           : {}),
         by: String(msg.payload.by ?? ''),
+        // F20: preserve every field `recordControlEvent` writes so
+        // `verify-audit.ts` can surface override / triage events.
+        ...(typeof msg.payload.uncertainTxId === 'string'
+          ? { uncertainTxId: msg.payload.uncertainTxId }
+          : {}),
+        ...(typeof msg.payload.kind === 'string'
+          ? { kind: msg.payload.kind }
+          : {}),
+        ...(typeof msg.payload.mirrorResult === 'string'
+          ? { mirrorResult: msg.payload.mirrorResult }
+          : {}),
+        ...(typeof msg.payload.userId === 'string'
+          ? { userId: msg.payload.userId }
+          : {}),
+        ...(tokenReservations ? { tokenReservations } : {}),
       });
       continue;
     }
@@ -804,6 +851,11 @@ function parseV1Burn(
   const amt = Number(msg.payload.amt);
   if (!Number.isFinite(amt)) return null;
 
+  // F18: preserve the body-level idempotency key when present.
+  const rawTxId = msg.payload.withdrawTxId;
+  const withdrawTxId =
+    typeof rawTxId === 'string' && rawTxId.length > 0 ? rawTxId : undefined;
+
   if (memo.startsWith('operator_withdrawal') || memo.startsWith('operator-withdrawal')) {
     return {
       sequence: msg.sequence,
@@ -812,6 +864,7 @@ function parseV1Burn(
       agent: from,
       amount: amt,
       token: resolveTokenField(msg.payload),
+      ...(withdrawTxId ? { withdrawTxId } : {}),
     };
   }
 
@@ -823,6 +876,7 @@ function parseV1Burn(
       user: from,
       amount: amt,
       token: resolveTokenField(msg.payload),
+      ...(withdrawTxId ? { withdrawTxId } : {}),
     };
   }
 
@@ -834,6 +888,7 @@ function parseV1Burn(
     user: from,
     amount: amt,
     token: resolveTokenField(msg.payload),
+    ...(withdrawTxId ? { withdrawTxId } : {}),
   };
 }
 

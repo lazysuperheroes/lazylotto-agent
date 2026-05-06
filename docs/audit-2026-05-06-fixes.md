@@ -396,7 +396,7 @@ manual-triage anchor write). If present, refuse with 409.
 
 ## Phase 4 — Audit anchor symmetry (7 items)
 
-### `[ ]` F16 (C) — `play_uncertain` SUCCESS audit anchor
+### `[x]` F16 (C) — `play_uncertain` SUCCESS audit anchor
 **Closes:** A-06, DR-04
 
 **Bug:** verifier's `play_uncertain` SUCCESS branch emits NO HCS-20
@@ -418,7 +418,7 @@ Stamp `successTriagedAt` on the entry (used by F15).
 
 ---
 
-### `[ ]` F17 (H) — In-band audit failure → `audit_trail_orphaned`
+### `[x]` F17 (H) — In-band audit failure → `audit_trail_orphaned`
 **Closes:** A-01, A-02, A-03
 
 **Bug:** in-band paths (`MultiUserAgent.ts`) silently swallow
@@ -441,7 +441,7 @@ Each must call `escalateUncertainDlFailure` so operators page on it.
 
 ---
 
-### `[ ]` F18 (H) — Burn body-level idempotency key
+### `[x]` F18 (H) — Burn body-level idempotency key
 **Closes:** A-13, DR-10, MO-2b
 
 **Bug:** `recordWithdrawal` and `recordOperatorWithdrawal` v1 burn
@@ -467,7 +467,7 @@ new field — verify schema constraints). Reader dedups by
 
 ---
 
-### `[ ]` F19 (M) — Verifier audit-orphan carries replay params
+### `[x]` F19 (M) — Verifier audit-orphan carries replay params
 **Closes:** A-04, A-15
 
 **Bug:** orphan rows from withdrawal/operator-fee verifier audit
@@ -485,7 +485,7 @@ DL row (fragile if purged).
 
 ---
 
-### `[ ]` F20 (H) — `verify-audit.ts` extensions
+### `[x]` F20 (H) — `verify-audit.ts` extensions
 **Closes:** DR-02, DR-06
 
 **Bug:** `verify-audit.ts` doesn't reduce `operator_withdrawal`
@@ -509,7 +509,7 @@ rows as warnings.
 
 ---
 
-### `[ ]` F21 (H) — Phantom mint cross-check in `verify-audit.ts`
+### `[x]` F21 (H) — Phantom mint cross-check in `verify-audit.ts`
 **Closes:** MO-2
 
 **Bug:** reader trusts the topic. A compromised operator (with
@@ -531,7 +531,7 @@ withdraw burns once F18 lands.
 
 ---
 
-### `[ ]` F22 (H) — HCS-20 anchor for killswitch + boot-time escalation URL check
+### `[x]` F22 (H) — HCS-20 anchor for killswitch + boot-time escalation URL check
 **Closes:** MO-6, SM-11
 
 **Bug:** `enableKillSwitch` / `disableKillSwitch` write Redis only,

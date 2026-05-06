@@ -416,12 +416,35 @@ export class MultiUserAgent {
         performedBy,
       });
     } catch (auditErr) {
-      // Local change already succeeded; don't block the caller on
-      // audit-trail hiccups. Operators see the warning in logs.
+      // F17 (2026-05-06 audit A-03): persist an `audit_trail_orphaned`
+      // dead-letter so the operator surfaces missing strategy_change
+      // anchors the same way verifier paths do — silently dropping
+      // would let an external auditor walking the topic see a
+      // strategy switch in the next session that the topic itself
+      // never recorded, looking like tampering.
       console.warn(
         `[MultiUserAgent] strategy_change audit write failed for ${userId}:`,
         auditErr instanceof Error ? auditErr.message : auditErr,
       );
+      try {
+        await this.store.upsertDeadLetter({
+          transactionId: `audit-orphan:strategy:${userId}:${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          error: `strategy_change audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
+          kind: 'audit_trail_orphaned',
+          details: {
+            sourceKind: 'strategy_change',
+            userId,
+            userAccountId: updated.hederaAccountId,
+            previousStrategy,
+            newStrategy: updated.strategyName,
+            newStrategyVersion: updated.strategyVersion,
+            performedBy,
+          },
+        });
+      } catch {
+        /* logged above */
+      }
     }
 
     return updated;
@@ -1294,10 +1317,49 @@ export class MultiUserAgent {
       // Record via HCS-20 (non-blocking) — pass token so the on-chain
       // record carries the underlying asset identity. The audit reader
       // prefers the explicit token over the legacy tick heuristic.
+      //
+      // F17 (2026-05-06 audit A-01): on failure, write an
+      // `audit_trail_orphaned` dead-letter so the operator surfaces
+      // the missing on-chain anchor. The local mutations
+      // (settleSpend / totalWithdrawn / recordWithdrawal) already
+      // happened — silently dropping the audit failure leaves
+      // topic-only reconstructions reporting a higher balance than
+      // Redis (= apparent operator under-payment).
       try {
-        await this.accounting.recordWithdrawal(user.hederaAccountId, amount, withdrawToken);
-      } catch {
-        /* accounting failure is not blocking */
+        await this.accounting.recordWithdrawal(
+          user.hederaAccountId,
+          amount,
+          withdrawToken,
+          transactionId,
+        );
+      } catch (auditErr) {
+        logger.warn('in-band withdrawal audit write failed', {
+          component: 'MultiUserAgent',
+          event: 'in_band_withdraw_audit_failed',
+          userId,
+          withdrawTxId: transactionId,
+          error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+        });
+        try {
+          await this.store.upsertDeadLetter({
+            transactionId: `audit-orphan:${transactionId}`,
+            timestamp: new Date().toISOString(),
+            error: `in-band withdrawal audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
+            kind: 'audit_trail_orphaned',
+            details: {
+              sourceKind: 'withdrawal',
+              sourceTxId: transactionId,
+              userId,
+              userAccountId: user.hederaAccountId,
+              amount,
+              tokenKey: withdrawToken,
+              recipientAccountId: user.hederaAccountId,
+              withdrawTxId: transactionId,
+            },
+          });
+        } catch {
+          /* logged above */
+        }
       }
 
       const record: WithdrawalRecord = {
@@ -1539,17 +1601,43 @@ export class MultiUserAgent {
     // Record via HCS-20 accounting (non-blocking) — pass the token so
     // the on-chain record can be correctly attributed when the operator
     // is withdrawing non-HBAR rake (e.g. LAZY platform fees).
+    //
+    // F17 (audit A-02): on failure, write `audit_trail_orphaned` so
+    // operators surface the missing on-chain anchor. F18 (audit A-13):
+    // include `transactionId` (the on-chain withdraw tx) so the reader
+    // can dedup duplicate burns on retry.
     try {
       await this.accounting.recordOperatorWithdrawal(
         getOperatorAccountId(this.client),
         amount,
         token,
+        transactionId,
       );
-    } catch (e) {
-      console.warn(
-        '[MultiUserAgent] HCS-20 operator withdrawal recording failed:',
-        e instanceof Error ? e.message : e,
-      );
+    } catch (auditErr) {
+      logger.warn('in-band operator-fee withdraw audit write failed', {
+        component: 'MultiUserAgent',
+        event: 'in_band_operator_withdraw_audit_failed',
+        withdrawTxId: transactionId,
+        error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+      });
+      try {
+        await this.store.upsertDeadLetter({
+          transactionId: `audit-orphan:${transactionId}`,
+          timestamp: new Date().toISOString(),
+          error: `in-band operator-fee withdraw audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
+          kind: 'audit_trail_orphaned',
+          details: {
+            sourceKind: 'operator_fee_withdraw',
+            sourceTxId: transactionId,
+            agentAccountId: getOperatorAccountId(this.client),
+            amount,
+            tokenKey: token,
+            withdrawTxId: transactionId,
+          },
+        });
+      } catch {
+        /* logged above */
+      }
     }
 
     return transactionId;
