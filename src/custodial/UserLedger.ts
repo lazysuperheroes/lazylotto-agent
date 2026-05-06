@@ -185,7 +185,42 @@ export class UserLedger {
 
       // 7. Flush BEFORE releasing the lock so the next acquirer reads
       //    a fully-consistent Redis state.
-      await this.store.flush();
+      //
+      // R2-FG-30 (round-2 G-17): flush failure here is the worst
+      // possible state — local state mutated, Redis stale, lock about
+      // to release → next acquirer reads un-credited balance and a
+      // user appears short on funds. If flush throws we MUST escalate
+      // (page) so an operator can manually reconcile + force-flush.
+      try {
+        await this.store.flush();
+      } catch (flushErr) {
+        console.error(
+          `[UserLedger] CRITICAL: flush failed after credit ${txId} for user ${userId}. ` +
+            `Local state mutated, Redis NOT persisted. Releasing lock with ` +
+            `inconsistent state — operator must reconcile.`,
+          flushErr,
+        );
+        try {
+          await this.store.upsertDeadLetter({
+            transactionId: `audit-orphan:in-band:credit-flush:${txId}`,
+            timestamp: new Date().toISOString(),
+            error: `creditDeposit flush failed after recording: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+            kind: 'audit_trail_orphaned',
+            details: {
+              sourceKind: 'in_band_credit_flush',
+              sourceTxId: txId,
+              userId,
+              grossAmount,
+              token,
+              phase: 'flush_failed_post_record',
+            },
+          });
+        } catch {
+          /* if even this fails, the console.error above is the trail */
+        }
+        // Re-throw so callers see the failure and can retry / page.
+        throw flushErr;
+      }
 
       return newBalances;
     } catch (err) {

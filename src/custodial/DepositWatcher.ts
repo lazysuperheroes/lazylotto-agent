@@ -12,6 +12,68 @@ interface CreditInfo {
 }
 
 /**
+ * R2-FG-26 (round-2 G-01 P7): typed sentinel thrown by extractCredit
+ * when a deposit references an unknown token. pollOnce catches this
+ * specifically and HOLDS the watermark for that tx so the next poll
+ * cycle (after the registry warms) can re-process it. Pre-fix: a
+ * generic Error was thrown and the watermark advanced unconditionally,
+ * silently dropping the deposit forever despite the comment claiming
+ * auto-retry.
+ */
+class UnknownTokenError extends Error {
+  readonly tokenId: string;
+  constructor(tokenId: string) {
+    super(
+      `Unknown token ${tokenId} — not in registry. ` +
+        'Async lookup triggered. Deposit deferred to dead-letter queue (watermark held).',
+    );
+    this.tokenId = tokenId;
+    this.name = 'UnknownTokenError';
+  }
+}
+
+/**
+ * R2-FG-28 (round-2 G-16): per-user dead-letter rate cap. Anyone can
+ * deposit to the agent with `memo: ll-VVVV` to credit victim V (or
+ * to push V over `maxUserBalance` and force a dead-letter write per
+ * deposit). The memo format is publicly observable. Without a cap an
+ * attacker can spam the dead-letter queue at low cost — DoS the
+ * operator console + bloat Redis.
+ *
+ * Counter is `dl-rate:<userId>` with a 1-hour rolling window. Above
+ * `MAX_DEAD_LETTERS_PER_USER_PER_HOUR`, the deposit is dropped with a
+ * single `deposit_spam_detected` aggregate row instead of N
+ * per-deposit rows.
+ */
+const MAX_DEAD_LETTERS_PER_USER_PER_HOUR = 5;
+const DL_RATE_CAP_TTL_SEC = 3600;
+
+async function shouldRateLimitDlForUser(
+  userId: string,
+): Promise<{ rateLimited: boolean; count: number }> {
+  try {
+    const { getRedis } = await import('../auth/redis.js');
+    const redis = await getRedis();
+    const key = `lla:${process.env.HEDERA_NETWORK ?? 'testnet'}:dl-rate:${userId}`;
+    const count = await redis.incr(key);
+    if (count === 1) {
+      try {
+        await redis.expire(key, DL_RATE_CAP_TTL_SEC);
+      } catch {
+        /* TTL is hygiene */
+      }
+    }
+    return {
+      rateLimited: count > MAX_DEAD_LETTERS_PER_USER_PER_HOUR,
+      count,
+    };
+  } catch {
+    // Redis unavailable — fail-open (don't block legitimate dead-letters).
+    return { rateLimited: false, count: 0 };
+  }
+}
+
+/**
  * In-memory observability counters for the deposit watcher.
  *
  * These counters live for the lifetime of the watcher instance —
@@ -159,6 +221,11 @@ export class DepositWatcher {
 
       let processed = 0;
       let lastTimestamp: string | null = null;
+      // R2-FG-26: track the earliest unknown-token tx we encounter
+      // this pass so we can hold the watermark before it. Holding the
+      // entire window lets the registry warm up + auto-retry on the
+      // next poll cycle.
+      let earliestUnknownTokenTs: string | null = null;
 
       for (const tx of txs) {
         try {
@@ -182,17 +249,57 @@ export class DepositWatcher {
           });
           // Add to dead-letter queue for operator review.
           // Capture sender + memo so users can find their stuck deposits.
+          // R2-FG-26: stamp `auto_retry: true` on unknown-token entries
+          // so the next pass can re-process once the registry warms.
+          const isUnknownToken = err instanceof UnknownTokenError;
           await this.store.upsertDeadLetter({
             transactionId: tx.transaction_id,
             timestamp: tx.consensus_timestamp,
             error: err instanceof Error ? err.message : String(err),
             sender: this.extractSender(tx) ?? undefined,
             memo: this.decodeMemo(tx.memo_base64),
+            ...(isUnknownToken
+              ? { details: { autoRetry: true, unknownTokenId: (err as UnknownTokenError).tokenId } }
+              : {}),
           });
+          if (isUnknownToken) {
+            // Hold watermark BEFORE this tx so it gets re-processed.
+            if (
+              !earliestUnknownTokenTs ||
+              tx.consensus_timestamp < earliestUnknownTokenTs
+            ) {
+              earliestUnknownTokenTs = tx.consensus_timestamp;
+            }
+            // Skip the lastTimestamp advance for this tx.
+            continue;
+          }
         }
         // Track the last timestamp regardless of processing outcome
         // so we advance past failed/skipped transactions
         lastTimestamp = tx.consensus_timestamp;
+      }
+
+      // R2-FG-26: if we encountered an unknown-token deposit, hold
+      // the watermark just BEFORE that tx so the next poll cycle
+      // (after async registry warmup) re-processes it. We pick the
+      // smaller of (last-known-good-timestamp, earliestUnknownTokenTs).
+      // Mirror's `timestampGt` is exclusive, so subtracting 1 nano
+      // would re-fetch the unknown token tx. We just leave lastTimestamp
+      // as the last known-good ts before any unknown-token tx (the
+      // `continue` above ensures we don't advance past one).
+      if (earliestUnknownTokenTs) {
+        // Don't advance past the earliest unknown-token tx — hold
+        // the watermark at whatever it was before this poll began.
+        // (lastTimestamp may already be earlier; if so, use it.)
+        if (lastTimestamp && lastTimestamp >= earliestUnknownTokenTs) {
+          // lastTimestamp surpassed earliestUnknownTokenTs (because
+          // some later tx processed cleanly). Roll back to just before
+          // the unknown-token tx so it gets re-tried. We approximate
+          // "just before" by leaving the watermark untouched this
+          // pass — auto_retry on the dead-letter row drives the
+          // re-process via `replay-deposit` admin tooling.
+          lastTimestamp = null;
+        }
       }
 
       // Advance watermark to the last transaction seen, even if some
@@ -286,6 +393,30 @@ export class DepositWatcher {
         memo,
         txId: tx.transaction_id,
       });
+      // R2-FG-28: per-user dead-letter rate cap — drop with aggregate.
+      const { rateLimited, count } = await shouldRateLimitDlForUser(user.userId);
+      if (rateLimited) {
+        logger.warn('deposit-spam dead-letter rate cap hit; dropping', {
+          component: 'DepositWatcher',
+          event: 'deposit_spam_dropped',
+          userId: user.userId,
+          countInWindow: count,
+          txId: tx.transaction_id,
+        });
+        // Single aggregate row keyed by user; subsequent drops within
+        // the window collapse onto it via upsertDeadLetter REPLACE.
+        await this.store.upsertDeadLetter({
+          transactionId: `deposit-spam:${user.userId}`,
+          timestamp: tx.consensus_timestamp,
+          error:
+            `Deposit-spam rate cap exceeded for user ${user.userId} ` +
+            `(>${MAX_DEAD_LETTERS_PER_USER_PER_HOUR} dead-letters in 1h). ` +
+            `Subsequent deposits are dropped without per-tx rows; this aggregate ` +
+            `replaces itself each time.`,
+          memo,
+        });
+        return false;
+      }
       await this.store.upsertDeadLetter({
         transactionId: tx.transaction_id,
         timestamp: tx.consensus_timestamp,
@@ -318,6 +449,26 @@ export class DepositWatcher {
         max: this.config.maxUserBalance,
         txId: tx.transaction_id,
       });
+      // R2-FG-28: per-user dead-letter rate cap.
+      const exceedRateCheck = await shouldRateLimitDlForUser(user.userId);
+      if (exceedRateCheck.rateLimited) {
+        logger.warn('deposit-spam dead-letter rate cap hit (max-balance path); dropping', {
+          component: 'DepositWatcher',
+          event: 'deposit_spam_dropped',
+          userId: user.userId,
+          countInWindow: exceedRateCheck.count,
+          txId: tx.transaction_id,
+        });
+        await this.store.upsertDeadLetter({
+          transactionId: `deposit-spam:${user.userId}`,
+          timestamp: tx.consensus_timestamp,
+          error:
+            `Deposit-spam rate cap exceeded for user ${user.userId} ` +
+            `(>${MAX_DEAD_LETTERS_PER_USER_PER_HOUR} dead-letters in 1h). Aggregate row.`,
+          memo,
+        });
+        return false;
+      }
       // Funds stay in wallet for manual handling — record so operators
       // can see this without scraping logs.
       await this.store.upsertDeadLetter({
@@ -414,11 +565,13 @@ export class DepositWatcher {
           if (!meta) {
             // Unknown token — trigger async lookup for future poll cycles
             void getTokenMeta(tt.token_id);
-            // Throw so pollOnce's catch block creates a dead-letter entry
-            throw new Error(
-              `Unknown token ${tt.token_id} — not in registry. ` +
-                'Async lookup triggered. Deposit deferred to dead-letter queue.'
-            );
+            // R2-FG-26: throw a typed sentinel so pollOnce can detect
+            // unknown-token deposits specifically and HOLD the
+            // watermark, giving the registry warm-up a chance to
+            // resolve. Pre-fix: watermark advanced unconditionally,
+            // and the comment promised auto-retry on next poll —
+            // which the watermark advance directly contradicted.
+            throw new UnknownTokenError(tt.token_id);
           }
           return {
             amount: tt.amount / Math.pow(10, meta.decimals),

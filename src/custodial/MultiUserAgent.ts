@@ -594,6 +594,12 @@ export class MultiUserAgent {
       throw reserveErr;
     }
 
+    // R2-FG-29: declare here (outside the try) so the catch block
+    // can reference them. Used to detect "settle happened then we
+    // threw before v2 anchor" → emit audit_trail_orphaned.
+    let settleHappened = false;
+    let partialSpendByToken: Record<string, number> = {};
+
     try {
       // Build a user-specific strategy with their EOA as prize
       // destination. Cap each reserved token's budget to the
@@ -670,6 +676,9 @@ export class MultiUserAgent {
       // (async fire-and-forget writes can race; the last write wins)
       user.lastPlayedAt = new Date().toISOString();
 
+      // R2-FG-29 (round-2 G-11 / G-12): `settleHappened` /
+      // `partialSpendByToken` are declared OUTSIDE the try so the
+      // catch block can reference them; we only assign here.
       // ── Per-token settlement (Stage 2) ─────────────────────
       //
       // Compute spending per token from report.poolResults using
@@ -704,6 +713,9 @@ export class MultiUserAgent {
         const actualSpent = spentByTokenId.get(token) ?? 0;
         if (actualSpent > 0) {
           this.ledger.settleSpend(userId, actualSpent, token);
+          // R2-FG-29: record partial-spend state for the outer catch.
+          partialSpendByToken[token] = actualSpent;
+          settleHappened = true;
         }
         const unused = reservedAmount - actualSpent;
         if (unused > 0) {
@@ -1081,6 +1093,42 @@ export class MultiUserAgent {
       //     in tokenReservations and let releaseReserve clamp to
       //     whatever's actually still reserved (it min()s against
       //     entry.reserved internally).
+      // R2-FG-29: if settle ran (partialSpendByToken non-empty) and
+      // we threw before the v2 anchor was written, write
+      // `audit_trail_orphaned` so the dashboard surfaces partial
+      // spend. The local balance has been debited; without this row
+      // the user appears short with no on-chain explanation.
+      if (settleHappened && Object.keys(partialSpendByToken).length > 0) {
+        try {
+          await this.store.upsertDeadLetter({
+            transactionId: `audit-orphan:in-band:play-settle:${userId}:${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            error:
+              `playForUser threw between settle and v2 anchor: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            kind: 'audit_trail_orphaned',
+            details: {
+              sourceKind: 'in_band_play_settle',
+              sourceTxId: 'unknown',
+              userId,
+              partialSpendByToken,
+              phase: 'settle_then_throw_pre_v2',
+            },
+          });
+        } catch {
+          /* logged below */
+        }
+        logger.error(
+          'R2-FG-29: playForUser settled balances then threw before v2 anchor — audit_trail_orphaned written',
+          {
+            component: 'MultiUserAgent',
+            event: 'play_settle_then_throw',
+            userId,
+            partialSpendByToken,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        );
+      }
       for (const [token, amount] of tokenReservations) {
         try {
           this.ledger.releaseReserve(userId, amount, token);

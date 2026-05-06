@@ -137,31 +137,77 @@ interface KillswitchAuditWriter {
  * `accounting` is optional for backward compat (CLI direct calls,
  * tests). HTTP routes pass `multiUser.getAccountingForRecovery()`.
  */
+/**
+ * R2-FG-25 (round-2 X-06 / R-12): bound HCS submit time. The pre-fix
+ * `await accounting.recordControlEvent` could hang for minutes during
+ * topic congestion — exactly the moment the operator wants to engage
+ * the killswitch. Bound at 5 seconds; on timeout, write an
+ * `audit_trail_orphaned` row + flip Redis anyway. The orphan row gives
+ * an operator the replay parameters to write the anchor by hand once
+ * the topic is healthy again.
+ */
+const KILLSWITCH_HCS_TIMEOUT_MS = 5_000;
+
+async function recordControlEventWithTimeout(
+  accounting: KillswitchAuditWriter,
+  event: 'killswitch_enabled' | 'killswitch_disabled',
+  details: { reason?: string; by: string },
+): Promise<{ ok: true } | { ok: false; reason: string; cause: unknown }> {
+  let timeoutHandle: NodeJS.Timeout | undefined;
+  try {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(
+        () => reject(new Error(`HCS submit timeout after ${KILLSWITCH_HCS_TIMEOUT_MS}ms`)),
+        KILLSWITCH_HCS_TIMEOUT_MS,
+      );
+    });
+    await Promise.race([
+      accounting.recordControlEvent(event, details),
+      timeoutPromise,
+    ]);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: err instanceof Error ? err.message : String(err),
+      cause: err,
+    };
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
 export async function enableKillSwitch(
   reason: string,
   enabledBy: string,
   accounting?: KillswitchAuditWriter,
 ): Promise<void> {
+  let anchorFailed = false;
+  let anchorReason: string | undefined;
   if (accounting) {
-    try {
-      await accounting.recordControlEvent('killswitch_enabled', {
-        reason,
-        by: enabledBy,
-      });
-    } catch (err) {
+    const result = await recordControlEventWithTimeout(accounting, 'killswitch_enabled', {
+      reason,
+      by: enabledBy,
+    });
+    if (!result.ok) {
+      anchorFailed = true;
+      anchorReason = result.reason;
       logger.error(
-        'kill switch HCS-20 audit anchor failed; engaging anyway — ' +
+        'kill switch HCS-20 audit anchor failed (timeout or error); engaging anyway — ' +
           'manual on-chain follow-up REQUIRED',
         {
           component: 'KillSwitch',
           event: 'killswitch_anchor_failed_pre_engage',
           reason,
           enabledBy,
-          error: err instanceof Error ? err.message : String(err),
+          error: result.reason,
         },
       );
     }
   }
+  // R2-FG-25: Redis flip happens regardless of anchor outcome. If the
+  // flip itself throws, propagate (caller / route layer must surface
+  // the failure — pre-fix swallowed Redis errors silently).
   const redis = await getRedis();
   const state: Omit<KillSwitchState, 'enabled'> = {
     reason,
@@ -170,6 +216,18 @@ export async function enableKillSwitch(
   };
   await redis.set(KILL_KEY, JSON.stringify(state));
   logger.warn('kill switch ENABLED', { reason, enabledBy });
+  if (anchorFailed) {
+    logger.error(
+      'killswitch engaged WITHOUT on-chain anchor — operator must replay manually',
+      {
+        component: 'KillSwitch',
+        event: 'killswitch_engaged_anchor_orphan',
+        reason,
+        enabledBy,
+        anchorReason,
+      },
+    );
+  }
 }
 
 /**
@@ -185,19 +243,18 @@ export async function disableKillSwitch(
   accounting?: KillswitchAuditWriter,
 ): Promise<void> {
   if (accounting) {
-    try {
-      await accounting.recordControlEvent('killswitch_disabled', {
-        by: disabledBy,
-      });
-    } catch (err) {
+    const result = await recordControlEventWithTimeout(accounting, 'killswitch_disabled', {
+      by: disabledBy,
+    });
+    if (!result.ok) {
       logger.error(
-        'kill switch disable HCS-20 audit anchor failed; disabling anyway — ' +
+        'kill switch disable HCS-20 audit anchor failed (timeout or error); disabling anyway — ' +
           'manual on-chain follow-up REQUIRED',
         {
           component: 'KillSwitch',
           event: 'killswitch_anchor_failed_pre_disengage',
           disabledBy,
-          error: err instanceof Error ? err.message : String(err),
+          error: result.reason,
         },
       );
     }

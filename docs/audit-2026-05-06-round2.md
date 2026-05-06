@@ -429,7 +429,7 @@ write can plant a fake record; refund honors it.
 
 ## Phase R2-5 — High (process / availability; 6 items)
 
-### `[ ]` R2-FG-25 (H) — Killswitch HCS submit timeout
+### `[x]` R2-FG-25 (H) — Killswitch HCS submit timeout
 **Closes:** X-06 + R-12 + B-09.
 
 **Bug:** `enableKillSwitch` awaits `recordControlEvent` with no timeout.
@@ -443,7 +443,7 @@ the operator wants to engage the killswitch. Plus B-09: anchor success
 
 ---
 
-### `[ ]` R2-FG-26 (H) — DepositWatcher unknown-token watermark hold
+### `[x]` R2-FG-26 (H) — DepositWatcher unknown-token watermark hold
 **Closes:** G-01 (P7).
 
 **Bug:** Unknown-token deposits dead-letter, but the watermark advances
@@ -456,7 +456,7 @@ on next poll; code contradicts.
 
 ---
 
-### `[ ]` R2-FG-27 (H) — CLI / MCP recover-stuck-prizes lock unification
+### `[x]` R2-FG-27 (H) — CLI / MCP recover-stuck-prizes lock unification
 **Closes:** G-07.
 
 **Bug:** CLI uses `acquireUserLock('recover-cli:0.0.X', 300)`; MCP uses
@@ -469,7 +469,7 @@ both proceed → cross-user prize contamination possible.
 
 ---
 
-### `[ ]` R2-FG-28 (H) — DepositWatcher per-user dead-letter rate cap
+### `[x]` R2-FG-28 (H) — DepositWatcher per-user dead-letter rate cap
 **Closes:** G-16.
 
 **Bug:** Anyone can deposit to the agent with `memo: ll-VVVV` to credit
@@ -482,7 +482,7 @@ Memo format is publicly observable.
 
 ---
 
-### `[ ]` R2-FG-29 (H) — `playForUser` settle-then-throw orphan
+### `[x]` R2-FG-29 (H) — `playForUser` settle-then-throw orphan
 **Closes:** G-11 + G-12.
 
 **Bug:** `playForUser` settle loop runs BEFORE v2 audit sequence. If
@@ -496,7 +496,7 @@ F17's audit-orphan only covers the v2-write block.
 
 ---
 
-### `[ ]` R2-FG-30 (M) — `creditDeposit` flush failure escalation
+### `[x]` R2-FG-30 (M) — `creditDeposit` flush failure escalation
 **Closes:** G-17.
 
 **Bug:** Step 7's `flush()` happens before user-lock release. If flush
