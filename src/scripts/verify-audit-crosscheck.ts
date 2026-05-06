@@ -35,6 +35,12 @@ export interface MirrorTxResult {
 export type AlertCategory =
   /** R2-FG-18: reader detected the same agentSeq claimed by multiple sessions. */
   | 'agent_seq_duplicate'
+  /** R2-FG-20: a user burn and an operator burn share the same withdrawTxId. */
+  | 'cross_kind_burn_collision'
+  /** R2-FG-22: refund.rakeReversed exceeds the user's accumulated rake. */
+  | 'phantom_rake_reversal'
+  /** R2-FG-23: operator balance went negative, conservation violation. */
+  | 'operator_balance_negative'
   | 'phantom_mint'
   | 'phantom_mint_amount_mismatch'
   | 'phantom_mint_wrong_recipient'

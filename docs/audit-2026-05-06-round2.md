@@ -349,7 +349,7 @@ that goes undetected.
 
 ## Phase R2-4 — High (data-integrity / refund correctness; 6 items)
 
-### `[ ]` R2-FG-19 (H) — F7 unspent guard tightening + per-deposit accounting
+### `[x]` R2-FG-19 (H) — F7 unspent guard tightening + per-deposit accounting
 **Closes:** P1 G-01 (F7 caveat).
 
 **Bug:** Guard uses `available + reserved >= netAmount`. A deposit fully
@@ -363,7 +363,7 @@ state can drift between check and submit.
 
 ---
 
-### `[ ]` R2-FG-20 (H) — F18 dedup hardening
+### `[x]` R2-FG-20 (H) — F18 dedup hardening
 **Closes:** R-10 + TR-14 + B-07 (partial).
 
 **Bugs:**
@@ -378,7 +378,7 @@ state can drift between check and submit.
 
 ---
 
-### `[ ]` R2-FG-21 (M) — F18 mixed-version transition
+### `[x]` R2-FG-21 (M) — F18 mixed-version transition
 **Closes:** TR-05.
 
 **Bug:** Pre-F18 burn (no `withdrawTxId`) + post-F18 burn (with) for the
@@ -390,7 +390,7 @@ same on-chain withdrawal both count. User `totalWithdrawn = 2N`.
 
 ---
 
-### `[ ]` R2-FG-22 (H) — `rakeReversed` cross-check against rake history
+### `[x]` R2-FG-22 (H) — `rakeReversed` cross-check against rake history
 **Closes:** TR-04.
 
 **Bug:** Refund's `rakeReversed` field applied without cross-check.
@@ -403,7 +403,7 @@ operator-balance ledger goes arbitrarily negative.
 
 ---
 
-### `[ ]` R2-FG-23 (H) — Operator-balance-negative alert
+### `[x]` R2-FG-23 (H) — Operator-balance-negative alert
 **Closes:** TR-01 + TR-11.
 
 **Bug:** `verify-audit.ts` prints negative operator balances as JSON
@@ -415,7 +415,7 @@ numbers but raises NO alert. Conservation violations slip past.
 
 ---
 
-### `[ ]` R2-FG-24 (M) — F11 deposit-record on-chain cross-check
+### `[x]` R2-FG-24 (M) — F11 deposit-record on-chain cross-check
 **Closes:** B-15.
 
 **Bug:** F11's gate trusts `DepositRecord` blindly. Anyone with Redis

@@ -162,6 +162,8 @@ interface PerUserLedger {
   totalDepositedByToken: Record<string, number>;
   totalRake: number;
   totalRakeByToken: Record<string, number>;
+  /** R2-FG-22: per-user rake reversed via refunds, for sum-bound check. */
+  totalRakeReversedByToken: Record<string, number>;
   totalSpent: number;
   totalSpentByToken: Record<string, number>;
   totalWithdrawn: number;
@@ -186,6 +188,7 @@ function emptyLedger(userAccountId: string): PerUserLedger {
     totalDepositedByToken: {},
     totalRake: 0,
     totalRakeByToken: {},
+    totalRakeReversedByToken: {},
     totalSpent: 0,
     totalSpentByToken: {},
     totalWithdrawn: 0,
@@ -332,7 +335,21 @@ async function main() {
   // check (R2-FG-4) — every withdrawal/operator_withdrawal with a
   // `withdrawTxId` body is verified against the matching mirror tx.
   // Pre-F18 burns (no withdrawTxId) emit a soft warning per occurrence.
-  const seenWithdrawTxIds = new Set<string>();
+  //
+  // R2-FG-20 (round-2 TR-14): namespace dedup by burn kind so a user
+  // burn and an operator burn that legitimately share a withdrawTxId
+  // (e.g. shared on-chain tx that pays both) don't accidentally
+  // suppress one. Cross-kind collision is unusual and gets surfaced
+  // as a critical alert below.
+  const seenWithdrawTxIdsByKind: Record<
+    'user' | 'operator',
+    Set<string>
+  > = {
+    user: new Set(),
+    operator: new Set(),
+  };
+  /** Collisions across kinds — same txId claimed by both a user burn AND an operator burn. */
+  const crossKindBurnCollisions: Array<{ txId: string }> = [];
   const depositTxIds: Array<{
     sequence: number;
     timestamp: string;
@@ -353,6 +370,26 @@ async function main() {
   }> = [];
   /** Pre-F18 burns we couldn't cross-check, surfaced as a single rolled-up alert. */
   let preF18BurnCount = 0;
+  /**
+   * R2-FG-21 (round-2 TR-05): heuristic dedup across the F18
+   * transition. A pre-F18 burn (no withdrawTxId) and a post-F18 burn
+   * (with) for the same on-chain withdrawal both count under the
+   * F18 reader path → user `totalWithdrawn = 2N`. Heuristic: if a
+   * post-F18 burn matches a previously-seen pre-F18 burn by
+   * (user/agent, token, amount) within ±10min consensus drift,
+   * suppress the post-F18 count and warn.
+   */
+  type LegacyBurnKey = {
+    sequence: number;
+    timestampMs: number;
+    user: string; // for user withdrawals; for operator burns this is the agent
+    token: string;
+    amount: number;
+    kind: 'user' | 'operator';
+  };
+  const preF18LegacyBurns: LegacyBurnKey[] = [];
+  let mixedVersionDuplicatesSuppressed = 0;
+  const HEURISTIC_DEDUP_WINDOW_MS = 10 * 60 * 1000;
   let duplicateBurnsSuppressed = 0;
 
   function getOrCreateLedger(accountId: string): PerUserLedger {
@@ -399,12 +436,38 @@ async function main() {
       // the reader may see two burns for the same on-chain
       // withdrawal (Lambda crash + reseed). Collapse to one.
       const txId = event.withdrawTxId;
+      const tokenN = normalizeLegacyToken(event.token);
+      const tsMs = Date.parse(event.timestamp);
       if (txId) {
-        if (seenWithdrawTxIds.has(txId)) {
+        // R2-FG-20: namespace by kind. A cross-kind collision means
+        // an operator burn and a user burn cite the same on-chain tx —
+        // surface as a critical alert.
+        if (seenWithdrawTxIdsByKind.operator.has(txId)) {
+          crossKindBurnCollisions.push({ txId });
+        }
+        if (seenWithdrawTxIdsByKind.user.has(txId)) {
           duplicateBurnsSuppressed++;
           continue;
         }
-        seenWithdrawTxIds.add(txId);
+        // R2-FG-21: heuristic dedup across F18 transition. If we've
+        // already accounted for this same withdrawal via a pre-F18
+        // burn (same user/token/amount within ±10min), suppress.
+        const matchIdx = preF18LegacyBurns.findIndex(
+          (b) =>
+            b.kind === 'user' &&
+            b.user === event.user &&
+            b.token === tokenN &&
+            b.amount === event.amount &&
+            Number.isFinite(tsMs) &&
+            Math.abs(b.timestampMs - tsMs) <= HEURISTIC_DEDUP_WINDOW_MS,
+        );
+        if (matchIdx >= 0) {
+          mixedVersionDuplicatesSuppressed++;
+          preF18LegacyBurns.splice(matchIdx, 1);
+          seenWithdrawTxIdsByKind.user.add(txId);
+          continue;
+        }
+        seenWithdrawTxIdsByKind.user.add(txId);
         // R2-FG-4: queue user-withdrawal for phantom-burn cross-check.
         burnTxIds.push({
           sequence: event.sequence,
@@ -412,11 +475,21 @@ async function main() {
           withdrawTxId: txId,
           recipient: event.user,
           amount: event.amount,
-          token: normalizeLegacyToken(event.token),
+          token: tokenN,
           kind: 'user_withdrawal',
         });
       } else {
         preF18BurnCount++;
+        if (Number.isFinite(tsMs)) {
+          preF18LegacyBurns.push({
+            sequence: event.sequence,
+            timestampMs: tsMs,
+            user: event.user,
+            token: tokenN,
+            amount: event.amount,
+            kind: 'user',
+          });
+        }
       }
       const led = getOrCreateLedger(event.user);
       led.totalWithdrawn += event.amount;
@@ -424,12 +497,37 @@ async function main() {
     } else if (event.type === 'operator_withdrawal') {
       // F20: operator_withdrawal debits operator balance.
       const txId = event.withdrawTxId;
+      const tokenN = normalizeLegacyToken(event.token);
+      const tsMs = Date.parse(event.timestamp);
       if (txId) {
-        if (seenWithdrawTxIds.has(txId)) {
+        if (seenWithdrawTxIdsByKind.user.has(txId)) {
+          crossKindBurnCollisions.push({ txId });
+        }
+        if (seenWithdrawTxIdsByKind.operator.has(txId)) {
           duplicateBurnsSuppressed++;
           continue;
         }
-        seenWithdrawTxIds.add(txId);
+        // R2-FG-21: heuristic dedup for operator burns. The agent
+        // identity isn't carried on the burn event itself; we proxy
+        // by `(token, amount)` for the operator side. False-positive
+        // risk on legitimate same-amount fee withdrawals within
+        // 10min is acceptable — the alert text spells out the
+        // suppression so an operator can override manually.
+        const matchIdx = preF18LegacyBurns.findIndex(
+          (b) =>
+            b.kind === 'operator' &&
+            b.token === tokenN &&
+            b.amount === event.amount &&
+            Number.isFinite(tsMs) &&
+            Math.abs(b.timestampMs - tsMs) <= HEURISTIC_DEDUP_WINDOW_MS,
+        );
+        if (matchIdx >= 0) {
+          mixedVersionDuplicatesSuppressed++;
+          preF18LegacyBurns.splice(matchIdx, 1);
+          seenWithdrawTxIdsByKind.operator.add(txId);
+          continue;
+        }
+        seenWithdrawTxIdsByKind.operator.add(txId);
         // R2-FG-4: queue operator-withdrawal for phantom-burn cross-check.
         // Recipient is unknown without `--agent` (the operator may
         // sweep rake to an external treasury), so the validator only
@@ -446,9 +544,18 @@ async function main() {
         });
       } else {
         preF18BurnCount++;
+        if (Number.isFinite(tsMs)) {
+          preF18LegacyBurns.push({
+            sequence: event.sequence,
+            timestampMs: tsMs,
+            user: '__operator__',
+            token: tokenN,
+            amount: event.amount,
+            kind: 'operator',
+          });
+        }
       }
-      const tk = normalizeLegacyToken(event.token);
-      addToToken(operatorLedger.totalWithdrawnByOperator, tk, event.amount);
+      addToToken(operatorLedger.totalWithdrawnByOperator, tokenN, event.amount);
     } else if (event.type === 'refund') {
       const led = getOrCreateLedger(event.user);
       led.totalRefunded += event.amount;
@@ -457,7 +564,11 @@ async function main() {
       const reversed = (event as { rakeReversed?: number }).rakeReversed;
       const reversedToken = (event as { rakeReversedToken?: string }).rakeReversedToken;
       if (typeof reversed === 'number' && reversed > 0 && reversedToken) {
-        addToToken(operatorLedger.totalRakeReversed, normalizeLegacyToken(reversedToken), reversed);
+        const rT = normalizeLegacyToken(reversedToken);
+        addToToken(operatorLedger.totalRakeReversed, rT, reversed);
+        // R2-FG-22: track per-user reversed rake so we can cross-check
+        // against accumulated rake at the end of the reducer.
+        addToToken(led.totalRakeReversedByToken, rT, reversed);
       }
     } else if (event.type === 'session') {
       const session = event.session;
@@ -600,6 +711,57 @@ async function main() {
     }
   }
 
+  // R2-FG-22: per-user rakeReversed must not exceed accumulated rake.
+  // The rake message body has no `originalDepositTxId` so we can't do
+  // a per-deposit check; the sum-bound check at the user level still
+  // catches the "operator inflates rakeReversed: 999 for a deposit
+  // with 0 rake" exfiltration vector.
+  for (const led of ledgers.values()) {
+    for (const [token, reversed] of Object.entries(led.totalRakeReversedByToken)) {
+      const collected = led.totalRakeByToken[token] ?? 0;
+      if (reversed > collected + 1e-9) {
+        alerts.push({
+          severity: 'critical',
+          category: 'phantom_rake_reversal',
+          message:
+            `user=${led.userAccountId} reversed ${reversed} ${token} of rake across refunds, but only ` +
+            `${collected} ${token} of rake was ever collected from this user. ` +
+            `Operator-balance ledger goes arbitrarily negative — possible exfiltration via inflated ` +
+            `rakeReversed in refund anchors.`,
+        });
+      }
+    }
+  }
+
+  // R2-FG-23: any negative operator balance is a hard conservation
+  // violation. Pre-fix verify-audit printed the negative number with
+  // no alert.
+  for (const [token, bal] of Object.entries(operatorLedger.balances)) {
+    if (bal < -1e-9) {
+      alerts.push({
+        severity: 'critical',
+        category: 'operator_balance_negative',
+        message:
+          `operator balance for ${token} reconstructs to ${bal}, which is negative. ` +
+          `This means rake reversals + operator withdrawals exceeded total rake collected — ` +
+          `either F9 over-reversed (see R2-FG-22) or an operator withdrawal landed against ` +
+          `funds the topic doesn't show being collected.`,
+      });
+    }
+  }
+
+  // R2-FG-20: surface cross-kind burn collisions as critical.
+  for (const collision of crossKindBurnCollisions) {
+    alerts.push({
+      severity: 'critical',
+      category: 'cross_kind_burn_collision',
+      message:
+        `withdrawTxId=${collision.txId} is cited by BOTH a user withdrawal AND an operator withdrawal. ` +
+        `Cross-kind collisions are unexpected — pre-fix dedup would have suppressed one silently. ` +
+        `Inspect the topic to determine which is legitimate.`,
+    });
+  }
+
   // R2-FG-18: surface agentSeq duplicates as critical alerts.
   for (const dup of result.stats.agentSeqDuplicates) {
     alerts.push({
@@ -619,6 +781,17 @@ async function main() {
       message:
         `${preF18BurnCount} burn(s) on this topic predate F18 and have no withdrawTxId in the body — ` +
         `they cannot be cross-checked against on-chain transfers. New burns ship withdrawTxId; this is a legacy gap.`,
+    });
+  }
+  if (mixedVersionDuplicatesSuppressed > 0) {
+    alerts.push({
+      severity: 'info',
+      category: 'phantom_burn_pre_f18',
+      message:
+        `R2-FG-21: ${mixedVersionDuplicatesSuppressed} post-F18 burn(s) heuristically deduped against ` +
+        `pre-F18 burns matching by (user/token/amount, ±10min). This is the F18 transition window — ` +
+        `if you see this on a topic where every burn should have a withdrawTxId, the operator may have ` +
+        `replayed pre-F18 messages by accident.`,
     });
   }
 

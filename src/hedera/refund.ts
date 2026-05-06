@@ -73,6 +73,13 @@ export interface RefundLedgerOptions {
    * operator_initiated, etc.). Recorded in the audit entry.
    */
   reason?: string;
+  /**
+   * R2-FG-24: skip the on-chain cross-check that validates the
+   * `DepositRecord` against the mirror node. Default `false` —
+   * production runs MUST cross-check. Tests / offline scenarios can
+   * set this `true` to bypass the network call.
+   */
+  skipMirrorCrossCheck?: boolean;
 }
 
 // ── Mirror node transaction shape (partial) ─────────────────────
@@ -134,26 +141,133 @@ export async function processRefund(
       );
     }
 
-    // F7 (2026-05-06 audit U-04): consumed-balance guard. Refuse the
-    // refund BEFORE submitting on chain if the deposit's net unspent
-    // (user.available + reserved for the deposit's token) is less
-    // than the deposit's netAmount. Otherwise the operator pays
-    // twice — once for the consumed plays/withdrawals, again for
-    // the refund. The guard is a per-user aggregate proxy: if total
-    // unspent for this token is less than this deposit's netAmount,
-    // some prior consumption has eaten into it, so a full refund
-    // would over-pay.
+    // F7 + R2-FG-19 (round-2 G-01 / F7 caveat): consumed-balance
+    // guard. Pre-fix used `available + reserved >= netAmount` — a
+    // deposit fully reserved by an active play passed the guard, the
+    // play settled, and the refund went out anyway: operator paid
+    // twice. Now: `available >= netAmount` only (reserved excluded).
+    // Reserved funds are committed against an in-flight play; once
+    // the play settles they're gone, and refunding them would drain
+    // the operator the second time.
+    //
+    // The guard now runs UNDER the user lock acquired upstream so
+    // `available` can't drift between the check and the on-chain
+    // submit (e.g. another in-band play reserving against the same
+    // deposit). The lock key is `lockUser:<userId>` shared with the
+    // verifier (R2-FG-15 decision).
     const user = options.store.getUser(depositRecord.userId);
     if (user) {
       const tokenKey = depositRecord.tokenId ?? HBAR_TOKEN_KEY;
       const tokEntry = user.balances?.tokens?.[tokenKey];
-      const unspent = (tokEntry?.available ?? 0) + (tokEntry?.reserved ?? 0);
-      if (unspent < depositRecord.netAmount) {
+      const available = tokEntry?.available ?? 0;
+      const reserved = tokEntry?.reserved ?? 0;
+      if (available < depositRecord.netAmount) {
         throw new Error(
-          `Cannot refund deposit ${transactionId}: it has been ` +
-            `partially or fully consumed (unspent: ${unspent} ${tokenKey}, ` +
-            `deposit netAmount: ${depositRecord.netAmount}). Refunding ` +
-            `would drain operator funds against already-spent balance.`,
+          `Cannot refund deposit ${transactionId}: insufficient AVAILABLE balance ` +
+            `(available: ${available} ${tokenKey}, reserved: ${reserved}, ` +
+            `deposit netAmount: ${depositRecord.netAmount}). Reserved funds are ` +
+            `committed against an in-flight play and cannot be refunded — ` +
+            `wait for the play to settle, or release the reservation first.`,
+        );
+      }
+    }
+
+    // R2-FG-24 (round-2 B-15): cross-check the DepositRecord against
+    // the on-chain deposit tx. Pre-fix code trusted the
+    // DepositRecord blindly — anyone with Redis write access could
+    // plant a fake record (`{ userId, netAmount, ... }`) for a
+    // transactionId and `processRefund` would honour it. Fetch the
+    // deposit tx from the mirror node and assert SUCCESS + a positive
+    // transfer to the agent matching `netAmount + rakeAmount`.
+    //
+    // Skipped under `--skip-mirror-check` (test/CI scenarios where the
+    // mirror node isn't reachable). FAIL CLOSED in production: a
+    // mirror lookup failure rejects the refund — refunds are
+    // irreversible on-chain.
+    if (!options.skipMirrorCrossCheck) {
+      try {
+        const mirrorBase = getMirrorBaseUrl();
+        const url = `${mirrorBase}/transactions/${encodeURIComponent(transactionId)}`;
+        const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        if (res.status === 404) {
+          throw new Error(
+            `Cannot refund deposit ${transactionId}: mirror node has NO record of it (404). ` +
+              `Either the DepositRecord was planted via Redis write or the deposit tx never landed.`,
+          );
+        }
+        if (!res.ok) {
+          throw new Error(
+            `Cannot refund deposit ${transactionId}: mirror node returned ${res.status}. ` +
+              `Refusing to refund without on-chain confirmation.`,
+          );
+        }
+        const body = (await res.json()) as {
+          transactions?: Array<{
+            result?: string;
+            transfers?: Array<{ account: string; amount: number }>;
+            token_transfers?: Array<{ token_id: string; account: string; amount: number }>;
+          }>;
+        };
+        const tx = body.transactions?.[0];
+        if (!tx || tx.result !== 'SUCCESS') {
+          throw new Error(
+            `Cannot refund deposit ${transactionId}: mirror result is ` +
+              `'${tx?.result ?? 'missing'}', not SUCCESS — the credit has no on-chain backing.`,
+          );
+        }
+        // Validate transfer to agent matching gross amount.
+        const agentId = client.operatorAccountId?.toString();
+        const grossAmount = depositRecord.netAmount + depositRecord.rakeAmount;
+        if (!agentId) {
+          // Defensive — if we don't know the agent we can't cross-check
+          // the recipient. Skip the recipient match but warn.
+          console.warn(
+            '[Refund] R2-FG-24: client has no operatorAccountId; ' +
+              'mirror cross-check limited to SUCCESS only.',
+          );
+        } else if (depositRecord.tokenId === null) {
+          // HBAR. Expected tinybars = grossAmount * 1e8.
+          const expected = Math.round(grossAmount * 1e8);
+          const incoming = (tx.transfers ?? []).filter(
+            (t) => t.account === agentId && t.amount > 0,
+          );
+          const matched = incoming.find((t) => Math.abs(t.amount - expected) <= 1);
+          if (!matched) {
+            throw new Error(
+              `Cannot refund deposit ${transactionId}: on-chain HBAR transfers to agent ${agentId} ` +
+                `do not include a positive entry of ${expected} tinybars (gross=${grossAmount} HBAR). ` +
+                `DepositRecord may have been planted.`,
+            );
+          }
+        } else {
+          // HTS. Decimals lookup left to caller's mirror; here we
+          // enforce direction + matching token_id only. The reader
+          // does the precise decimals comparison via verify-audit.
+          const tokenId = depositRecord.tokenId;
+          const incoming = (tx.token_transfers ?? []).filter(
+            (t) =>
+              t.token_id === tokenId &&
+              t.account === agentId &&
+              t.amount > 0,
+          );
+          if (incoming.length === 0) {
+            throw new Error(
+              `Cannot refund deposit ${transactionId}: on-chain has no positive token_transfer ` +
+                `for token ${tokenId} to agent ${agentId}. ` +
+                `DepositRecord may have been planted.`,
+            );
+          }
+        }
+      } catch (e) {
+        // Re-throw our own errors (we want the refund refused).
+        if (e instanceof Error && e.message.startsWith('Cannot refund deposit')) {
+          throw e;
+        }
+        // Network / parse errors: fail-closed.
+        throw new Error(
+          `Cannot refund deposit ${transactionId}: on-chain cross-check failed ` +
+            `(${e instanceof Error ? e.message : String(e)}). Refusing to refund — ` +
+            `refunds are irreversible.`,
         );
       }
     }

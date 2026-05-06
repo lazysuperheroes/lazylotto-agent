@@ -209,6 +209,7 @@ describe('R2-FG-2: processRefund permanent refunded-originals SADD set', () => {
       () =>
         processRefund(fakeClient, 'tx-already-refunded', {
           store: fakeStore as never,
+          skipMirrorCrossCheck: true,
         }),
       /permanent refunded-originals/,
     );
@@ -258,6 +259,7 @@ describe('R2-FG-2: processRefund permanent refunded-originals SADD set', () => {
       () =>
         processRefund(fakeClient, 'tx-malformed-claim', {
           store: fakeStore as never,
+          skipMirrorCrossCheck: true,
         }),
       /unexpected state/,
     );
@@ -307,13 +309,18 @@ describe('R2-FG-0 / F11: processRefund refuses tx without a recorded DepositReco
   });
 });
 
-describe('R2-FG-0 / F7: processRefund refuses a deposit whose unspent < netAmount', () => {
-  // The message "partially or fully consumed" originates ONLY from
-  // refund.ts:151-160 (the F7 guard), so a matching assert.rejects
-  // proves the guard fired. The guard runs BEFORE the SET-NX-EX claim
-  // and the on-chain submit.
+describe('R2-FG-0 / F7 / R2-FG-19: processRefund consumed-balance guard', () => {
+  // R2-FG-19 (round-2 G-01): the guard now compares `available`
+  // ALONE against netAmount (was `available + reserved`). A deposit
+  // fully reserved against an active play would have passed the
+  // pre-fix guard while the play settle-and-spend was already
+  // committed — refund + settle = double-pay.
+  //
+  // The error message "insufficient AVAILABLE balance" originates
+  // ONLY from the F7+R2-FG-19 guard, so a matching assert.rejects
+  // proves the guard fired.
 
-  it('throws "partially or fully consumed" when balance is fully spent', async () => {
+  it('throws when AVAILABLE balance is fully spent (R2-FG-19 tightened guard)', async () => {
     const fakeClient = {
       operatorAccountId: { toString: () => '0.0.9999' },
     } as unknown as import('@hashgraph/sdk').Client;
@@ -353,7 +360,123 @@ describe('R2-FG-0 / F7: processRefund refuses a deposit whose unspent < netAmoun
         processRefund(fakeClient, 'tx-spent', {
           store: fakeStore as never,
         }),
-      /partially or fully consumed/,
+      /insufficient AVAILABLE balance/,
+    );
+  });
+
+  it('R2-FG-24: refuses tx whose mirror record does not show transfer to agent matching DepositRecord', async () => {
+    // R2-FG-24 (round-2 B-15): pre-fix code trusted the
+    // DepositRecord blindly. A Redis writer planting `{ userId, netAmount,
+    // ... }` for a real on-chain transactionId that wasn't actually a
+    // deposit-to-agent would get the refund honored. The fix fetches
+    // the mirror tx and asserts a positive transfer to agent matching
+    // netAmount + rakeAmount.
+    const fakeClient = {
+      operatorAccountId: { toString: () => '0.0.9999' },
+    } as unknown as import('@hashgraph/sdk').Client;
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input);
+      if (url.includes('/transactions/tx-planted')) {
+        return new Response(null, { status: 404 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    };
+
+    const fakeStore = {
+      async isDepositCredited(): Promise<boolean> { return true; },
+      async getDepositByTxId() {
+        return {
+          transactionId: 'tx-planted',
+          userId: 'u-planted',
+          grossAmount: 100,
+          rakeAmount: 5,
+          netAmount: 95,
+          tokenId: null,
+          memo: 'planted',
+          timestamp: '2026-05-01T00:00:00Z',
+        };
+      },
+      getUser(userId: string) {
+        if (userId !== 'u-planted') return undefined;
+        return {
+          userId: 'u-planted',
+          balances: {
+            tokens: {
+              hbar: { available: 95, reserved: 0, totalDeposited: 95, totalWithdrawn: 0, totalRake: 0 },
+            },
+          },
+        };
+      },
+    };
+
+    try {
+      const { processRefund } = await import('./refund.js');
+      await assert.rejects(
+        () =>
+          processRefund(fakeClient, 'tx-planted', {
+            store: fakeStore as never,
+            // R2-FG-24 explicitly NOT skipped — we want the cross-check to fire.
+          }),
+        /mirror node has NO record/,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('R2-FG-19: throws when balance is FULLY RESERVED (pre-fix would have allowed double-pay)', async () => {
+    // Pre-fix guard: `available + reserved >= netAmount` — passes here
+    // (0 + 100 >= 100), the operator paid both the play settlement and
+    // the refund. Post-fix guard: `available >= netAmount` only, this
+    // case rejects.
+    const fakeClient = {
+      operatorAccountId: { toString: () => '0.0.9999' },
+    } as unknown as import('@hashgraph/sdk').Client;
+
+    const fakeStore = {
+      async isDepositCredited(): Promise<boolean> { return true; },
+      async getDepositByTxId() {
+        return {
+          transactionId: 'tx-reserved',
+          userId: 'u-1',
+          grossAmount: 100,
+          rakeAmount: 0,
+          netAmount: 100,
+          tokenId: null,
+          memo: 'm',
+          timestamp: '2026-05-01T00:00:00Z',
+        };
+      },
+      getUser(userId: string) {
+        if (userId !== 'u-1') return undefined;
+        return {
+          userId: 'u-1',
+          balances: {
+            tokens: {
+              // available=0, reserved=100. Pre-fix: passes (0+100>=100).
+              // Post-fix: rejects.
+              hbar: {
+                available: 0,
+                reserved: 100,
+                totalDeposited: 100,
+                totalWithdrawn: 0,
+                totalRake: 0,
+              },
+            },
+          },
+        };
+      },
+    };
+
+    const { processRefund } = await import('./refund.js');
+    await assert.rejects(
+      () =>
+        processRefund(fakeClient, 'tx-reserved', {
+          store: fakeStore as never,
+        }),
+      /insufficient AVAILABLE balance.*Reserved funds are committed/s,
     );
   });
 

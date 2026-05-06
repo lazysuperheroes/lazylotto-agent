@@ -255,6 +255,18 @@ export class AccountingService {
     token: string = 'HBAR',
     withdrawTxId?: string,
   ): Promise<void> {
+    // R2-FG-20 (round-2 R-10 / TR-14): empty-string withdrawTxId
+    // bypasses dedup at both the writer and the reader. F18 dedup
+    // depends on a non-empty key. Reject at the writer so callers
+    // cannot submit a corrupted no-op key by accident (truthy check
+    // below would treat `''` like undefined and silently drop the
+    // body field).
+    if (withdrawTxId !== undefined && withdrawTxId.length === 0) {
+      throw new Error(
+        'recordWithdrawal: withdrawTxId must be non-empty when provided ' +
+          '(F18/R2-FG-20: empty string bypasses dedup).',
+      );
+    }
     await this.submitMessage({
       p: 'hcs-20',
       op: 'burn',
@@ -283,6 +295,13 @@ export class AccountingService {
     token: string = 'HBAR',
     withdrawTxId?: string,
   ): Promise<void> {
+    // R2-FG-20: same empty-string guard as recordWithdrawal.
+    if (withdrawTxId !== undefined && withdrawTxId.length === 0) {
+      throw new Error(
+        'recordOperatorWithdrawal: withdrawTxId must be non-empty when provided ' +
+          '(F18/R2-FG-20: empty string bypasses dedup).',
+      );
+    }
     await this.submitMessage({
       p: 'hcs-20',
       op: 'burn',
