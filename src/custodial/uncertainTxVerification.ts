@@ -43,7 +43,10 @@ import { classifyMirrorResult, type MirrorResult } from '../hedera/responseCodes
 import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 import { logger } from '../lib/logger.js';
 import { escalateUncertainDlFailure } from '../lib/escalation.js';
-import { acquireUserLock, releaseUserLock } from '../lib/locks.js';
+import {
+  releaseUserLock,
+  tryAcquireUserLockWithBackoff,
+} from '../lib/locks.js';
 
 // ── Constants ─────────────────────────────────────────────────────
 
@@ -500,30 +503,12 @@ async function stampProgress(
 /**
  * F23 (2026-05-06 audit C-06): acquire the per-user lock with bounded
  * backoff before any per-user ledger mutation in the verifier paths.
- * Without this, the verifier's `settleSpend` / `releaseReserve` /
- * `updateBalance` race against an active in-band withdraw / play /
- * refund on the same user — both writers see + write the same
- * UserBalance object, breaking the `available + reserved <= deposited`
- * invariant across the two paths.
- *
- * Returns the fence token on success, or `null` if contention never
- * cleared. On null, the caller defers the entry to the next reconcile
- * pass (no mutation happens, verifier-lock released for retry).
- *
- * Backoff sized to absorb a typical in-band play (~3s) without
- * permanently blocking the verifier — a long-running play that holds
- * the user lock past 6.85s pushes the entry to next pass; the user
- * lock will eventually free.
+ * Implementation lives in `src/lib/locks.ts` as
+ * `tryAcquireUserLockWithBackoff` (R2-FG-1) so the verifier and the
+ * force-release handlers share the exact same primitive — operator
+ * actions can never race a concurrent in-band flow on the same user.
  */
-async function tryAcquireUserLockForVerify(userId: string): Promise<string | null> {
-  const backoffMs = [50, 100, 200, 500, 1000, 2000, 3000];
-  for (const delay of backoffMs) {
-    const token = await acquireUserLock(userId, 60);
-    if (token) return token;
-    await new Promise((resolve) => setTimeout(resolve, delay));
-  }
-  return null;
-}
+const tryAcquireUserLockForVerify = tryAcquireUserLockWithBackoff;
 
 // ── verifyUncertainWithdrawals ────────────────────────────────────
 

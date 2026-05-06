@@ -87,6 +87,42 @@ export async function releaseUserLock(
 }
 
 /**
+ * Default backoff schedule (ms) for `tryAcquireUserLockWithBackoff`.
+ * Sized to absorb a typical in-band play (~3s) without permanently
+ * blocking the caller — total ~6.85s, then return null and let the
+ * caller defer to a later retry.
+ */
+const USER_LOCK_BACKOFF_MS = [50, 100, 200, 500, 1000, 2000, 3000] as const;
+
+/**
+ * Acquire `lockUser:<userId>` with bounded retry/backoff. Returns the
+ * fence token on success, null after total backoff is exhausted.
+ *
+ * R2-FG-1 (2026-05-06 round-2 audit X-01/X-02/X-03): used by both
+ * the verifier and the force-release handlers so a force-release
+ * triggered by an operator can never race a concurrent in-band
+ * withdraw / play / refund on the same user. Both paths share the
+ * same `KEY_PREFIX.lockUser:<userId>` namespace; whoever acquires
+ * first serializes the other.
+ *
+ * On null, callers MUST defer the work (return 409 from a route, or
+ * leave the dead-letter `still_uncertain` for the next reconcile pass).
+ * NEVER fall through to mutate state without a token — that's the
+ * exact regression R2-FG-1 closes.
+ */
+export async function tryAcquireUserLockWithBackoff(
+  userId: string,
+  ttlSec = 60,
+): Promise<string | null> {
+  for (const delay of USER_LOCK_BACKOFF_MS) {
+    const token = await acquireUserLock(userId, ttlSec);
+    if (token) return token;
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+  return null;
+}
+
+/**
  * Higher-level user-lock helper that closes three subtle exposures the
  * raw `acquireUserLock` / `releaseUserLock` pair leaves open:
  *

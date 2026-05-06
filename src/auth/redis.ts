@@ -31,6 +31,12 @@ export const KEY_PREFIX = {
   killswitch: `lla:${NET}:killswitch`,
   // Refund replay protection (src/hedera/refund.ts)
   refunded: `lla:${NET}:refunded:`,
+  // R2-FG-2 (2026-05-06 round-2 audit S-04): permanent SADD set of
+  // original-tx-ids that have ever been refunded. The per-tx claim
+  // under `refunded:<txId>` has a 30-day TTL; this set has no TTL.
+  // `processRefund` checks BOTH so a TTL'd claim cannot allow a
+  // duplicate on-chain refund.
+  refundedOriginals: `lla:${NET}:refunded-originals`,
   // Pending ledger adjustments when a refund can't grab the user lock
   pendingLedger: `lla:${NET}:pending-ledger`,
   // Withdrawal velocity counters, keyed per token + user
@@ -88,6 +94,8 @@ interface RedisLike {
   smembers(key: string): Promise<string[]>;
   sadd(key: string, ...members: string[]): Promise<number>;
   srem(key: string, ...members: string[]): Promise<number>;
+  /** SISMEMBER — returns 1 if `member` is in the set at `key`, 0 otherwise. */
+  sismember(key: string, member: string): Promise<number>;
   incr(key: string): Promise<number>;
   // ── List ops (used by pending ledger queue) ────────────────
   rpush(key: string, value: string): Promise<number>;
@@ -347,6 +355,10 @@ function createInMemoryStore(): RedisLike {
       let removed = 0;
       for (const m of members) { if (s.delete(m)) removed++; }
       return removed;
+    },
+    async sismember(key: string, member: string) {
+      const s = sets.get(key);
+      return s?.has(member) ? 1 : 0;
     },
     async incr(key: string) {
       const entry = store.get(key);

@@ -40,6 +40,15 @@
  */
 
 import { parseAuditTopic, type RawTopicMessage } from '../custodial/hcs20-reader.js';
+import {
+  MirrorTxCache,
+  TokenDecimalsCache,
+  realDecimalsLookup,
+  realMirrorFetcher,
+  validateBurnCrossCheck,
+  validateMintCrossCheck,
+  type AuditAlert,
+} from './verify-audit-crosscheck.js';
 
 interface CliArgs {
   topic: string;
@@ -47,6 +56,13 @@ interface CliArgs {
   user: string | null;
   json: boolean;
   mirror: string | null;
+  /**
+   * R2-FG-3 / R2-FG-4: agent's Hedera account id for strict recipient
+   * validation in phantom-mint / phantom-burn cross-checks. Optional;
+   * if absent, the script falls back to looser checks (amount +
+   * direction only) since the topic alone doesn't carry agent info.
+   */
+  agentAccountId: string | null;
 }
 
 function parseArgs(): CliArgs {
@@ -56,6 +72,8 @@ function parseArgs(): CliArgs {
   let user: string | null = null;
   let json = false;
   let mirror: string | null = null;
+
+  let agentAccountId: string | null = null;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -69,6 +87,8 @@ function parseArgs(): CliArgs {
       json = true;
     } else if (a === '--mirror' && args[i + 1]) {
       mirror = args[++i]!;
+    } else if ((a === '--agent' || a === '--agent-account-id') && args[i + 1]) {
+      agentAccountId = args[++i]!;
     } else if (a === '--help' || a === '-h') {
       printHelp();
       process.exit(0);
@@ -86,7 +106,12 @@ function parseArgs(): CliArgs {
     process.exit(1);
   }
 
-  return { topic, network, user, json, mirror };
+  if (agentAccountId !== null && !/^\d+\.\d+\.\d+$/.test(agentAccountId)) {
+    console.error(`Error: --agent must be a Hedera account id (e.g. 0.0.123456), got '${agentAccountId}'`);
+    process.exit(1);
+  }
+
+  return { topic, network, user, json, mirror, agentAccountId };
 }
 
 function printHelp(): void {
@@ -109,6 +134,12 @@ Options:
   --json                 Output JSON instead of human-readable
   --mirror <url>         Custom mirror node URL
                          (default: https://{network}.mirrornode.hedera.com/api/v1)
+  --agent <accountId>    Agent's Hedera account id. When provided, the
+                         phantom-mint / phantom-burn cross-checks
+                         (R2-FG-3 / R2-FG-4) additionally validate that
+                         deposits flowed TO the agent and withdrawals
+                         flowed FROM the agent. Without it the
+                         cross-check still validates amount + direction.
   -h, --help             Show this help
 
 Examples:
@@ -204,26 +235,10 @@ function emptyOperatorLedger(): OperatorLedger {
   };
 }
 
-/**
- * F20 / F21: warnings surfaced from control events and phantom-mint
- * detection. Any non-empty list here is a CRITICAL signal — either
- * the operator overrode the verifier (force_release_override),
- * paged for manual reconstruction (play_uncertain_success_pending_triage),
- * or the topic claims a deposit that doesn't exist on chain
- * (phantom_mint).
- */
-interface AuditAlert {
-  severity: 'critical' | 'warning' | 'info';
-  category:
-    | 'phantom_mint'
-    | 'force_release'
-    | 'force_release_override'
-    | 'play_uncertain_success_pending_triage'
-    | 'killswitch_enabled'
-    | 'killswitch_disabled'
-    | 'unverified';
-  message: string;
-}
+// AuditAlert / MirrorTxCache / TokenDecimalsCache / validators are
+// imported from `./verify-audit-crosscheck.js` so unit tests can
+// drive them without invoking this script's `main()` side-effect.
+
 
 async function main() {
   const args = parseArgs();
@@ -306,15 +321,32 @@ async function main() {
   const ledgers = new Map<string, PerUserLedger>();
   const operatorLedger = emptyOperatorLedger();
   const alerts: AuditAlert[] = [];
-  // F18 / F21: collect deposit + withdrawal txIds for cross-checking.
+  // F18 / F21 / R2-FG-3 / R2-FG-4: collect deposit + withdrawal txIds
+  // for cross-checking. The burnTxIds set drives the new phantom-burn
+  // check (R2-FG-4) — every withdrawal/operator_withdrawal with a
+  // `withdrawTxId` body is verified against the matching mirror tx.
+  // Pre-F18 burns (no withdrawTxId) emit a soft warning per occurrence.
   const seenWithdrawTxIds = new Set<string>();
   const depositTxIds: Array<{
     sequence: number;
+    timestamp: string;
     depositTxId: string;
     user: string;
     amount: number;
     token: string;
   }> = [];
+  const burnTxIds: Array<{
+    sequence: number;
+    timestamp: string;
+    withdrawTxId: string;
+    /** For user_withdrawal: the recipient. For operator_withdrawal: unknown unless `--agent` is set. */
+    recipient: string | null;
+    amount: number;
+    token: string;
+    kind: 'user_withdrawal' | 'operator_withdrawal';
+  }> = [];
+  /** Pre-F18 burns we couldn't cross-check, surfaced as a single rolled-up alert. */
+  let preF18BurnCount = 0;
   let duplicateBurnsSuppressed = 0;
 
   function getOrCreateLedger(accountId: string): PerUserLedger {
@@ -338,6 +370,7 @@ async function main() {
       if (memo && memo.startsWith('deposit:')) {
         depositTxIds.push({
           sequence: event.sequence,
+          timestamp: event.timestamp,
           depositTxId: memo.slice('deposit:'.length),
           user: event.user,
           amount: event.amount,
@@ -366,6 +399,18 @@ async function main() {
           continue;
         }
         seenWithdrawTxIds.add(txId);
+        // R2-FG-4: queue user-withdrawal for phantom-burn cross-check.
+        burnTxIds.push({
+          sequence: event.sequence,
+          timestamp: event.timestamp,
+          withdrawTxId: txId,
+          recipient: event.user,
+          amount: event.amount,
+          token: normalizeLegacyToken(event.token),
+          kind: 'user_withdrawal',
+        });
+      } else {
+        preF18BurnCount++;
       }
       const led = getOrCreateLedger(event.user);
       led.totalWithdrawn += event.amount;
@@ -379,6 +424,22 @@ async function main() {
           continue;
         }
         seenWithdrawTxIds.add(txId);
+        // R2-FG-4: queue operator-withdrawal for phantom-burn cross-check.
+        // Recipient is unknown without `--agent` (the operator may
+        // sweep rake to an external treasury), so the validator only
+        // checks an outflow exists, plus the agent-as-sender match
+        // when `--agent` is supplied.
+        burnTxIds.push({
+          sequence: event.sequence,
+          timestamp: event.timestamp,
+          withdrawTxId: txId,
+          recipient: null,
+          amount: event.amount,
+          token: normalizeLegacyToken(event.token),
+          kind: 'operator_withdrawal',
+        });
+      } else {
+        preF18BurnCount++;
       }
       const tk = normalizeLegacyToken(event.token);
       addToToken(operatorLedger.totalWithdrawnByOperator, tk, event.amount);
@@ -480,62 +541,67 @@ async function main() {
       Math.round(operatorLedger.balances[tk] * 10000) / 10000;
   }
 
-  // F21: phantom-mint cross-check. For every mint with a `deposit:<txId>`
-  // memo, fetch the on-chain transaction and assert SUCCESS + a positive
-  // transfer to the agent matching `amt`. If the topic claims a mint that
-  // doesn't exist on chain, the operator (or someone with the topic
-  // submit key) fabricated a credit — CRITICAL.
-  if (depositTxIds.length > 0) {
+  // R2-FG-3 / R2-FG-4: phantom-mint AND phantom-burn cross-checks.
+  //
+  // Every mint with a `deposit:<txId>` memo is fetched and validated:
+  //   - tx exists, result === 'SUCCESS'
+  //   - consensus_timestamp is within [-5min, +60s] of the message
+  //   - HBAR: a `transfers[]` entry with positive amount equal to
+  //     `amt × 10^8` (tinybars). With `--agent`, that entry's account
+  //     must be the agent's.
+  //   - HTS: a `token_transfers[]` entry with matching `token_id` and
+  //     positive amount = `amt × 10^decimals`. With `--agent`, recipient
+  //     account must be the agent's.
+  //
+  // Every burn with a `withdrawTxId` body field is fetched and
+  // validated symmetrically — HBAR: outgoing transfer with negative
+  // amount; HTS: outgoing token_transfer. For user_withdrawal we ALSO
+  // assert a corresponding inflow to the recorded user. With `--agent`,
+  // the outflow source must be the agent's account.
+  //
+  // Pre-F18 burns (no withdrawTxId) emit a single rolled-up warning.
+  //
+  // The MirrorTxCache batches fetches in groups of 10 with `Promise.all`
+  // and dedups repeat txIds, so cross-check cost scales sub-linearly
+  // on busy topics with many references to the same tx.
+  const txCache = new MirrorTxCache(realMirrorFetcher(mirrorBase));
+  const decimalsCache = new TokenDecimalsCache(realDecimalsLookup(mirrorBase));
+
+  const allCrossCheckTxIds = [
+    ...depositTxIds.map((d) => d.depositTxId),
+    ...burnTxIds.map((b) => b.withdrawTxId),
+  ];
+  if (allCrossCheckTxIds.length > 0) {
     if (!args.json) {
-      console.log(`[2.5/3] Cross-checking ${depositTxIds.length} deposit mints against on-chain txs...`);
+      console.log(
+        `[2.5/3] Cross-checking ${depositTxIds.length} mint(s) + ${burnTxIds.length} burn(s) ` +
+          `(${new Set(allCrossCheckTxIds).size} unique tx) against mirror in batches of 10...`,
+      );
     }
+    await txCache.warmMany(allCrossCheckTxIds, 10);
+
     for (const dep of depositTxIds) {
-      try {
-        const url = `${mirrorBase}/transactions/${dep.depositTxId}`;
-        const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-        if (res.status === 404) {
-          alerts.push({
-            severity: 'critical',
-            category: 'phantom_mint',
-            message:
-              `seq=${dep.sequence} mint claims depositTxId=${dep.depositTxId} for ${dep.amount} ${dep.token} ` +
-              `to user=${dep.user} but the mirror node has NO record of it (404). ` +
-              `Possible phantom mint — operator must justify or auditor refuses to validate.`,
-          });
-          continue;
-        }
-        if (!res.ok) {
-          alerts.push({
-            severity: 'warning',
-            category: 'unverified',
-            message:
-              `seq=${dep.sequence} mint depositTxId=${dep.depositTxId} could not be cross-checked (${res.status} from mirror). Retry.`,
-          });
-          continue;
-        }
-        const body = (await res.json()) as {
-          transactions?: Array<{ result: string }>;
-        };
-        const tx = body.transactions?.[0];
-        if (!tx || tx.result !== 'SUCCESS') {
-          alerts.push({
-            severity: 'critical',
-            category: 'phantom_mint',
-            message:
-              `seq=${dep.sequence} mint claims depositTxId=${dep.depositTxId} but the mirror result is ` +
-              `'${tx?.result ?? 'missing'}', not SUCCESS — the credit has no on-chain backing.`,
-          });
-        }
-      } catch (e) {
-        alerts.push({
-          severity: 'warning',
-          category: 'unverified',
-          message:
-            `seq=${dep.sequence} mint depositTxId=${dep.depositTxId} cross-check failed: ` +
-            `${e instanceof Error ? e.message : String(e)}`,
-        });
-      }
+      const tx = await txCache.fetch(dep.depositTxId);
+      await validateMintCrossCheck(dep, tx, decimalsCache, args.agentAccountId, alerts);
     }
+    for (const burn of burnTxIds) {
+      const tx = await txCache.fetch(burn.withdrawTxId);
+      await validateBurnCrossCheck(burn, tx, decimalsCache, args.agentAccountId, alerts);
+    }
+
+    if (!args.json && txCache.cacheHits > 0) {
+      console.log(`        cross-check cache hits: ${txCache.cacheHits}`);
+    }
+  }
+
+  if (preF18BurnCount > 0) {
+    alerts.push({
+      severity: 'warning',
+      category: 'phantom_burn_pre_f18',
+      message:
+        `${preF18BurnCount} burn(s) on this topic predate F18 and have no withdrawTxId in the body — ` +
+        `they cannot be cross-checked against on-chain transfers. New burns ship withdrawTxId; this is a legacy gap.`,
+    });
   }
 
   // Derive ledger balance per user (deposited - rake - spent - withdrawn - refunded)

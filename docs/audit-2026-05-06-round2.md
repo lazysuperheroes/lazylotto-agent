@@ -67,7 +67,7 @@ file as new round-2 fix-now items, fix in this phase.
 
 ## Phase R2-1 — Critical (4 items, close the chain attack)
 
-### `[ ]` R2-FG-1 (C) — Force-release handlers acquire `lockUser:<userId>`
+### `[x]` R2-FG-1 (C) — Force-release handlers acquire `lockUser:<userId>`
 **Closes:** C2-1 = X-01, X-02, X-03, X-04 (P4) + P1, P2 R-05, P3 B-11. The dominant round-2 finding.
 
 **Bug:** F12's force-release handlers (`handlers.ts`) mutate per-user
@@ -85,7 +85,7 @@ that didn't inherit the invariant.
 
 ---
 
-### `[ ]` R2-FG-2 (C) — Refund claim semantics: permanent SADD set
+### `[x]` R2-FG-2 (C) — Refund claim semantics: permanent SADD set
 **Closes:** C2-2 = S-04 + B-17 + S-03.
 
 **Bug:** F10's `failed:<refundTxId>` claim has 30-day TTL. After expiry,
@@ -106,7 +106,7 @@ which leaks confusing operator messages.
 
 ---
 
-### `[ ]` R2-FG-3 (C) — Phantom-mint cross-check tightening
+### `[x]` R2-FG-3 (C) — Phantom-mint cross-check tightening
 **Closes:** C2-3 = TR-02 + TR-08.
 
 **Bug:** F21's check is `tx.result === 'SUCCESS'` only. Doesn't verify
@@ -127,7 +127,7 @@ referencing any historical SUCCESS tx — even an outflow from agent.
 
 ---
 
-### `[ ]` R2-FG-4 (C) — Phantom-burn cross-check (extend F21 to burns)
+### `[x]` R2-FG-4 (C) — Phantom-burn cross-check (extend F21 to burns)
 **Closes:** C2-4 = TR-03.
 
 **Bug:** F21's commit said "same check for ... withdraw burns once F18

@@ -561,3 +561,168 @@ describe('F12: applyForceRelease — mirror outcome refusals', () => {
     expect(result.status).toBe(409);
   });
 });
+
+// ── R2-FG-1: force-release handlers acquire `lockUser:<userId>` ────
+//
+// Round-2 audit X-01/X-02/X-03 (and P1/P2/P3 echoes): F12's force-release
+// handlers mutated per-user state without the per-user lock that F23
+// added to the verifier path. Concurrent in-band withdraw / play / refund
+// race against the operator's force-release. After R2-FG-1, every
+// per-user mutation block in handlers.ts wraps in
+// `tryAcquireUserLockWithBackoff` / `releaseUserLock`. On contention,
+// returns 409 instead of mutating.
+
+// These tests intentionally exercise the FULL backoff
+// (`tryAcquireUserLockWithBackoff` retries for ~6.85s before giving up),
+// so they need a longer per-test timeout than vitest's default 5s.
+describe('R2-FG-1: force-release handlers serialize against the per-user lock', () => {
+  it('withdrawal SUCCESS returns 409 USER_LOCK_CONTENTION when lock is held', { timeout: 12000 }, async () => {
+    const entry: DeadLetterEntry = {
+      transactionId: 'tx-r2-fg-1-w',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'withdrawal_uncertain',
+      details: {
+        userId: 'u-locked',
+        amount: 50,
+        tokenKey: 'hbar',
+        isHbar: true,
+        recipientAccountId: '0.0.123',
+      },
+    };
+
+    // Pre-acquire the global user lock so the handler's
+    // tryAcquireUserLockWithBackoff exhausts its backoff and returns
+    // null. The in-memory Redis fallback honors NX semantics.
+    const { acquireUserLock } = await import('~/lib/locks');
+    const heldToken = await acquireUserLock('u-locked', 60);
+    expect(heldToken).toBeTypeOf('string');
+
+    try {
+      const { ctx } = makeContext({
+        dls: new Map([[entry.transactionId, entry]]),
+        balances: new Map([['u-locked', makeBalance('hbar', 0, 100)]]),
+      });
+
+      const result = await applyForceRelease(entry, 'SUCCESS', ctx);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.status).toBe(409);
+      expect(result.error).toMatch(/Per-user lock held/);
+    } finally {
+      // Release for next tests.
+      const { releaseUserLock } = await import('~/lib/locks');
+      if (heldToken) await releaseUserLock('u-locked', heldToken);
+    }
+  });
+
+  it('play_uncertain FAILED returns 409 when lock is held', { timeout: 12000 }, async () => {
+    const entry: DeadLetterEntry = {
+      transactionId: 'tx-r2-fg-1-p',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'play_uncertain',
+      details: {
+        userId: 'u-locked-play',
+        tokenReservations: [{ token: 'hbar', amount: 30 }],
+      },
+    };
+
+    const { acquireUserLock, releaseUserLock } = await import('~/lib/locks');
+    const heldToken = await acquireUserLock('u-locked-play', 60);
+    try {
+      const { ctx, ledgerOps } = makeContext({
+        dls: new Map([[entry.transactionId, entry]]),
+      });
+
+      const result = await applyForceRelease(entry, 'FAILED', ctx);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.status).toBe(409);
+      // No releaseReserve calls — the lock check fired before mutation.
+      expect(ledgerOps.length).toBe(0);
+    } finally {
+      if (heldToken) await releaseUserLock('u-locked-play', heldToken);
+    }
+  });
+
+  it('refund_uncertain SUCCESS returns 409 when lock is held (depositRecord.userId)', { timeout: 12000 }, async () => {
+    const claimKey = 'lla:testnet:refunded:original-tx-r2-fg-1';
+    const entry: DeadLetterEntry = {
+      transactionId: 'tx-r2-fg-1-r',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'refund_uncertain',
+      details: {
+        claimKey,
+        originalTxId: 'original-tx-r2-fg-1',
+        refundTxId: 'tx-r2-fg-1-r',
+        humanAmount: 95,
+        tokenKey: 'hbar',
+        agentAccountId: '0.0.9999',
+      },
+    };
+
+    const { acquireUserLock, releaseUserLock } = await import('~/lib/locks');
+    // Lock under the deposit-record's userId (per F8 — the canonical
+    // owner, NOT memo lookup).
+    const heldToken = await acquireUserLock('u-bob', 60);
+
+    try {
+      const { ctx, state } = makeContext({
+        dls: new Map([[entry.transactionId, entry]]),
+        balances: new Map([['u-bob', makeBalance('hbar', 95, 0)]]),
+        deposits: new Map([
+          [
+            'original-tx-r2-fg-1',
+            {
+              transactionId: 'original-tx-r2-fg-1',
+              userId: 'u-bob',
+              grossAmount: 100,
+              rakeAmount: 5,
+              netAmount: 95,
+              tokenId: null,
+              memo: 'memo-r2',
+              timestamp: '2026-05-01T00:00:00Z',
+            },
+          ],
+        ]),
+      });
+
+      const result = await applyForceRelease(entry, 'SUCCESS', ctx);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.status).toBe(409);
+      // No mutation: balance unchanged.
+      expect(state.balances.get('u-bob')!.tokens.hbar!.available).toBe(95);
+      expect(state.operator.balances.hbar ?? 0).toBe(0);
+    } finally {
+      if (heldToken) await releaseUserLock('u-bob', heldToken);
+    }
+  });
+
+  it('withdrawal SUCCESS proceeds when lock is free (no contention)', async () => {
+    // Sanity: with no pre-acquired lock, the handler should succeed.
+    const entry: DeadLetterEntry = {
+      transactionId: 'tx-r2-fg-1-free',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'withdrawal_uncertain',
+      details: {
+        userId: 'u-free',
+        amount: 50,
+        tokenKey: 'hbar',
+        isHbar: true,
+        recipientAccountId: '0.0.456',
+      },
+    };
+    const { ctx, state } = makeContext({
+      dls: new Map([[entry.transactionId, entry]]),
+      balances: new Map([['u-free', makeBalance('hbar', 0, 100)]]),
+    });
+
+    const result = await applyForceRelease(entry, 'SUCCESS', ctx);
+    expect(result.ok).toBe(true);
+    expect(state.balances.get('u-free')!.tokens.hbar!.reserved).toBe(50);
+  });
+});

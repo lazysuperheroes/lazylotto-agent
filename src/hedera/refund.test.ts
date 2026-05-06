@@ -159,6 +159,113 @@ describe('Refund deposit-validation gate — isDepositCredited', () => {
 // the verifier SUCCESS branch), so the tests exercise the actual
 // load-bearing call paths.
 
+describe('R2-FG-2: processRefund permanent refunded-originals SADD set', () => {
+  // S-04: claim TTL'd 30 days after FAILED resolution → retry passes
+  // SET-NX-EX → second on-chain transfer. The permanent SADD set
+  // blocks this even after the per-tx claim expires.
+
+  it('refuses tx in refundedOriginals set even when per-tx claim is missing', async () => {
+    const fakeClient = {
+      operatorAccountId: { toString: () => '0.0.9999' },
+    } as unknown as import('@hashgraph/sdk').Client;
+
+    // In-memory Redis state — simulate the post-success state of a
+    // PRIOR refund: per-tx claim TTL'd out, but permanent SADD set
+    // still has the txId.
+    const { getRedis, KEY_PREFIX } = await import('../auth/redis.js');
+    const redis = await getRedis();
+    await redis.sadd(KEY_PREFIX.refundedOriginals, 'tx-already-refunded');
+    // Make sure the per-tx claim is GONE (TTL'd).
+    await redis.del(`${KEY_PREFIX.refunded}tx-already-refunded`);
+
+    const fakeStore = {
+      async isDepositCredited(): Promise<boolean> { return true; },
+      async getDepositByTxId() {
+        return {
+          transactionId: 'tx-already-refunded',
+          userId: 'u-1',
+          grossAmount: 100,
+          rakeAmount: 0,
+          netAmount: 100,
+          tokenId: null,
+          memo: 'm',
+          timestamp: '2026-05-01T00:00:00Z',
+        };
+      },
+      getUser() {
+        return {
+          userId: 'u-1',
+          balances: {
+            tokens: {
+              hbar: { available: 100, reserved: 0, totalDeposited: 100, totalWithdrawn: 0, totalRake: 0 },
+            },
+          },
+        };
+      },
+    };
+
+    const { processRefund } = await import('./refund.js');
+    await assert.rejects(
+      () =>
+        processRefund(fakeClient, 'tx-already-refunded', {
+          store: fakeStore as never,
+        }),
+      /permanent refunded-originals/,
+    );
+
+    // Cleanup so other tests don't see the SADD entry.
+    await redis.srem(KEY_PREFIX.refundedOriginals, 'tx-already-refunded');
+  });
+
+  it('reports "unexpected state" for unrecognized claim values (S-03)', async () => {
+    const fakeClient = {
+      operatorAccountId: { toString: () => '0.0.9999' },
+    } as unknown as import('@hashgraph/sdk').Client;
+
+    const { getRedis, KEY_PREFIX } = await import('../auth/redis.js');
+    const redis = await getRedis();
+    // Plant a non-pending, non-failed:, non-txId value.
+    await redis.set(
+      `${KEY_PREFIX.refunded}tx-malformed-claim`,
+      'do-not-retry',
+      { ex: 3600 },
+    );
+
+    const fakeStore = {
+      async isDepositCredited(): Promise<boolean> { return true; },
+      async getDepositByTxId() {
+        return {
+          transactionId: 'tx-malformed-claim',
+          userId: 'u-1',
+          grossAmount: 100,
+          rakeAmount: 0,
+          netAmount: 100,
+          tokenId: null,
+          memo: 'm',
+          timestamp: '2026-05-01T00:00:00Z',
+        };
+      },
+      getUser() {
+        return {
+          userId: 'u-1',
+          balances: { tokens: { hbar: { available: 100, reserved: 0, totalDeposited: 100, totalWithdrawn: 0, totalRake: 0 } } },
+        };
+      },
+    };
+
+    const { processRefund } = await import('./refund.js');
+    await assert.rejects(
+      () =>
+        processRefund(fakeClient, 'tx-malformed-claim', {
+          store: fakeStore as never,
+        }),
+      /unexpected state/,
+    );
+
+    await redis.del(`${KEY_PREFIX.refunded}tx-malformed-claim`);
+  });
+});
+
 describe('R2-FG-0 / F11: processRefund refuses tx without a recorded DepositRecord', () => {
   // F11's gate is `getDepositByTxId(txId) !== undefined`, NOT
   // `isDepositCredited(txId)` (the SADD claim). A tx where

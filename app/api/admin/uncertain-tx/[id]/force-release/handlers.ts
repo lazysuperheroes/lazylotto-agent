@@ -41,6 +41,25 @@ import type { AccountingService } from '~/custodial/AccountingService';
 import type { MirrorOutcome } from './route';
 import { isRefundClaimKey } from '~/auth/redis';
 import { HBAR_TOKEN_KEY } from '~/config/strategy';
+import { tryAcquireUserLockWithBackoff, releaseUserLock } from '~/lib/locks';
+
+/**
+ * Standard error envelope for the per-user-lock contention path.
+ * R2-FG-1 (2026-05-06 round-2 audit X-01/X-02/X-03): every handler
+ * that mutates per-user state MUST acquire `lockUser:<userId>` before
+ * the mutation. On contention, return 409 so the operator retries —
+ * never fall through to mutate without a token.
+ */
+const USER_LOCK_CONTENTION: HandlerError = {
+  ok: false,
+  status: 409,
+  error:
+    'Per-user lock held by a concurrent in-band operation (withdraw / play / refund). ' +
+    'Wait a moment and retry — the lock TTL is 60s.',
+  hint:
+    'This typically clears within seconds. If it persists for minutes, ' +
+    'an operator action may be hung; check `/api/admin/dead-letters` for stuck rows.',
+};
 
 export interface ForceReleaseContext {
   store: IStore;
@@ -163,6 +182,12 @@ async function handleWithdrawal(
   }
 
   if (mirrorResult === 'FAILED') {
+    // R2-FG-1: serialize the reserve release against active in-band
+    // withdraw / play / refund on the same user. The verifier path
+    // (uncertainTxVerification.ts F23) does this; F12's force-release
+    // sibling mistakenly didn't.
+    const userToken = await tryAcquireUserLockWithBackoff(details.userId);
+    if (!userToken) return USER_LOCK_CONTENTION;
     try {
       ctx.ledger.releaseReserve(details.userId, details.amount, details.tokenKey);
     } catch (e) {
@@ -171,6 +196,8 @@ async function handleWithdrawal(
         status: 500,
         error: `Failed to release reserve: ${e instanceof Error ? e.message : String(e)}`,
       };
+    } finally {
+      await releaseUserLock(details.userId, userToken);
     }
     return {
       ok: true,
@@ -204,54 +231,70 @@ async function handleWithdrawal(
     }
   };
 
-  if (!progress.settledAt) {
-    try {
-      ctx.ledger.settleSpend(details.userId, details.amount, details.tokenKey);
-      progress.settledAt = new Date().toISOString();
-      await stamp();
-    } catch (e) {
-      ctx.log.warn('force-release withdrawal settleSpend failed', {
-        component: 'AdminForceRelease',
-        uncertainTxId: entry.transactionId,
-        error: e instanceof Error ? e.message : String(e),
-      });
-    }
+  // R2-FG-1: hold per-user lock around settle/totalWithdrawn/history.
+  // Audit anchor (HCS submit) runs OUTSIDE the lock — it doesn't touch
+  // per-user store state and HCS submits can hang for seconds.
+  const needsLock =
+    !progress.settledAt || !progress.totalWithdrawnAt || !progress.historyWrittenAt;
+  let userMutateToken: string | null = null;
+  if (needsLock) {
+    userMutateToken = await tryAcquireUserLockWithBackoff(details.userId);
+    if (!userMutateToken) return USER_LOCK_CONTENTION;
   }
-  if (!progress.totalWithdrawnAt) {
-    try {
-      ctx.store.updateBalance(details.userId, (b) => {
-        const tokEntry = b.tokens[details.tokenKey!];
-        if (tokEntry) tokEntry.totalWithdrawn += details.amount!;
-        return b;
-      });
-      progress.totalWithdrawnAt = new Date().toISOString();
-      await stamp();
-    } catch (e) {
-      ctx.log.warn('force-release withdrawal totalWithdrawn update failed', {
-        component: 'AdminForceRelease',
-        uncertainTxId: entry.transactionId,
-        error: e instanceof Error ? e.message : String(e),
-      });
+  try {
+    if (!progress.settledAt) {
+      try {
+        ctx.ledger.settleSpend(details.userId, details.amount, details.tokenKey);
+        progress.settledAt = new Date().toISOString();
+        await stamp();
+      } catch (e) {
+        ctx.log.warn('force-release withdrawal settleSpend failed', {
+          component: 'AdminForceRelease',
+          uncertainTxId: entry.transactionId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
     }
-  }
-  if (!progress.historyWrittenAt) {
-    try {
-      ctx.store.recordWithdrawal({
-        userId: details.userId,
-        amount: details.amount,
-        tokenId: details.isHbar ? null : details.tokenKey,
-        recipientAccountId: details.recipientAccountId ?? '',
-        transactionId: entry.transactionId,
-        timestamp: new Date().toISOString(),
-      });
-      progress.historyWrittenAt = new Date().toISOString();
-      await stamp();
-    } catch (e) {
-      ctx.log.warn('force-release withdrawal recordWithdrawal failed', {
-        component: 'AdminForceRelease',
-        uncertainTxId: entry.transactionId,
-        error: e instanceof Error ? e.message : String(e),
-      });
+    if (!progress.totalWithdrawnAt) {
+      try {
+        ctx.store.updateBalance(details.userId, (b) => {
+          const tokEntry = b.tokens[details.tokenKey!];
+          if (tokEntry) tokEntry.totalWithdrawn += details.amount!;
+          return b;
+        });
+        progress.totalWithdrawnAt = new Date().toISOString();
+        await stamp();
+      } catch (e) {
+        ctx.log.warn('force-release withdrawal totalWithdrawn update failed', {
+          component: 'AdminForceRelease',
+          uncertainTxId: entry.transactionId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+    if (!progress.historyWrittenAt) {
+      try {
+        ctx.store.recordWithdrawal({
+          userId: details.userId,
+          amount: details.amount,
+          tokenId: details.isHbar ? null : details.tokenKey,
+          recipientAccountId: details.recipientAccountId ?? '',
+          transactionId: entry.transactionId,
+          timestamp: new Date().toISOString(),
+        });
+        progress.historyWrittenAt = new Date().toISOString();
+        await stamp();
+      } catch (e) {
+        ctx.log.warn('force-release withdrawal recordWithdrawal failed', {
+          component: 'AdminForceRelease',
+          uncertainTxId: entry.transactionId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+  } finally {
+    if (userMutateToken) {
+      await releaseUserLock(details.userId, userMutateToken);
     }
   }
   if (!progress.auditWrittenAt) {
@@ -513,17 +556,27 @@ async function handlePlay(
   }
 
   if (mirrorResult === 'FAILED') {
-    for (const { token, amount } of details.tokenReservations) {
-      try {
-        ctx.ledger.releaseReserve(details.userId, amount, token);
-      } catch (e) {
-        ctx.log.warn('force-release play_uncertain releaseReserve failed', {
-          component: 'AdminForceRelease',
-          uncertainTxId: entry.transactionId,
-          token,
-          error: e instanceof Error ? e.message : String(e),
-        });
+    // R2-FG-1: serialize per-user reservation release against active
+    // in-band withdraw / play / refund. The verifier's play_uncertain
+    // FAILED branch (uncertainTxVerification.ts:1150) acquires this
+    // same lock per F23. Force-release sibling needs to too.
+    const userToken = await tryAcquireUserLockWithBackoff(details.userId);
+    if (!userToken) return USER_LOCK_CONTENTION;
+    try {
+      for (const { token, amount } of details.tokenReservations) {
+        try {
+          ctx.ledger.releaseReserve(details.userId, amount, token);
+        } catch (e) {
+          ctx.log.warn('force-release play_uncertain releaseReserve failed', {
+            component: 'AdminForceRelease',
+            uncertainTxId: entry.transactionId,
+            token,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
       }
+    } finally {
+      await releaseUserLock(details.userId, userToken);
     }
     return {
       ok: true,
@@ -679,6 +732,12 @@ async function handleRefund(
   if (!progress.ledgerAdjustedAt && depositRecord) {
     const tokenKey = details.tokenKey;
     const humanAmount = details.humanAmount;
+    // R2-FG-1: serialize the user-balance debit + operator rake
+    // reversal against active in-band withdraw / play / refund. The
+    // verifier's refund SUCCESS branch (refund.ts:1015 area) acquires
+    // this same lock; force-release sibling needs to too.
+    const userToken = await tryAcquireUserLockWithBackoff(depositRecord.userId);
+    if (!userToken) return USER_LOCK_CONTENTION;
     try {
       ctx.store.updateBalance(depositRecord.userId, (b) => {
         const tokEntry = b.tokens[tokenKey];
@@ -705,6 +764,8 @@ async function handleRefund(
         uncertainTxId: entry.transactionId,
         error: e instanceof Error ? e.message : String(e),
       });
+    } finally {
+      await releaseUserLock(depositRecord.userId, userToken);
     }
   }
 

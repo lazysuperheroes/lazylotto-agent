@@ -180,9 +180,34 @@ export async function processRefund(
   //
   // FAIL CLOSED: if Redis is unreachable we cannot claim — refuse
   // the refund. Refunds are irreversible on-chain.
+  //
+  // R2-FG-2 (2026-05-06 round-2 audit S-04): in addition to the
+  // SET-NX-EX claim with 30-day TTL, this path also checks a
+  // permanent (no-TTL) SADD set `KEY_PREFIX.refundedOriginals` —
+  // and, on confirmed success, ADDs to that set. After the claim
+  // TTLs out, a new processRefund call would otherwise pass SET-NX
+  // and fire a SECOND on-chain transfer. The permanent set blocks
+  // that path: any tx in `refundedOriginals` is permanently
+  // refused (operator must explicitly remove it via runbook to
+  // genuinely retry).
   let redisLockKey: string | null = null;
   try {
     const redis = await getRedis();
+
+    // R2-FG-2: permanent set check first — bypass the TTL window.
+    const alreadyRefunded = await redis.sismember(
+      KEY_PREFIX.refundedOriginals,
+      transactionId,
+    );
+    if (alreadyRefunded === 1) {
+      throw new Error(
+        `Transaction ${transactionId} is in the permanent refunded-originals ` +
+          `set — it has been refunded before. To retry, an operator must ` +
+          `explicitly SREM the txId from \`${KEY_PREFIX.refundedOriginals}\` ` +
+          `(documented runbook step).`,
+      );
+    }
+
     redisLockKey = `${REFUND_KEY_PREFIX}${transactionId}`;
     const claimResult = await redis.set(
       redisLockKey,
@@ -200,6 +225,11 @@ export async function processRefund(
       // distinctly so the operator knows a previous attempt failed
       // and that an explicit retry requires clearing the claim
       // (e.g. via force-release).
+      //
+      // R2-FG-2 (S-03): an unrecognized claim value (legacy / hand-
+      // edited / partial overwrite) is reported as "unexpected state"
+      // rather than asserting "already been refunded" — the value is
+      // not a refundTxId and the message would mislead the operator.
       const existing = await redis.get<string>(redisLockKey);
       let message: string;
       if (existing === 'pending') {
@@ -211,10 +241,21 @@ export async function processRefund(
           `Refund for ${transactionId} previously FAILED on chain ` +
           `(prior refund tx: ${existing.slice('failed:'.length)}). ` +
           `Clear the claim via force-release to retry.`;
-      } else if (typeof existing === 'string' && existing) {
+      } else if (
+        typeof existing === 'string' &&
+        /^\d+\.\d+\.\d+@\d+\.\d+$/.test(existing)
+      ) {
+        // Recognized: a real Hedera refund tx id.
         message =
           `Transaction ${transactionId} has already been refunded. ` +
           `Original refund tx: ${existing}`;
+      } else if (typeof existing === 'string' && existing) {
+        // R2-FG-2 (S-03): claim has an unrecognized value. Don't lie
+        // about "already refunded"; surface as unexpected state.
+        message =
+          `Refund claim for ${transactionId} is in an unexpected state ` +
+          `(value not a Hedera txId, not 'pending', not 'failed:*'). ` +
+          `Investigate the Redis claim manually before retrying.`;
       } else {
         message =
           `Refund for ${transactionId} is already in progress on another ` +
@@ -228,7 +269,9 @@ export async function processRefund(
       e instanceof Error &&
       (e.message.includes('already been refunded') ||
         e.message.includes('already in progress') ||
-        e.message.includes('previously FAILED on chain'))
+        e.message.includes('previously FAILED on chain') ||
+        e.message.includes('permanent refunded-originals') ||
+        e.message.includes('unexpected state'))
     ) {
       throw e;
     }
@@ -664,9 +707,12 @@ export async function processRefund(
   // Now that the on-chain refund has completed and we know the
   // refundTxId, overwrite with the real value (resetting the 30-day
   // TTL) so future duplicate attempts get a useful error message.
-  // Best-effort: if this overwrite fails, the 'pending' marker still
-  // gives 30 days of replay protection — operationally equivalent
-  // for safety, just less informative on a duplicate-attempt error.
+  //
+  // R2-FG-2 (2026-05-06 round-2 audit S-04): also SADD the original
+  // txId to the permanent `refundedOriginals` set so a TTL'd claim
+  // cannot allow a duplicate on-chain refund. The claim is the
+  // diagnostic record (with refundTxId for the user-facing error);
+  // the SADD is the permanent gate.
   if (redisLockKey) {
     try {
       const redis = await getRedis();
@@ -674,6 +720,25 @@ export async function processRefund(
     } catch (e) {
       console.warn('[Refund] Failed to overwrite refund marker with refundTxId:', e);
     }
+  }
+  try {
+    const redis = await getRedis();
+    await redis.sadd(KEY_PREFIX.refundedOriginals, transactionId);
+  } catch (e) {
+    // The SADD is the load-bearing duplicate-prevention beyond the
+    // 30d claim TTL. Log loudly if it fails — operator must
+    // manually SADD the txId before the claim TTLs out, or accept
+    // that a TTL'd claim could allow a duplicate refund.
+    logger.error(
+      'CRITICAL: refunded-originals SADD failed; duplicate-refund window opens after claim TTL',
+      {
+        component: 'Refund',
+        event: 'refunded_originals_sadd_failed',
+        originalTx: transactionId,
+        refundTxId: confirmedRefundTxId,
+        error: e instanceof Error ? e.message : String(e),
+      },
+    );
   }
 
   return {
@@ -1187,6 +1252,26 @@ export async function verifyUncertainRefunds(
       } catch {
         // The 'pending' marker still gives 30-day replay protection;
         // a less-informative duplicate error is acceptable.
+      }
+    }
+
+    // R2-FG-2: SADD original txId to the permanent set so a future
+    // call after the 30d claim TTL can't fire a duplicate refund.
+    if (details.originalTxId) {
+      try {
+        const redis = await getRedis();
+        await redis.sadd(KEY_PREFIX.refundedOriginals, details.originalTxId);
+      } catch (e) {
+        logger.error(
+          'CRITICAL: verifier refunded-originals SADD failed; duplicate-refund window opens after claim TTL',
+          {
+            component: 'Refund',
+            event: 'refunded_originals_sadd_failed',
+            refundTxId,
+            originalTxId: details.originalTxId,
+            error: e instanceof Error ? e.message : String(e),
+          },
+        );
       }
     }
 
