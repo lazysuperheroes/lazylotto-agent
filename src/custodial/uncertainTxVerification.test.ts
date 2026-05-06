@@ -407,9 +407,14 @@ describe('verifyUncertainWithdrawals', () => {
     assert.equal((dls2[0]?.details as { verificationAttempts?: number })?.verificationAttempts, 2);
   });
 
-  it('F4: Infinity amount escalates as malformed (does not call settleSpend)', async () => {
-    // 2026-05-06 audit I-05: typeof Infinity === 'number' so the old
-    // check passed; settleSpend(Infinity) corrupted ledger to NaN.
+  it('R2-FG-0 / F4: Infinity amount escalates BEFORE settleSpend even with SUCCESS mirror', async () => {
+    // 2026-05-06 round-2 audit (P6): the original test planted no mirror
+    // response, so the Infinity-amount entry hit NOT_FOUND → still_uncertain
+    // for both the buggy AND the fixed code. Test passed for the wrong
+    // reason. After R2-FG-0, plant a SUCCESS mirror response so the bug
+    // WOULD trigger settleSpend(Infinity) → corrupting reserved to NaN.
+    // The fix's `Number.isFinite` check at the malformed gate must
+    // intercept BEFORE the mirror lookup or any ledger mutation.
     const malformed: DeadLetterEntry = {
       transactionId: 'tx-infinity',
       timestamp: new Date().toISOString(),
@@ -424,18 +429,37 @@ describe('verifyUncertainWithdrawals', () => {
       },
     };
     await store.upsertDeadLetter(malformed);
+    // PLANT a SUCCESS mirror response so the bug WOULD trigger settle.
+    mirror.responses.set('tx-infinity', {
+      status: 200,
+      body: { transactions: [{ result: 'SUCCESS' }] },
+    });
 
     const userBefore = store.getUser('user-1')!;
     const reservedBefore = userBefore.balances.tokens.hbar!.reserved;
+    const totalWithdrawnBefore = userBefore.balances.tokens.hbar!.totalWithdrawn;
 
     const outcomes = await verifyUncertainWithdrawals(store, ledger, noopAccounting());
 
     assert.equal(outcomes[0]!.status, 'still_uncertain');
     const userAfter = store.getUser('user-1')!;
+    // Defense-in-depth: reserve still finite (not NaN/Infinity).
+    assert.ok(
+      Number.isFinite(userAfter.balances.tokens.hbar!.reserved),
+      'reserved must remain finite — settleSpend(Infinity) would have corrupted it',
+    );
+    assert.equal(userAfter.balances.tokens.hbar!.reserved, reservedBefore);
     assert.equal(
-      userAfter.balances.tokens.hbar!.reserved,
-      reservedBefore,
-      'reserve must be untouched on Infinity-amount entry',
+      userAfter.balances.tokens.hbar!.totalWithdrawn,
+      totalWithdrawnBefore,
+      'totalWithdrawn must NOT advance — the F4 gate must block before this step',
+    );
+    // Malformed counter incremented (uniquely produced by the fix path).
+    const dl = store.getDeadLetters().find((e) => e.transactionId === 'tx-infinity')!;
+    assert.equal(
+      (dl.details as { verificationAttempts?: number }).verificationAttempts,
+      1,
+      'F4 gate must increment verificationAttempts (bumpVerificationAttempts side effect)',
     );
   });
 

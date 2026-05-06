@@ -40,7 +40,7 @@ attack chain that defeats the DR promise.
 
 ## Phase R2-0 — Verification prerequisite (1 item)
 
-### `[ ]` R2-FG-0 (Prereq) — Replace decorative Phase-2 tests with real integration tests
+### `[x]` R2-FG-0 (Prereq) — Replace decorative Phase-2 tests with real integration tests
 **Closes (P6):** 5 cheat tests (F11, F4-Infinity, F7, F8, F9) + 4 weak tests
 (F4-non-finite, operator-fee FAILED no-op, F12 play SUCCESS, play FAILED).
 

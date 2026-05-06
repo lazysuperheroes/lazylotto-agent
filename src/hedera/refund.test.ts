@@ -148,92 +148,149 @@ describe('Refund deposit-validation gate — isDepositCredited', () => {
 // tests below — they exercise verifyUncertainRefunds and processRefund's
 // shared logic via the same fake-store harness.
 
-describe('processRefund correctness invariants (F7/F8/F9/F11)', () => {
-  // We don't drive the on-chain transfer in these tests — we test the
-  // pre-transfer guards. The store fake's `getDepositByTxId` returns
-  // whatever the test plants, exercising the new invariants:
-  //   F11 — refund refuses tx without a recorded DepositRecord
-  //   F7  — refund refuses a deposit whose net unspent < netAmount
-  //   F8  — ledger debit targets the deposit record's userId, not memo
-  //   F9  — operator rake balance is reversed by rakeAmount
+// ── R2-FG-0: real integration tests for F7/F8/F9/F11 ──────────────
+//
+// 2026-05-06 round-2 audit (persona 6) found that the original
+// F7/F8/F9/F11 tests were decorative — they walked invariants on
+// fixture literals without invoking production code. Reverting the
+// underlying fixes would not have failed any test. These replacements
+// drive `processRefund` (for F11 + F7 — they gate before on-chain
+// submit) and `verifyUncertainRefunds` (for F8 + F9 — they exist in
+// the verifier SUCCESS branch), so the tests exercise the actual
+// load-bearing call paths.
 
-  it('F11: refund refuses a tx that has no DepositRecord even if SADD claim is set', () => {
-    // Pure unit assertion of the invariant: a separate
-    // `getDepositByTxId(txId)` call must return undefined for
-    // claimed-but-not-recorded txs. processRefund must use
-    // getDepositByTxId as the gate, not isDepositCredited alone.
+describe('R2-FG-0 / F11: processRefund refuses tx without a recorded DepositRecord', () => {
+  // F11's gate is `getDepositByTxId(txId) !== undefined`, NOT
+  // `isDepositCredited(txId)` (the SADD claim). A tx where
+  // `tryClaimTransaction` SADDed but `recordDeposit` never wrote the
+  // record (lock contention, partial failure) should be refused.
+  //
+  // Soundness argument: the message string "not credited as a user
+  // deposit" originates ONLY from `processRefund`'s F11 gate at
+  // refund.ts:131-138 (verified by grep). If `assert.rejects` matches
+  // that string, the gate must have fired — and the function MUST have
+  // returned before any on-chain submit (the SET-NX-EX claim and
+  // submit are downstream of the gate). No need to spy on the submit
+  // primitives.
+
+  it('throws "not credited as a user deposit" when no DepositRecord exists', async () => {
+    const fakeClient = {
+      operatorAccountId: { toString: () => '0.0.9999' },
+    } as unknown as import('@hashgraph/sdk').Client;
+
     const claimed = new Set(['tx-claimed-but-not-recorded']);
-    const recorded = new Map<string, { userId: string }>();
-    const store = {
+    const fakeStore = {
       async isDepositCredited(txId: string): Promise<boolean> {
         return claimed.has(txId);
       },
-      async getDepositByTxId(txId: string) {
-        return recorded.get(txId);
+      async getDepositByTxId(): Promise<undefined> {
+        return undefined;
+      },
+      getUser: () => undefined,
+    };
+
+    const { processRefund } = await import('./refund.js');
+    await assert.rejects(
+      () =>
+        processRefund(fakeClient, 'tx-claimed-but-not-recorded', {
+          store: fakeStore as never,
+        }),
+      /not credited as a user deposit/,
+    );
+  });
+});
+
+describe('R2-FG-0 / F7: processRefund refuses a deposit whose unspent < netAmount', () => {
+  // The message "partially or fully consumed" originates ONLY from
+  // refund.ts:151-160 (the F7 guard), so a matching assert.rejects
+  // proves the guard fired. The guard runs BEFORE the SET-NX-EX claim
+  // and the on-chain submit.
+
+  it('throws "partially or fully consumed" when balance is fully spent', async () => {
+    const fakeClient = {
+      operatorAccountId: { toString: () => '0.0.9999' },
+    } as unknown as import('@hashgraph/sdk').Client;
+
+    const fakeStore = {
+      async isDepositCredited(): Promise<boolean> {
+        return true;
+      },
+      async getDepositByTxId() {
+        return {
+          transactionId: 'tx-spent',
+          userId: 'u-1',
+          grossAmount: 100,
+          rakeAmount: 0,
+          netAmount: 100,
+          tokenId: null,
+          memo: 'm',
+          timestamp: '2026-05-01T00:00:00Z',
+        };
+      },
+      getUser(userId: string) {
+        if (userId !== 'u-1') return undefined;
+        return {
+          userId: 'u-1',
+          balances: {
+            tokens: {
+              hbar: { available: 0, reserved: 0, totalDeposited: 100, totalWithdrawn: 0, totalRake: 0 },
+            },
+          },
+        };
       },
     };
 
-    // Old gate: would say "yes, refund this".
-    return store.isDepositCredited('tx-claimed-but-not-recorded').then(async (yes) => {
-      assert.equal(yes, true);
-      // F11 gate: must say no.
-      assert.equal(
-        await store.getDepositByTxId('tx-claimed-but-not-recorded'),
-        undefined,
-        'getDepositByTxId is the F11 gate; SADD claim alone is NOT proof of a recorded deposit',
-      );
-    });
-  });
-
-  it('F7: a fully-spent deposit cannot be refunded (consumed-balance guard)', () => {
-    // Walk the math: user deposits 100 net, plays 100 (balance now 0).
-    // Operator processes refund of original tx → guard must reject.
-    const userBalance = { available: 0, reserved: 0 };
-    const depositNet = 100;
-    const unspent = userBalance.available + userBalance.reserved;
-    assert.ok(
-      unspent < depositNet,
-      'precondition: user has consumed the deposit',
+    const { processRefund } = await import('./refund.js');
+    await assert.rejects(
+      () =>
+        processRefund(fakeClient, 'tx-spent', {
+          store: fakeStore as never,
+        }),
+      /partially or fully consumed/,
     );
-    // The guard processRefund will apply (after F7):
-    //   if (unspent < depositRecord.netAmount) throw
-    // Test asserts the inequality holds in this scenario; the fix
-    // adds the throw.
   });
 
-  it('F8: ledger debit targets depositRecord.userId, not getUserByMemo lookup', () => {
-    // Memo collision: Alice sends a deposit with Bob's memo, deposit
-    // watcher routes to Bob. Refund should debit Bob (the recorded
-    // owner), not whoever currently maps to that memo string.
-    const depositRecord = {
-      transactionId: 'tx-collision',
-      userId: 'user-bob',
-      grossAmount: 100,
-      rakeAmount: 5,
-      netAmount: 95,
-      tokenId: null as string | null,
-      memo: 'memo-shared',
-      timestamp: '2026-05-01T00:00:00Z',
-    };
-    // After F8, processRefund debits depositRecord.userId regardless
-    // of the current memo→user mapping. The invariant under test is
-    // simply: depositRecord carries the canonical userId.
-    assert.equal(depositRecord.userId, 'user-bob');
-  });
+  it('passes the guard when available >= netAmount (sanity — must reach later code)', async () => {
+    // Precondition: the guard does NOT fire when balance is sufficient.
+    // The function then reaches the SET-NX-EX claim block, which throws
+    // because we're not running with a real Redis. We assert the error
+    // is NOT the F7 message — proving the guard let us through.
+    const fakeClient = {
+      operatorAccountId: { toString: () => '0.0.9999' },
+    } as unknown as import('@hashgraph/sdk').Client;
 
-  it('F9: refund reverses operator rake by depositRecord.rakeAmount', () => {
-    // Walk the conservation math: operator credit on deposit was
-    // rakeAmount. Refund returns gross to user. Without rake reversal,
-    // operator state retains rakeAmount with no on-chain backing —
-    // every refunded deposit drives a persistent insolvency signal.
-    const depositRecord = {
-      grossAmount: 100,
-      rakeAmount: 5,
-      netAmount: 95,
+    const fakeStore = {
+      async isDepositCredited(): Promise<boolean> { return true; },
+      async getDepositByTxId() {
+        return {
+          transactionId: 'tx-with-balance',
+          userId: 'u-1',
+          grossAmount: 100,
+          rakeAmount: 0,
+          netAmount: 100,
+          tokenId: null,
+          memo: 'm',
+          timestamp: '2026-05-01T00:00:00Z',
+        };
+      },
+      getUser(userId: string) {
+        if (userId !== 'u-1') return undefined;
+        return {
+          userId: 'u-1',
+          balances: {
+            tokens: {
+              hbar: { available: 100, reserved: 0, totalDeposited: 100, totalWithdrawn: 0, totalRake: 0 },
+            },
+          },
+        };
+      },
     };
-    const operatorBalanceBefore = 5; // after the rake credit
-    const operatorBalanceAfterReversal = operatorBalanceBefore - depositRecord.rakeAmount;
-    assert.equal(operatorBalanceAfterReversal, 0);
+
+    const { processRefund } = await import('./refund.js');
+    await assert.rejects(
+      () => processRefund(fakeClient, 'tx-with-balance', { store: fakeStore as never }),
+      (err: Error) => !/partially or fully consumed/.test(err.message),
+    );
   });
 });
 
@@ -622,6 +679,204 @@ describe('verifyUncertainRefunds dispatch', () => {
         1,
         'second pass MUST NOT re-debit — intermediate stamps from pass 1 must persist',
       );
+    } finally {
+      teardown();
+    }
+  });
+
+  it('R2-FG-0 / F8: verifier debits depositRecord.userId, NOT memo lookup (memo-collision protection)', async () => {
+    // Memo-collision attack: Alice sends a deposit with Bob's memo;
+    // deposit watcher routes to Bob; refund's debit must target Bob
+    // (the recorded owner), NOT alice or whoever currently maps to
+    // memo. Verifier path uses depositRecord.userId after F8.
+    installMirror(new Map([['refund-tx-collision', { status: 200, result: 'SUCCESS' }]]));
+    const { state } = installRedis();
+    state.set('lla:testnet:refunded:original-tx-collision', 'pending');
+
+    const updateBalanceCalls: Array<{ userId: string; tokenKey: string }> = [];
+    const dls = [
+      {
+        transactionId: 'refund-tx-collision',
+        timestamp: new Date().toISOString(),
+        error: 'x',
+        kind: 'refund_uncertain' as const,
+        memo: 'memo-shared',
+        sender: '0.0.alice-sender',
+        details: {
+          originalTxId: 'original-tx-collision',
+          refundTxId: 'refund-tx-collision',
+          humanAmount: 95,
+          tokenKey: 'hbar',
+          agentAccountId: '0.0.9999',
+          claimKey: 'lla:testnet:refunded:original-tx-collision',
+        },
+      },
+    ];
+    const store = {
+      async refreshDeadLetters() {},
+      getDeadLetters() { return dls; },
+      async upsertDeadLetter(entry: typeof dls[number]) {
+        const idx = dls.findIndex((d) => d.transactionId === entry.transactionId);
+        if (idx >= 0) dls[idx] = entry;
+        else dls.push(entry);
+      },
+      async flush() {},
+      // F8 acid test: getUserByMemo and getDepositByTxId disagree on
+      // who owns this deposit. F8 picks the deposit-record owner.
+      getUserByMemo() {
+        return {
+          userId: 'u-alice-via-memo',
+          balances: { tokens: { hbar: { available: 95, reserved: 0 } } },
+        };
+      },
+      async getDepositByTxId() {
+        return {
+          transactionId: 'original-tx-collision',
+          userId: 'u-bob-via-deposit-record',
+          grossAmount: 100,
+          rakeAmount: 5,
+          netAmount: 95,
+          tokenId: null,
+          memo: 'memo-shared',
+          timestamp: '2026-05-01T00:00:00Z',
+        };
+      },
+      getUser(userId: string) {
+        if (userId === 'u-bob-via-deposit-record') {
+          return {
+            userId: 'u-bob-via-deposit-record',
+            balances: { tokens: { hbar: { available: 95, reserved: 0 } } },
+          };
+        }
+        return undefined;
+      },
+      updateBalance(userId: string, fn: (b: { tokens: Record<string, { available: number; reserved: number }> }) => unknown) {
+        updateBalanceCalls.push({ userId, tokenKey: 'hbar' });
+        const b = { tokens: { hbar: { available: 95, reserved: 0 } } };
+        fn(b);
+        return b as never;
+      },
+      updateOperator() { return {} as never; },
+    };
+
+    try {
+      const { verifyUncertainRefunds } = await import('./refund.js');
+      const accounting = { async recordRefund(): Promise<void> {} };
+      const outcomes = await verifyUncertainRefunds(
+        undefined as unknown as never,
+        store as never,
+        accounting as never,
+      );
+      assert.equal(outcomes[0]!.status, 'confirmed');
+      // The acid test: updateBalance was called with depositRecord.userId
+      // (u-bob-via-deposit-record), NOT memo-resolved user (u-alice-via-memo).
+      assert.equal(updateBalanceCalls.length, 1);
+      assert.equal(
+        updateBalanceCalls[0]!.userId,
+        'u-bob-via-deposit-record',
+        'F8: debit must target depositRecord.userId, not getUserByMemo result',
+      );
+    } finally {
+      teardown();
+    }
+  });
+
+  it('R2-FG-0 / F9: verifier reverses operator rake by depositRecord.rakeAmount', async () => {
+    // F9: operator state should be debited by `depositRecord.rakeAmount`
+    // when refunding a previously-raked deposit. Audit anchor's
+    // `rakeReversed` field carries the amount.
+    installMirror(new Map([['refund-tx-rake', { status: 200, result: 'SUCCESS' }]]));
+    const { state } = installRedis();
+    state.set('lla:testnet:refunded:original-tx-rake', 'pending');
+
+    let operatorBalance = 5; // post-rake-credit baseline
+    const recordRefundCalls: Array<{ rakeReversed?: number; rakeReversedToken?: string }> = [];
+    const dls = [
+      {
+        transactionId: 'refund-tx-rake',
+        timestamp: new Date().toISOString(),
+        error: 'x',
+        kind: 'refund_uncertain' as const,
+        memo: 'memo-rake',
+        sender: '0.0.user-sender',
+        details: {
+          originalTxId: 'original-tx-rake',
+          refundTxId: 'refund-tx-rake',
+          humanAmount: 95,
+          tokenKey: 'hbar',
+          agentAccountId: '0.0.9999',
+          claimKey: 'lla:testnet:refunded:original-tx-rake',
+        },
+      },
+    ];
+    const store = {
+      async refreshDeadLetters() {},
+      getDeadLetters() { return dls; },
+      async upsertDeadLetter(entry: typeof dls[number]) {
+        const idx = dls.findIndex((d) => d.transactionId === entry.transactionId);
+        if (idx >= 0) dls[idx] = entry;
+        else dls.push(entry);
+      },
+      async flush() {},
+      getUserByMemo() {
+        return {
+          userId: 'u-rake',
+          balances: { tokens: { hbar: { available: 95, reserved: 0 } } },
+        };
+      },
+      async getDepositByTxId() {
+        return {
+          transactionId: 'original-tx-rake',
+          userId: 'u-rake',
+          grossAmount: 100,
+          rakeAmount: 5,
+          netAmount: 95,
+          tokenId: null,
+          memo: 'memo-rake',
+          timestamp: '2026-05-01T00:00:00Z',
+        };
+      },
+      getUser() {
+        return {
+          userId: 'u-rake',
+          balances: { tokens: { hbar: { available: 95, reserved: 0 } } },
+        };
+      },
+      updateBalance() { return {} as never; },
+      updateOperator(
+        fn: (op: { balances: Record<string, number> }) => { balances: Record<string, number> },
+      ) {
+        const op = { balances: { hbar: operatorBalance } };
+        const next = fn(op);
+        operatorBalance = next.balances.hbar ?? operatorBalance;
+        return next as never;
+      },
+    };
+
+    try {
+      const { verifyUncertainRefunds } = await import('./refund.js');
+      const accounting = {
+        async recordRefund(details: { rakeReversed?: number; rakeReversedToken?: string }) {
+          recordRefundCalls.push(details);
+        },
+      };
+      // verifyUncertainRefunds signature: (client, store, accounting?)
+      const outcomes = await verifyUncertainRefunds(
+        undefined as unknown as never,
+        store as never,
+        accounting as never,
+      );
+      assert.equal(outcomes[0]!.status, 'confirmed', `outcome note: ${outcomes[0]?.note}`);
+      // F9 acid test: operator rake was reversed.
+      assert.equal(operatorBalance, 0, 'F9: operator balance must be debited by rakeAmount=5');
+      // F9 audit anchor: rakeReversed field set on the recordRefund call.
+      assert.equal(
+        recordRefundCalls.length,
+        1,
+        `recordRefund must be called once; got ${recordRefundCalls.length}. outcome: ${JSON.stringify(outcomes[0])}`,
+      );
+      assert.equal(recordRefundCalls[0]!.rakeReversed, 5);
+      assert.equal(recordRefundCalls[0]!.rakeReversedToken, 'hbar');
     } finally {
       teardown();
     }

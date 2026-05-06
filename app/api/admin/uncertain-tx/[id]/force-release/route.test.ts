@@ -299,7 +299,7 @@ describe('F12: applyForceRelease — operator_fee_withdraw_uncertain', () => {
     expect(d.auditWrittenAt).toBeTypeOf('string');
   });
 
-  it('FAILED is no-op on operator state', async () => {
+  it('FAILED is true no-op on operator state (tightened per R2-FG-0)', async () => {
     const entry: DeadLetterEntry = {
       transactionId: 'tx-of2',
       timestamp: new Date().toISOString(),
@@ -307,7 +307,7 @@ describe('F12: applyForceRelease — operator_fee_withdraw_uncertain', () => {
       kind: 'operator_fee_withdraw_uncertain',
       details: { amount: 25, tokenKey: 'hbar' },
     };
-    const { ctx, state } = makeContext({
+    const { ctx, state, accountingCalls } = makeContext({
       dls: new Map([[entry.transactionId, entry]]),
       operator: {
         balances: { hbar: 100 },
@@ -317,14 +317,17 @@ describe('F12: applyForceRelease — operator_fee_withdraw_uncertain', () => {
 
     await applyForceRelease(entry, 'FAILED', ctx);
 
+    // Tightened: assert NO state mutation AND NO audit calls.
     expect(state.operator.balances.hbar).toBe(100);
+    expect(state.operator.totalWithdrawnByOperator.hbar ?? 0).toBe(0);
+    expect(accountingCalls.length).toBe(0);
   });
 });
 
 // ── F12 + F15: play_uncertain ─────────────────────────────────────
 
 describe('F12 + F15: applyForceRelease — play_uncertain', () => {
-  it('SUCCESS keeps reservations held and stamps successTriagedAt', async () => {
+  it('SUCCESS keeps ALL reservations held + stamps successTriagedAt + action message references manual reconstruction (tightened per R2-FG-0)', async () => {
     const entry: DeadLetterEntry = {
       transactionId: 'tx-p1',
       timestamp: new Date().toISOString(),
@@ -345,18 +348,21 @@ describe('F12 + F15: applyForceRelease — play_uncertain', () => {
     const result = await applyForceRelease(entry, 'SUCCESS', ctx);
 
     expect(result.ok).toBe(true);
-    // No releaseReserve calls — reservations stay held.
-    expect(
-      ledgerOps.find((o) => o.method === 'releaseReserve'),
-    ).toBeUndefined();
+    if (!result.ok) return;
+    // Tightened: assert ZERO releaseReserve calls (not just "find returns undefined").
+    expect(ledgerOps.filter((o) => o.method === 'releaseReserve').length).toBe(0);
+    expect(ledgerOps.filter((o) => o.method === 'settleSpend').length).toBe(0);
     // F15: successTriagedAt stamped.
     const final = state.dls.get('tx-p1')!;
     expect((final.details as Record<string, unknown>).successTriagedAt).toBeTypeOf(
       'string',
     );
+    // Action message must reference manual reconstruction — locks the
+    // user-facing string against silent refactor.
+    expect(result.action).toMatch(/manual settlement reconstruction/);
   });
 
-  it('FAILED releases all reservations', async () => {
+  it('FAILED releases EVERY reservation (tightened: multi-token, exact count) per R2-FG-0', async () => {
     const entry: DeadLetterEntry = {
       transactionId: 'tx-p2',
       timestamp: new Date().toISOString(),
@@ -364,7 +370,11 @@ describe('F12 + F15: applyForceRelease — play_uncertain', () => {
       kind: 'play_uncertain',
       details: {
         userId: 'u1',
-        tokenReservations: [{ token: 'hbar', amount: 30 }],
+        // Multi-token: catches early-exit-after-one-token regressions.
+        tokenReservations: [
+          { token: 'hbar', amount: 30 },
+          { token: 'lazy', amount: 100 },
+        ],
       },
     };
     const { ctx, ledgerOps } = makeContext({
@@ -374,9 +384,11 @@ describe('F12 + F15: applyForceRelease — play_uncertain', () => {
 
     await applyForceRelease(entry, 'FAILED', ctx);
 
-    expect(
-      ledgerOps.filter((o) => o.method === 'releaseReserve').length,
-    ).toBe(1);
+    const releaseCalls = ledgerOps.filter((o) => o.method === 'releaseReserve');
+    expect(releaseCalls.length).toBe(2); // exact count, both tokens
+    expect(releaseCalls.map((c) => c.args[2])).toEqual(
+      expect.arrayContaining(['hbar', 'lazy']),
+    );
   });
 
   it('F15: refuses already-triaged play_uncertain', async () => {
