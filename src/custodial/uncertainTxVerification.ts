@@ -43,6 +43,7 @@ import { classifyMirrorResult, type MirrorResult } from '../hedera/responseCodes
 import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 import { logger } from '../lib/logger.js';
 import { escalateUncertainDlFailure } from '../lib/escalation.js';
+import { acquireUserLock, releaseUserLock } from '../lib/locks.js';
 
 // ── Constants ─────────────────────────────────────────────────────
 
@@ -151,15 +152,25 @@ function validateProgressOrdering(
 }
 
 /**
- * Acquire the per-txId verifier lock. Returns true on success, false
- * if another reconcile pass already holds it.
+ * Acquire the per-txId verifier lock with a unique fence value.
+ * Returns the fence string on success (caller passes it back to
+ * `releaseVerifyLock`), or `null` if another reconcile pass already
+ * holds the lock.
+ *
+ * F25 / F26 (2026-05-06 audit SM-01 / C-02 / SM-03): the fence
+ * value is required so a stale lock from a crashed Lambda doesn't
+ * accidentally get DELed by a fresh Lambda's release. Compare-and-
+ * delete via the same Lua eval pattern used by `releaseUserLock`.
  */
-async function acquireVerifyLock(txId: string): Promise<boolean> {
+async function acquireVerifyLock(txId: string): Promise<string | null> {
   try {
     const redis = await getRedis();
     const key = `${KEY_PREFIX.verifying}${txId}`;
-    const result = await redis.set(key, '1', { nx: true, ex: VERIFY_LOCK_TTL_SEC });
-    return result !== null;
+    // Crypto-grade fence — random per acquisition. Two concurrent
+    // attempts cannot collide.
+    const fence = `verify-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const result = await redis.set(key, fence, { nx: true, ex: VERIFY_LOCK_TTL_SEC });
+    return result !== null ? fence : null;
   } catch (e) {
     // Redis blip — fail closed. Better to skip this pass than to risk
     // double-mutation if the next pass sees the entry resolved.
@@ -169,7 +180,54 @@ async function acquireVerifyLock(txId: string): Promise<boolean> {
       txId,
       error: e instanceof Error ? e.message : String(e),
     });
-    return false;
+    return null;
+  }
+}
+
+/**
+ * Compare-and-delete release for the per-txId verifier lock.
+ *
+ * F25 (2026-05-06 audit SM-01): release on no-mutation paths
+ * (transient mirror, recent NOT_FOUND) so the next reconcile pass
+ * can retry within the lock TTL window. Without this, a flaky mirror
+ * wedges entries for 60s × the cron cadence.
+ *
+ * F26 (audit C-02 / SM-03): release after successful resolve so a
+ * concurrent force-release isn't blocked by the just-finished
+ * verifier's still-alive lock.
+ *
+ * The fence check (only delete if the value matches the fence we set
+ * at acquire) prevents a fresh Lambda's lock from being DELed by a
+ * stale completion path. Failure here is logged but non-fatal —
+ * worst case the lock TTL handles cleanup.
+ */
+async function releaseVerifyLock(txId: string, fence: string): Promise<void> {
+  try {
+    const redis = await getRedis();
+    const key = `${KEY_PREFIX.verifying}${txId}`;
+    // Use eval with a Lua script if available; otherwise fall back to
+    // get-then-del (which is racy but acceptable for the
+    // best-effort liveness path — TTL still bounds the worst case).
+    const redisAny = redis as { eval?: (script: string, keys: string[], args: string[]) => Promise<unknown> };
+    if (typeof redisAny.eval === 'function') {
+      await redisAny.eval(
+        'if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end',
+        [key],
+        [fence],
+      );
+    } else {
+      // Best-effort fallback — read, compare, delete. The window is
+      // narrow and the TTL bounds any orphaned lock.
+      const current = await redis.get<string>(key);
+      if (current === fence) await redis.del(key);
+    }
+  } catch (e) {
+    logger.warn('verifier lock release failed; relying on TTL', {
+      component: 'UncertainTx',
+      event: 'verify_lock_release_failed',
+      txId,
+      error: e instanceof Error ? e.message : String(e),
+    });
   }
 }
 
@@ -207,12 +265,46 @@ async function lookupMirrorResult(
 }
 
 /**
+ * Parse a Hedera transaction id's valid-start timestamp.
+ * Format: `<account>@<seconds>.<nanos>` (e.g. `0.0.123@1700000000.000000001`).
+ * Returns the consensus-adjacent timestamp in milliseconds, or
+ * `null` if the txId is malformed.
+ *
+ * F27 (2026-05-06 audit SM-06): the 24h NOT_FOUND→FAILED policy
+ * MUST use this timestamp instead of `entry.timestamp` (which is
+ * the write-time wall clock on whatever Lambda dead-lettered the
+ * tx). Operator-clock skew, container-host clock drift, and
+ * Lambda wall-clock jitter all bias `entry.timestamp`; the txId's
+ * embedded `seconds.nanos` is the canonical consensus-adjacent
+ * value. Without this, an attacker who can nudge the Lambda's
+ * clock 25 hours forward gets the verifier to release reserves
+ * for txs that are still 5 minutes old on chain.
+ */
+export function parseTxIdTimestamp(txId: string): number | null {
+  // Format `<shard>.<realm>.<num>@<seconds>.<nanos>`. Anchored regex
+  // to refuse anything that isn't a Hedera txId shape.
+  const match = txId.match(/^\d+\.\d+\.\d+@(\d+)\.(\d+)$/);
+  if (!match) return null;
+  const seconds = Number(match[1]);
+  const nanos = Number(match[2]);
+  if (!Number.isFinite(seconds) || !Number.isFinite(nanos)) return null;
+  return seconds * 1000 + Math.floor(nanos / 1_000_000);
+}
+
+/**
  * Apply the NOT_FOUND max-age policy. Entries older than 24h are
  * promoted to FAILED — Hedera consensus is sub-second, so anything
  * not on the mirror after a day never landed.
+ *
+ * F27: prefers the txId's embedded valid-start timestamp over
+ * `entry.timestamp`. Falls back to `entry.timestamp` only when the
+ * txId can't be parsed (legacy entries written before the txId-shape
+ * invariant was enforced upstream).
  */
 function applyNotFoundMaxAge(entry: DeadLetterEntry): MirrorResult {
-  const ageMs = Date.now() - new Date(entry.timestamp).getTime();
+  const txIdMs = parseTxIdTimestamp(entry.transactionId);
+  const referenceMs = txIdMs ?? new Date(entry.timestamp).getTime();
+  const ageMs = Date.now() - referenceMs;
   return ageMs > NOT_FOUND_MAX_AGE_MS ? 'FAILED' : 'NOT_FOUND';
 }
 
@@ -405,6 +497,34 @@ async function stampProgress(
   }
 }
 
+/**
+ * F23 (2026-05-06 audit C-06): acquire the per-user lock with bounded
+ * backoff before any per-user ledger mutation in the verifier paths.
+ * Without this, the verifier's `settleSpend` / `releaseReserve` /
+ * `updateBalance` race against an active in-band withdraw / play /
+ * refund on the same user — both writers see + write the same
+ * UserBalance object, breaking the `available + reserved <= deposited`
+ * invariant across the two paths.
+ *
+ * Returns the fence token on success, or `null` if contention never
+ * cleared. On null, the caller defers the entry to the next reconcile
+ * pass (no mutation happens, verifier-lock released for retry).
+ *
+ * Backoff sized to absorb a typical in-band play (~3s) without
+ * permanently blocking the verifier — a long-running play that holds
+ * the user lock past 6.85s pushes the entry to next pass; the user
+ * lock will eventually free.
+ */
+async function tryAcquireUserLockForVerify(userId: string): Promise<string | null> {
+  const backoffMs = [50, 100, 200, 500, 1000, 2000, 3000];
+  for (const delay of backoffMs) {
+    const token = await acquireUserLock(userId, 60);
+    if (token) return token;
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+  return null;
+}
+
 // ── verifyUncertainWithdrawals ────────────────────────────────────
 
 export async function verifyUncertainWithdrawals(
@@ -469,7 +589,8 @@ export async function verifyUncertainWithdrawals(
     }
 
     // C4: per-txId lock. Skip if another reconcile is processing.
-    if (!(await acquireVerifyLock(withdrawTxId))) {
+    const lockFence = await acquireVerifyLock(withdrawTxId);
+    if (!lockFence) {
       outcomes.push({
         withdrawTxId,
         userId,
@@ -482,6 +603,8 @@ export async function verifyUncertainWithdrawals(
     // ── Mirror lookup ──────────────────────────────────────────
     const lookup = await lookupMirrorResult(withdrawTxId);
     if ('transientError' in lookup) {
+      // F25: no mutation happened — release lock so next pass can retry.
+      await releaseVerifyLock(withdrawTxId, lockFence);
       outcomes.push({
         withdrawTxId,
         userId,
@@ -496,6 +619,8 @@ export async function verifyUncertainWithdrawals(
     }
 
     if (result === 'NOT_FOUND') {
+      // F25: recent NOT_FOUND means no mutation happened.
+      await releaseVerifyLock(withdrawTxId, lockFence);
       outcomes.push({
         withdrawTxId,
         userId,
@@ -506,6 +631,18 @@ export async function verifyUncertainWithdrawals(
     }
 
     if (result === 'FAILED') {
+      // F23: serialize per-user mutation against active withdraw/play.
+      const userToken = await tryAcquireUserLockForVerify(details.userId);
+      if (!userToken) {
+        await releaseVerifyLock(withdrawTxId, lockFence);
+        outcomes.push({
+          withdrawTxId,
+          userId,
+          status: 'still_uncertain',
+          note: 'Per-user lock contention did not clear; will retry next reconcile.',
+        });
+        continue;
+      }
       try {
         ledger.releaseReserve(details.userId, details.amount, details.tokenKey);
       } catch (e) {
@@ -515,6 +652,8 @@ export async function verifyUncertainWithdrawals(
           userId: details.userId,
           error: e instanceof Error ? e.message : String(e),
         });
+      } finally {
+        await releaseUserLock(details.userId, userToken);
       }
       // H10: flush before marking resolved, so the release survives
       // a Lambda freeze between mutation and resolve.
@@ -524,6 +663,10 @@ export async function verifyUncertainWithdrawals(
         /* flush failure is logged inside the store */
       }
       await markResolved(store, entry, withdrawTxId);
+      // F26: release lock after work done so a concurrent
+      // force-release isn't blocked by the just-finished verifier's
+      // still-alive 60s lock.
+      await releaseVerifyLock(withdrawTxId, lockFence);
       outcomes.push({
         withdrawTxId,
         userId,
@@ -555,57 +698,89 @@ export async function verifyUncertainWithdrawals(
       auditWrittenAt: priorProgress.auditWrittenAt,
     };
 
-    if (!progress.settledAt) {
-      try {
-        ledger.settleSpend(details.userId, details.amount, details.tokenKey);
-        progress.settledAt = new Date().toISOString();
-        await stampProgress(store, entry, progress);
-      } catch (e) {
-        logger.warn('withdrawal_uncertain settleSpend failed', {
-          component: 'UncertainTx',
+    // F23: serialize the per-user mutations (settle / totalWithdrawn /
+    // history) against active in-band withdraw / play / refund. The
+    // user lock is held only across these three Redis writes; the HCS
+    // audit submit below runs OUTSIDE the lock since it doesn't touch
+    // per-user state and HCS submits can hang for seconds on
+    // congestion. Skip this entire mutation block + audit on lock
+    // contention — the entry stays unresolved (markers untouched) and
+    // the next reconcile pass picks it up.
+    let userMutateToken: string | null = null;
+    if (
+      !progress.settledAt ||
+      !progress.totalWithdrawnAt ||
+      !progress.historyWrittenAt
+    ) {
+      userMutateToken = await tryAcquireUserLockForVerify(details.userId);
+      if (!userMutateToken) {
+        await releaseVerifyLock(withdrawTxId, lockFence);
+        outcomes.push({
           withdrawTxId,
-          userId: details.userId,
-          error: e instanceof Error ? e.message : String(e),
+          userId,
+          status: 'still_uncertain',
+          note: 'Per-user lock contention did not clear; will retry next reconcile.',
         });
+        continue;
       }
     }
-
-    if (!progress.totalWithdrawnAt) {
-      try {
-        store.updateBalance(details.userId, (b) => {
-          const tokEntry = b.tokens[details.tokenKey!];
-          if (tokEntry) tokEntry.totalWithdrawn += details.amount!;
-          return b;
-        });
-        progress.totalWithdrawnAt = new Date().toISOString();
-        await stampProgress(store, entry, progress);
-      } catch (e) {
-        logger.warn('withdrawal_uncertain totalWithdrawn update failed', {
-          component: 'UncertainTx',
-          withdrawTxId,
-          error: e instanceof Error ? e.message : String(e),
-        });
+    try {
+      if (!progress.settledAt) {
+        try {
+          ledger.settleSpend(details.userId, details.amount, details.tokenKey);
+          progress.settledAt = new Date().toISOString();
+          await stampProgress(store, entry, progress);
+        } catch (e) {
+          logger.warn('withdrawal_uncertain settleSpend failed', {
+            component: 'UncertainTx',
+            withdrawTxId,
+            userId: details.userId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
       }
-    }
 
-    if (!progress.historyWrittenAt) {
-      try {
-        store.recordWithdrawal({
-          userId: details.userId,
-          amount: details.amount,
-          tokenId: details.isHbar ? null : details.tokenKey,
-          recipientAccountId: details.recipientAccountId ?? '',
-          transactionId: withdrawTxId,
-          timestamp: new Date().toISOString(),
-        });
-        progress.historyWrittenAt = new Date().toISOString();
-        await stampProgress(store, entry, progress);
-      } catch (e) {
-        logger.warn('withdrawal_uncertain recordWithdrawal failed', {
-          component: 'UncertainTx',
-          withdrawTxId,
-          error: e instanceof Error ? e.message : String(e),
-        });
+      if (!progress.totalWithdrawnAt) {
+        try {
+          store.updateBalance(details.userId, (b) => {
+            const tokEntry = b.tokens[details.tokenKey!];
+            if (tokEntry) tokEntry.totalWithdrawn += details.amount!;
+            return b;
+          });
+          progress.totalWithdrawnAt = new Date().toISOString();
+          await stampProgress(store, entry, progress);
+        } catch (e) {
+          logger.warn('withdrawal_uncertain totalWithdrawn update failed', {
+            component: 'UncertainTx',
+            withdrawTxId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+
+      if (!progress.historyWrittenAt) {
+        try {
+          store.recordWithdrawal({
+            userId: details.userId,
+            amount: details.amount,
+            tokenId: details.isHbar ? null : details.tokenKey,
+            recipientAccountId: details.recipientAccountId ?? '',
+            transactionId: withdrawTxId,
+            timestamp: new Date().toISOString(),
+          });
+          progress.historyWrittenAt = new Date().toISOString();
+          await stampProgress(store, entry, progress);
+        } catch (e) {
+          logger.warn('withdrawal_uncertain recordWithdrawal failed', {
+            component: 'UncertainTx',
+            withdrawTxId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+    } finally {
+      if (userMutateToken) {
+        await releaseUserLock(details.userId, userMutateToken);
       }
     }
 
@@ -663,6 +838,8 @@ export async function verifyUncertainWithdrawals(
       /* flush failure is logged inside the store */
     }
     await markResolved(store, entry, withdrawTxId, progress);
+    // F26: release lock after successful resolve.
+    await releaseVerifyLock(withdrawTxId, lockFence);
 
     outcomes.push({
       withdrawTxId,
@@ -728,7 +905,8 @@ export async function verifyUncertainOperatorFeeWithdrawals(
       continue;
     }
 
-    if (!(await acquireVerifyLock(withdrawTxId))) {
+    const opLockFence = await acquireVerifyLock(withdrawTxId);
+    if (!opLockFence) {
       outcomes.push({
         withdrawTxId,
         status: 'still_uncertain',
@@ -739,6 +917,8 @@ export async function verifyUncertainOperatorFeeWithdrawals(
 
     const lookup = await lookupMirrorResult(withdrawTxId);
     if ('transientError' in lookup) {
+      // F25: no mutation; release lock for retry.
+      await releaseVerifyLock(withdrawTxId, opLockFence);
       outcomes.push({
         withdrawTxId,
         status: 'still_uncertain',
@@ -752,6 +932,8 @@ export async function verifyUncertainOperatorFeeWithdrawals(
     }
 
     if (result === 'NOT_FOUND') {
+      // F25: no mutation; release lock.
+      await releaseVerifyLock(withdrawTxId, opLockFence);
       outcomes.push({
         withdrawTxId,
         status: 'still_uncertain',
@@ -767,6 +949,8 @@ export async function verifyUncertainOperatorFeeWithdrawals(
         /* */
       }
       await markResolved(store, entry, withdrawTxId);
+      // F26: release lock after resolve.
+      await releaseVerifyLock(withdrawTxId, opLockFence);
       outcomes.push({
         withdrawTxId,
         status: 'failed',
@@ -858,6 +1042,8 @@ export async function verifyUncertainOperatorFeeWithdrawals(
       /* */
     }
     await markResolved(store, entry, withdrawTxId, operatorProgress);
+    // F26: release lock after successful resolve.
+    await releaseVerifyLock(withdrawTxId, opLockFence);
 
     outcomes.push({
       withdrawTxId,
@@ -918,7 +1104,8 @@ export async function verifyUncertainPlays(
       continue;
     }
 
-    if (!(await acquireVerifyLock(uncertainTxId))) {
+    const playLockFence = await acquireVerifyLock(uncertainTxId);
+    if (!playLockFence) {
       outcomes.push({
         uncertainTxId,
         userId,
@@ -930,6 +1117,8 @@ export async function verifyUncertainPlays(
 
     const lookup = await lookupMirrorResult(uncertainTxId);
     if ('transientError' in lookup) {
+      // F25: no mutation; release lock for retry.
+      await releaseVerifyLock(uncertainTxId, playLockFence);
       outcomes.push({
         uncertainTxId,
         userId,
@@ -944,6 +1133,8 @@ export async function verifyUncertainPlays(
     }
 
     if (result === 'NOT_FOUND') {
+      // F25: no mutation; release lock.
+      await releaseVerifyLock(uncertainTxId, playLockFence);
       outcomes.push({
         uncertainTxId,
         userId,
@@ -954,19 +1145,36 @@ export async function verifyUncertainPlays(
     }
 
     if (result === 'FAILED') {
-      // Confirmed not-on-chain: release every reserved token amount.
-      for (const { token, amount } of details.tokenReservations) {
-        try {
-          ledger.releaseReserve(details.userId, amount, token);
-        } catch (e) {
-          logger.warn('play_uncertain releaseReserve failed', {
-            component: 'UncertainTx',
-            uncertainTxId,
-            userId: details.userId,
-            token,
-            error: e instanceof Error ? e.message : String(e),
-          });
+      // F23: serialize per-user reservation releases against active
+      // in-band withdraw / play / refund.
+      const playUserToken = await tryAcquireUserLockForVerify(details.userId);
+      if (!playUserToken) {
+        await releaseVerifyLock(uncertainTxId, playLockFence);
+        outcomes.push({
+          uncertainTxId,
+          userId,
+          status: 'still_uncertain',
+          note: 'Per-user lock contention did not clear; will retry next reconcile.',
+        });
+        continue;
+      }
+      try {
+        // Confirmed not-on-chain: release every reserved token amount.
+        for (const { token, amount } of details.tokenReservations) {
+          try {
+            ledger.releaseReserve(details.userId, amount, token);
+          } catch (e) {
+            logger.warn('play_uncertain releaseReserve failed', {
+              component: 'UncertainTx',
+              uncertainTxId,
+              userId: details.userId,
+              token,
+              error: e instanceof Error ? e.message : String(e),
+            });
+          }
         }
+      } finally {
+        await releaseUserLock(details.userId, playUserToken);
       }
       try {
         await store.flush();
@@ -974,6 +1182,8 @@ export async function verifyUncertainPlays(
         /* */
       }
       await markResolved(store, entry, uncertainTxId);
+      // F26: release lock after resolve.
+      await releaseVerifyLock(uncertainTxId, playLockFence);
       outcomes.push({
         uncertainTxId,
         userId,
@@ -1065,6 +1275,8 @@ export async function verifyUncertainPlays(
     } catch {
       /* logged via escalation */
     }
+    // F26: release lock after triage anchor + resolve write.
+    await releaseVerifyLock(uncertainTxId, playLockFence);
     outcomes.push({
       uncertainTxId,
       userId,

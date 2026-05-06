@@ -29,7 +29,36 @@ import {
   verifyUncertainWithdrawals,
   verifyUncertainOperatorFeeWithdrawals,
   verifyUncertainPlays,
+  parseTxIdTimestamp,
 } from './uncertainTxVerification.js';
+
+// ── F27: parseTxIdTimestamp invariant tests ──────────────────────
+
+describe('F27: parseTxIdTimestamp', () => {
+  it('parses a Hedera txId valid-start timestamp into milliseconds', () => {
+    // 1700000000.000000001 = Nov 14 2023 22:13:20 UTC + 1 nanosecond
+    const ms = parseTxIdTimestamp('0.0.1234@1700000000.000000001');
+    assert.equal(ms, 1700000000_000);
+  });
+
+  it('truncates nanos to ms (rounds down)', () => {
+    // 1700000000.999999999 → 1700000000_999 (floor of nanos / 1e6)
+    const ms = parseTxIdTimestamp('0.0.1234@1700000000.999999999');
+    assert.equal(ms, 1700000000_999);
+  });
+
+  it('returns null for malformed txId', () => {
+    assert.equal(parseTxIdTimestamp('not-a-tx-id'), null);
+    assert.equal(parseTxIdTimestamp('0.0.X@1234.5'), null);
+    assert.equal(parseTxIdTimestamp('audit-orphan:0.0.1@123.456'), null);
+    assert.equal(parseTxIdTimestamp(''), null);
+  });
+
+  it('returns null for negative or non-numeric components', () => {
+    assert.equal(parseTxIdTimestamp('0.0.1@-100.0'), null);
+    assert.equal(parseTxIdTimestamp('0.0.1@abc.0'), null);
+  });
+});
 
 // ── Test harness ─────────────────────────────────────────────────
 
@@ -145,9 +174,17 @@ function uninstallRedisMock(): void {
 
 // ── Setup helpers ────────────────────────────────────────────────
 
-const TX_OK = '0.0.1234@1700000000.000000001';
-const TX_FAIL = '0.0.1234@1700000000.000000002';
-const TX_NOT_FOUND = '0.0.1234@1700000000.000000003';
+// F27: txId timestamps drive the 24h NOT_FOUND→FAILED policy. Tests
+// that exercise the "recent NOT_FOUND" path need txIds whose
+// embedded valid-start timestamp is recent (now-ish). Tests that
+// exercise the >24h promotion override `entry.timestamp` directly
+// AND use a txId whose embedded ts is also old — so we generate
+// the txId from the desired age.
+const NOW_SECONDS = Math.floor(Date.now() / 1000);
+const TX_OK = `0.0.1234@${NOW_SECONDS}.000000001`;
+const TX_FAIL = `0.0.1234@${NOW_SECONDS}.000000002`;
+const TX_NOT_FOUND = `0.0.1234@${NOW_SECONDS}.000000003`;
+const TX_NOT_FOUND_OLD = `0.0.1234@${NOW_SECONDS - 25 * 60 * 60}.000000004`;
 
 async function setupStore(): Promise<{ dir: string; store: PersistentStore; ledger: UserLedger }> {
   const dir = makeTempDir();
@@ -293,8 +330,11 @@ describe('verifyUncertainWithdrawals', () => {
     assert.equal(dls[0]?.resolvedAt, undefined, 'DL must remain unresolved');
   });
 
-  it('NOT_FOUND >24h old → promoted to FAILED (H7 max-age)', async () => {
-    await store.upsertDeadLetter(makeWithdrawalDl(TX_NOT_FOUND, 25));
+  it('NOT_FOUND >24h old → promoted to FAILED (H7 max-age, F27 uses txId timestamp)', async () => {
+    // F27: the 24h max-age check now uses the txId's valid-start
+    // timestamp, not entry.timestamp. The DL row is also created
+    // 25h ago for completeness.
+    await store.upsertDeadLetter(makeWithdrawalDl(TX_NOT_FOUND_OLD, 25));
     const outcomes = await verifyUncertainWithdrawals(store, ledger, noopAccounting());
 
     assert.equal(outcomes[0]!.status, 'failed', '>24h NOT_FOUND must promote to FAILED');
@@ -762,8 +802,8 @@ describe('verifyUncertainPlays', () => {
     assert.match(dls[0]?.resolvedBy ?? '', /manual-triage/);
   });
 
-  it('NOT_FOUND >24h promoted to FAILED, releases reservations', async () => {
-    await store.upsertDeadLetter(makePlayDl(TX_NOT_FOUND, 25));
+  it('NOT_FOUND >24h promoted to FAILED, releases reservations (F27 uses txId timestamp)', async () => {
+    await store.upsertDeadLetter(makePlayDl(TX_NOT_FOUND_OLD, 25));
 
     const outcomes = await verifyUncertainPlays(store, ledger);
 

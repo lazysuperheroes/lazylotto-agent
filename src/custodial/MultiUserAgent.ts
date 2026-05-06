@@ -22,6 +22,7 @@ import { reconcile, type ReconciliationResult } from './Reconciliation.js';
 import { logger } from '../lib/logger.js';
 import { assertKillSwitchDisabled } from '../lib/killswitch.js';
 import { acquireOperatorLock, releaseOperatorLock } from '../lib/locks.js';
+import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
 import {
   transferHbar,
@@ -1525,6 +1526,53 @@ export class MultiUserAgent {
 
     const sender = getOperatorAccountId(this.client);
 
+    // F24 (2026-05-06 audit OP-02): per-token in-flight claim. The
+    // existing operator-lock at the route serializes calls but its
+    // TTL (120s) is too short to bridge a worst-case Lambda freeze
+    // between `awaitReceipt` resolving and `updateOperator` firing.
+    // A retry with a fresh idempotency key during that freeze would
+    // see no DL (no ReceiptUncertainError fired) and submit a SECOND
+    // on-chain transfer — operator double-pay.
+    //
+    // The pre-submit claim is per-token (only one operator-fee
+    // withdraw of any token can be in flight at a time). 30-min TTL
+    // covers worst-case Lambda freeze + retry window. SET-NX so two
+    // concurrent calls see the in-flight signal and refuse. Cleared
+    // after `updateOperator` flush succeeds; left in place on
+    // ReceiptUncertainError (verifier resolves the dead-letter and
+    // operators clear the claim via force-release if needed).
+    const PENDING_CLAIM_KEY = `${KEY_PREFIX.lockOperator}withdraw-pending:${tokenKey}`;
+    const PENDING_CLAIM_TTL_SEC = 30 * 60;
+    let pendingClaimAcquired = false;
+    try {
+      const redis = await getRedis();
+      const claimResult = await redis.set(
+        PENDING_CLAIM_KEY,
+        new Date().toISOString(),
+        { nx: true, ex: PENDING_CLAIM_TTL_SEC },
+      );
+      if (claimResult === null) {
+        throw new Error(
+          `Operator fee withdrawal blocked: a same-token withdrawal ` +
+            `(${token}) is already in flight on another Lambda or has not ` +
+            `yet completed its post-conditions. Wait for the verifier or ` +
+            `force-release the claim if you've manually confirmed completion.`,
+        );
+      }
+      pendingClaimAcquired = true;
+    } catch (claimErr) {
+      if (claimErr instanceof Error && claimErr.message.includes('already in flight')) {
+        throw claimErr;
+      }
+      // Redis unreachable — fail closed. Operator-fee withdraw is
+      // irreversible; refuse without the per-token claim safety net.
+      throw new Error(
+        `Operator fee withdrawal blocked: in-flight claim could not be ` +
+          `acquired (${claimErr instanceof Error ? claimErr.message : String(claimErr)}). ` +
+          `Refusing to submit without the F24 per-token freeze guard.`,
+      );
+    }
+
     let transactionId: string;
 
     try {
@@ -1538,6 +1586,21 @@ export class MultiUserAgent {
         transactionId = result.transactionId;
       }
     } catch (transferError) {
+      // F24: pre-submit / confirmed-failure path — release the
+      // per-token claim so a retry can run. ReceiptUncertainError
+      // is the exception (claim retained for verifier resolution),
+      // handled below.
+      if (
+        pendingClaimAcquired &&
+        !(transferError instanceof ReceiptUncertainError)
+      ) {
+        try {
+          const redis = await getRedis();
+          await redis.del(PENDING_CLAIM_KEY);
+        } catch {
+          /* TTL is the fallback */
+        }
+      }
       if (transferError instanceof ReceiptUncertainError) {
         // C24 applied to operator fee withdraw: tx may have landed.
         // Persist a dead-letter; the operator state is INTENTIONALLY
@@ -1597,6 +1660,24 @@ export class MultiUserAgent {
       balances: { ...op.balances, [tokenKey]: (op.balances[tokenKey] ?? 0) - amount },
       totalWithdrawnByOperator: { ...op.totalWithdrawnByOperator, [tokenKey]: (op.totalWithdrawnByOperator[tokenKey] ?? 0) + amount },
     }));
+    // F24: release the per-token claim after operator state mutates.
+    // Order: state-then-claim. If the claim DEL fails after the state
+    // update, the TTL handles it; the operator-lock at the route level
+    // also serializes future calls so the worst case is a 30-min delay
+    // before the next withdraw of the same token can proceed.
+    try {
+      await this.store.flush();
+    } catch {
+      /* flush failure logged inside store; continue to release */
+    }
+    if (pendingClaimAcquired) {
+      try {
+        const redis = await getRedis();
+        await redis.del(PENDING_CLAIM_KEY);
+      } catch {
+        /* TTL is the fallback */
+      }
+    }
 
     // Record via HCS-20 accounting (non-blocking) — pass the token so
     // the on-chain record can be correctly attributed when the operator

@@ -556,7 +556,7 @@ called.
 
 ## Phase 5 — Concurrency & recovery (5 items)
 
-### `[ ]` F23 (H) — Per-user lock in verifier paths
+### `[x]` F23 (H) — Per-user lock in verifier paths
 **Closes:** C-06
 
 **Bug:** verifier's `releaseReserve` / `settleSpend` /
@@ -578,7 +578,7 @@ reconcile pass with a `still_uncertain` outcome.
 
 ---
 
-### `[ ]` F24 (H) — In-band operator-fee withdraw: pre-submit pending claim
+### `[x]` F24 (H) — In-band operator-fee withdraw: pre-submit pending claim
 **Closes:** OP-02
 
 **Bug:** gap between `awaitReceipt` resolving and `store.updateOperator`
@@ -597,7 +597,7 @@ flush. Open-DL guard reads it. Mirror refund's pattern.
 
 ---
 
-### `[ ]` F25 (H) — Verifier transient-error releases lock
+### `[x]` F25 (H) — Verifier transient-error releases lock
 **Closes:** SM-01
 
 **Bug:** lock acquired then mirror returns transient → `still_uncertain`
@@ -616,7 +616,7 @@ Use fence value (UUID) so it's safe.
 
 ---
 
-### `[ ]` F26 (M) — Verifier releases lock after resolve
+### `[x]` F26 (M) — Verifier releases lock after resolve
 **Closes:** C-02, SM-03
 
 **Bug:** lock held 60s after work done (verifier never DELs).
@@ -636,7 +636,7 @@ write so retry-after-failure can short-circuit.
 
 ---
 
-### `[ ]` F27 (M) — 24h NOT_FOUND uses txId timestamp
+### `[x]` F27 (M) — 24h NOT_FOUND uses txId timestamp
 **Closes:** SM-06
 
 **Bug:** policy uses `entry.timestamp` (write-time clock). Lambda

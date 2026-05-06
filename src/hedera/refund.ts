@@ -35,6 +35,7 @@ import { logger } from '../lib/logger.js';
 import { escalateUncertainDlFailure } from '../lib/escalation.js';
 import { classifyMirrorResult } from './responseCodes.js';
 import { acquireUserLock, releaseUserLock } from '../lib/locks.js';
+import { parseTxIdTimestamp } from '../custodial/uncertainTxVerification.js';
 
 const REFUND_KEY_PREFIX = KEY_PREFIX.refunded;
 
@@ -753,10 +754,16 @@ export async function verifyUncertainRefunds(
 
     // C4: per-txId verifier lock to prevent two reconcile passes
     // double-mutating the same entry.
+    //
+    // F25 / F26 (2026-05-06 audit SM-01 / C-02): use a fence value
+    // so we can compare-and-delete on no-mutation paths and after
+    // resolve, freeing the lock for the next pass / a concurrent
+    // force-release within the TTL window.
+    const refundLockKey = `${KEY_PREFIX.verifying}refund:${refundTxId}`;
+    const refundLockFence = `verify-refund-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     try {
       const redis = await getRedis();
-      const lockKey = `${KEY_PREFIX.verifying}refund:${refundTxId}`;
-      const lockResult = await redis.set(lockKey, '1', {
+      const lockResult = await redis.set(refundLockKey, refundLockFence, {
         nx: true,
         ex: VERIFY_LOCK_TTL_SEC_REFUND,
       });
@@ -784,6 +791,27 @@ export async function verifyUncertainRefunds(
       });
       continue;
     }
+    // F25 / F26: best-effort compare-and-delete release. Defined as a
+    // closure over `refundLockKey` / `refundLockFence` so each branch
+    // can call it without re-passing both.
+    const releaseRefundLock = async (): Promise<void> => {
+      try {
+        const redis = await getRedis();
+        const r = redis as { eval?: (script: string, keys: string[], args: string[]) => Promise<unknown> };
+        if (typeof r.eval === 'function') {
+          await r.eval(
+            'if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end',
+            [refundLockKey],
+            [refundLockFence],
+          );
+        } else {
+          const cur = await redis.get<string>(refundLockKey);
+          if (cur === refundLockFence) await redis.del(refundLockKey);
+        }
+      } catch {
+        /* TTL is the fallback */
+      }
+    };
 
     // ── Mirror node lookup (H8: use classifier) ──────────────
     let result: 'SUCCESS' | 'FAILED' | 'NOT_FOUND';
@@ -796,6 +824,8 @@ export async function verifyUncertainRefunds(
         result = 'NOT_FOUND';
       } else if (!res.ok) {
         // Other errors (5xx, timeouts) — leave for next pass.
+        // F25: no mutation; release lock for retry.
+        await releaseRefundLock();
         outcomes.push({
           refundTxId,
           originalTxId,
@@ -813,7 +843,8 @@ export async function verifyUncertainRefunds(
         }
       }
     } catch (e) {
-      // Network error → still uncertain, retry later.
+      // F25: network error → still uncertain; release lock for retry.
+      await releaseRefundLock();
       outcomes.push({
         refundTxId,
         originalTxId,
@@ -824,14 +855,21 @@ export async function verifyUncertainRefunds(
     }
 
     // H7: NOT_FOUND for >24h → FAILED.
+    // F27 (2026-05-06 audit SM-06): use the txId's valid-start
+    // timestamp, not entry.timestamp (operator-clock-skew vector).
     if (result === 'NOT_FOUND') {
-      const ageMs = Date.now() - new Date(entry.timestamp).getTime();
+      const txIdMs = parseTxIdTimestamp(refundTxId);
+      const referenceMs = txIdMs ?? new Date(entry.timestamp).getTime();
+      const ageMs = Date.now() - referenceMs;
       if (ageMs > NOT_FOUND_MAX_AGE_MS_REFUND) {
         result = 'FAILED';
       }
     }
 
     if (result === 'NOT_FOUND') {
+      // F25: recent NOT_FOUND — release lock so next pass can retry
+      // within the TTL window (rather than waiting for it to expire).
+      await releaseRefundLock();
       outcomes.push({
         refundTxId,
         originalTxId,
@@ -907,6 +945,9 @@ export async function verifyUncertainRefunds(
           error: e instanceof Error ? e.message : String(e),
         });
       }
+      // F26: release lock after FAILED resolve so a concurrent
+      // force-release can act within the TTL window if needed.
+      await releaseRefundLock();
       outcomes.push({
         refundTxId,
         originalTxId,
@@ -1176,6 +1217,8 @@ export async function verifyUncertainRefunds(
         error: e instanceof Error ? e.message : String(e),
       });
     }
+    // F26: release lock after SUCCESS resolve.
+    await releaseRefundLock();
 
     outcomes.push({
       refundTxId,
