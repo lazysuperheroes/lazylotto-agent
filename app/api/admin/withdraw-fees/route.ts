@@ -71,7 +71,24 @@ export const POST = withStore(async (request: Request) => {
     // 0.3.4: delegate to userOps.withdrawOperatorFees. Validation
     // (NaN/Infinity, recipient format) + idempotency + operator-lock
     // (already inside operatorWithdrawFees domain method).
+    //
+    // C2: Idempotency-Key header is REQUIRED. Without it, two
+    // sequential calls (admin double-click, network retry) each
+    // create their own SET-NX claim and BOTH submit on-chain — and
+    // the receipt-uncertain catch leaves operator state un-debited
+    // so the in-flight balance check passes the second time. The
+    // operator wallet drains twice if both txs eventually land.
     const idempotencyKey = request.headers.get('Idempotency-Key');
+    if (!idempotencyKey || idempotencyKey.trim() === '') {
+      return NextResponse.json(
+        {
+          error:
+            'Idempotency-Key header is required for operator fee withdrawal ' +
+            '(C2 finding — prevents double-pay on retry across receipt-uncertain timeouts).',
+        },
+        { status: 400, headers: CORS_HEADERS },
+      );
+    }
     const opResult = await withdrawOperatorFees(
       { store, multiUser },
       { amount: body.amount as number, to, token, idempotencyKey },

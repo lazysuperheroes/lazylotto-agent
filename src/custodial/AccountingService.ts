@@ -288,8 +288,21 @@ export class AccountingService {
    * and skip non-balance events cleanly.
    */
   async recordControlEvent(
-    event: 'killswitch_enabled' | 'killswitch_disabled',
-    details: { reason?: string; by: string },
+    event:
+      | 'killswitch_enabled'
+      | 'killswitch_disabled'
+      | 'force_release_override'
+      | 'force_release',
+    details: {
+      reason?: string;
+      by: string;
+      /** For force_release: the dead-letter id being released. */
+      uncertainTxId?: string;
+      /** For force_release: the dead-letter kind. */
+      kind?: string;
+      /** For force_release_override: mirror outcome at time of override. */
+      mirrorResult?: string;
+    },
   ): Promise<void> {
     await this.submitMessage({
       p: 'hcs-20',
@@ -298,6 +311,9 @@ export class AccountingService {
       event,
       reason: details.reason ?? null,
       by: details.by,
+      ...(details.uncertainTxId ? { uncertainTxId: details.uncertainTxId } : {}),
+      ...(details.kind ? { kind: details.kind } : {}),
+      ...(details.mirrorResult ? { mirrorResult: details.mirrorResult } : {}),
       timestamp: new Date().toISOString(),
     });
   }

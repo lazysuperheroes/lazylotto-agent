@@ -23,6 +23,12 @@ import { logger } from '../lib/logger.js';
 import { assertKillSwitchDisabled } from '../lib/killswitch.js';
 import { acquireOperatorLock, releaseOperatorLock } from '../lib/locks.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
+import {
+  transferHbar,
+  transferToken,
+  ReceiptUncertainError,
+} from '../hedera/transfers.js';
+import { escalateUncertainDlFailure } from '../lib/escalation.js';
 
 // ── HCS-20 v2 helpers ─────────────────────────────────────────────
 //
@@ -454,6 +460,30 @@ export class MultiUserAgent {
     if (!user.active) {
       this.releaseLock(userId);
       throw new UserInactiveError(userId);
+    }
+
+    // R-MEDIUM-2: refuse new play if the user already has 3 unresolved
+    // play_uncertain rows. Each held reservation locks balance until
+    // reconcile / force-release resolves it; without a cap a user
+    // hitting transient mirror lag could lock all their funds behind
+    // held reservations. Self-DoS scope only (filter pins userId), not
+    // cross-user. Same shape as the L21 cap on processWithdrawal.
+    await this.store.refreshDeadLetters().catch(() => undefined);
+    const userOpenPlays = this.store
+      .getDeadLetters()
+      .filter(
+        (e) =>
+          e.kind === 'play_uncertain' &&
+          !e.resolvedAt &&
+          (e.details as { userId?: string })?.userId === userId,
+      );
+    if (userOpenPlays.length >= 3) {
+      this.releaseLock(userId);
+      throw new Error(
+        `Play blocked: ${userOpenPlays.length} unresolved play_uncertain ` +
+          `entries for user ${userId} (cap: 3). Resolve via reconcile / ` +
+          `admin force-release before retrying.`,
+      );
     }
 
     // ── Per-token reservation (Stage 2) ──────────────────────
@@ -958,8 +988,66 @@ export class MultiUserAgent {
 
       return session;
     } catch (error) {
-      // CRITICAL: release every reservation on failure (per-token).
-      // The catch is wide because:
+      if (error instanceof ReceiptUncertainError) {
+        // Receipt timeout on a contract submission (buy / roll /
+        // prize transfer). The on-chain action MAY have landed —
+        // releasing the reservations would let the user re-play with
+        // a fresh balance, then if the original tx settles they'd
+        // have got entries on-chain at the operator's expense. KEEP
+        // reservations. Persist a play_uncertain dead-letter so
+        // reconcile can resolve via the mirror node:
+        //   - Confirmed FAILED → release reservations.
+        //   - Confirmed SUCCESS → flag for manual triage (in-band
+        //     settlement code did not run; operator must reconcile
+        //     entries against dApp pool state).
+        //   - Still NOT_FOUND → leave for next reconcile pass; after
+        //     24h of NOT_FOUND it gets promoted to FAILED.
+        try {
+          await this.store.upsertDeadLetter({
+            transactionId: error.transactionId,
+            timestamp: new Date().toISOString(),
+            error: error.message,
+            kind: 'play_uncertain',
+            details: {
+              userId,
+              tokenReservations: Array.from(tokenReservations.entries()).map(
+                ([token, amount]) => ({ token, amount }),
+              ),
+            },
+          });
+        } catch (dlErr) {
+          // H11: dead-letter write failure during uncertain catch is
+          // the worst possible state (held reserves, no recovery
+          // anchor). Log loudly + escalate via the same webhook the
+          // reconcile insolvency check uses.
+          logger.error(
+            'CRITICAL: play_uncertain dead-letter write failed — held reserves with no recovery anchor',
+            {
+              component: 'MultiUserAgent',
+              event: 'play_uncertain_dl_write_failed',
+              userId,
+              uncertainTxId: error.transactionId,
+              error: dlErr instanceof Error ? dlErr.message : String(dlErr),
+            },
+          );
+          await escalateUncertainDlFailure({
+            kind: 'play_uncertain',
+            userId,
+            uncertainTxId: error.transactionId,
+            cause: dlErr,
+          });
+        }
+        logger.error('play receipt timed out — dead-lettered as play_uncertain', {
+          component: 'MultiUserAgent',
+          event: 'play_receipt_uncertain',
+          userId,
+          uncertainTxId: error.transactionId,
+        });
+        // Reservations INTENTIONALLY retained. Rethrow.
+        throw error;
+      }
+      // Confirmed pre-submit OR on-chain failure: release every
+      // reservation on failure (per-token). The catch is wide because:
       //   - If play() threw, no settlement happened, so the full
       //     reservation is still locked.
       //   - If play() returned but settlement threw on a defense-
@@ -1055,6 +1143,29 @@ export class MultiUserAgent {
       const user = this.store.getUser(userId);
       if (!user) throw new UserNotFoundError(userId);
 
+      // L21: refuse new withdrawal if the user already has 3 unresolved
+      // withdrawal_uncertain rows. Each receipt-uncertain catch holds
+      // a reserve until reconcile resolves it, so without a cap a user
+      // hitting transient mirror lag could lock all their balance
+      // behind held reserves. Cap also defends the dead-letter list
+      // from runaway pollution.
+      await this.store.refreshDeadLetters().catch(() => undefined);
+      const userOpenUncertain = this.store
+        .getDeadLetters()
+        .filter(
+          (e) =>
+            e.kind === 'withdrawal_uncertain' &&
+            !e.resolvedAt &&
+            (e.details as { userId?: string })?.userId === userId,
+        );
+      if (userOpenUncertain.length >= 3) {
+        throw new Error(
+          `Withdrawal blocked: ${userOpenUncertain.length} unresolved ` +
+            `withdrawal_uncertain entries for user ${userId} (cap: 3). ` +
+            `Resolve via reconcile / admin force-release before retrying.`,
+        );
+      }
+
       // Velocity cap: limit total withdrawal volume per user per 24 hours.
       // Bounds blast radius if a user session is compromised.
       //
@@ -1097,7 +1208,6 @@ export class MultiUserAgent {
       this.ledger.reserve(userId, amount, withdrawToken);
       let transactionId: string;
       try {
-        const { transferHbar, transferToken } = await import('../hedera/transfers.js');
         const sender = getOperatorAccountId(this.client);
         if (isHbar) {
           const result = await transferHbar(this.client, sender, user.hederaAccountId, amount);
@@ -1108,7 +1218,63 @@ export class MultiUserAgent {
           transactionId = result.transactionId;
         }
       } catch (transferError) {
-        // CRITICAL: release reserved funds on transfer failure
+        if (transferError instanceof ReceiptUncertainError) {
+          // Receipt timed out — tx may have landed. Audit finding C24
+          // applied to withdraw: if we release the reserve here, a
+          // retry with a fresh idempotency key (or no key) would let
+          // the user spend that balance AGAIN, then a successful
+          // original tx would drain the operator wallet a second
+          // time. KEEP the reserve. Persist a withdrawal_uncertain
+          // dead-letter so reconcile (or an admin tool) verifies the
+          // tx on chain and either settles (success) or releases the
+          // reserve (failed).
+          try {
+            await this.store.upsertDeadLetter({
+              transactionId: transferError.transactionId,
+              timestamp: new Date().toISOString(),
+              error: transferError.message,
+              kind: 'withdrawal_uncertain',
+              details: {
+                userId,
+                recipientAccountId: user.hederaAccountId,
+                withdrawTxId: transferError.transactionId,
+                amount,
+                tokenKey: withdrawToken,
+                isHbar,
+              },
+            });
+          } catch (dlErr) {
+            logger.error(
+              'CRITICAL: withdrawal_uncertain dead-letter write failed — reserve held but no recovery anchor',
+              {
+                component: 'MultiUserAgent',
+                event: 'withdrawal_uncertain_dl_write_failed',
+                userId,
+                withdrawTxId: transferError.transactionId,
+                error: dlErr instanceof Error ? dlErr.message : String(dlErr),
+              },
+            );
+            await escalateUncertainDlFailure({
+              kind: 'withdrawal_uncertain',
+              userId,
+              uncertainTxId: transferError.transactionId,
+              cause: dlErr,
+            });
+          }
+          logger.error('withdrawal receipt timed out — dead-lettered as withdrawal_uncertain', {
+            component: 'MultiUserAgent',
+            event: 'withdrawal_receipt_uncertain',
+            userId,
+            withdrawTxId: transferError.transactionId,
+            amount,
+            token: withdrawToken,
+          });
+          // Reserve INTENTIONALLY retained. Rethrow so withIdempotency
+          // (which knows about ReceiptUncertainError) preserves its
+          // claim and the caller surfaces uncertainty.
+          throw transferError;
+        }
+        // Confirmed pre-submit OR on-chain failure — release reserve.
         this.ledger.releaseReserve(userId, amount, withdrawToken);
         throw transferError;
       }
@@ -1208,6 +1374,19 @@ export class MultiUserAgent {
     }
 
     try {
+    // M14: fail fast if LAZY_TOKEN_ID is missing for a LAZY
+    // withdrawal — the env-stability landmine in the verifier
+    // depends on the same env var being set for the entire
+    // submit→reconcile lifecycle. Detecting at submit time prevents
+    // a dead-letter being written with `tokenKey: 'lazy'` (literal
+    // fallback) that the verifier would later debit against the
+    // wrong key.
+    if (token === 'LAZY' && !process.env.LAZY_TOKEN_ID) {
+      throw new Error(
+        'LAZY_TOKEN_ID not configured — cannot withdraw LAZY fees. Set the env and retry.',
+      );
+    }
+
     // Refresh operator state from Redis post-lock so we see the
     // latest rake totals from any deposits credited on other Lambdas
     // before we read tokenBalance below. Without this refresh, a
@@ -1218,10 +1397,44 @@ export class MultiUserAgent {
     // right now that we hold the lock.
     await this.store.refreshOperator();
     const operator = this.store.getOperator();
-    const tokenKey = token === 'HBAR' ? 'hbar' : (process.env.LAZY_TOKEN_ID ?? 'lazy');
+    // M14 guard above ensures LAZY_TOKEN_ID is set when token === 'LAZY'.
+    const tokenKey = token === 'HBAR' ? 'hbar' : process.env.LAZY_TOKEN_ID!;
     const tokenBalance = operator.balances[tokenKey] ?? 0;
     if (tokenBalance < amount) {
       throw new InsufficientBalanceError('operator', amount, tokenBalance);
+    }
+
+    // C2 + L21: refuse new submit if there are unresolved
+    // operator_fee_withdraw_uncertain rows for this same tokenKey.
+    // The receipt-uncertain catch leaves operator state un-debited,
+    // so a fresh-key retry would pass the balance check above and
+    // fire a SECOND on-chain transfer. If the original lands, the
+    // operator wallet drains twice. Reconcile (or admin force-release)
+    // must resolve the existing uncertain row before a retry is safe.
+    // Total cap of 10 prevents dead-letter pollution from runaway
+    // timeouts.
+    await this.store.refreshDeadLetters().catch(() => undefined);
+    const allOpenOperatorUncertain = this.store
+      .getDeadLetters()
+      .filter(
+        (e) => e.kind === 'operator_fee_withdraw_uncertain' && !e.resolvedAt,
+      );
+    const sameTokenOpen = allOpenOperatorUncertain.filter(
+      (e) => (e.details as { tokenKey?: string })?.tokenKey === tokenKey,
+    );
+    if (sameTokenOpen.length > 0) {
+      throw new Error(
+        `Operator fee withdrawal blocked: ${sameTokenOpen.length} unresolved ` +
+          `operator_fee_withdraw_uncertain entries for ${tokenKey}. ` +
+          `Resolve via reconcile or admin force-release before retrying.`,
+      );
+    }
+    if (allOpenOperatorUncertain.length >= 10) {
+      throw new Error(
+        `Operator fee withdrawal blocked: ${allOpenOperatorUncertain.length} ` +
+          `total unresolved operator_fee_withdraw_uncertain entries (cap: 10). ` +
+          `Resolve via reconcile / admin force-release before submitting more.`,
+      );
     }
 
     // For HBAR withdrawals, ensure enough gas remains for active users.
@@ -1248,22 +1461,75 @@ export class MultiUserAgent {
       }
     }
 
-    const { transferHbar, transferToken } = await import('../hedera/transfers.js');
     const sender = getOperatorAccountId(this.client);
 
     let transactionId: string;
 
-    if (token === 'HBAR') {
-      const result = await transferHbar(this.client, sender, recipientAccountId, amount);
-      transactionId = result.transactionId;
-    } else {
-      const lazyTokenId = process.env.LAZY_TOKEN_ID;
-      if (!lazyTokenId) throw new Error('LAZY_TOKEN_ID not configured');
-      const result = await transferToken(this.client, sender, recipientAccountId, lazyTokenId, amount);
-      transactionId = result.transactionId;
+    try {
+      if (token === 'HBAR') {
+        const result = await transferHbar(this.client, sender, recipientAccountId, amount);
+        transactionId = result.transactionId;
+      } else {
+        const lazyTokenId = process.env.LAZY_TOKEN_ID;
+        if (!lazyTokenId) throw new Error('LAZY_TOKEN_ID not configured');
+        const result = await transferToken(this.client, sender, recipientAccountId, lazyTokenId, amount);
+        transactionId = result.transactionId;
+      }
+    } catch (transferError) {
+      if (transferError instanceof ReceiptUncertainError) {
+        // C24 applied to operator fee withdraw: tx may have landed.
+        // Persist a dead-letter; the operator state is INTENTIONALLY
+        // not debited yet so reconcile can choose: confirmed-success
+        // → debit and resolve; confirmed-failed → just resolve;
+        // still-uncertain → leave for next pass. Future withdraw-fees
+        // calls bounce on the operator-level idempotency claim that
+        // withIdempotency held over this throw, preventing double-pay
+        // via repeated retries with the SAME key. Different-key
+        // retries are still gated by the operator lock + the
+        // unresolved dead-letter row (admin UI surfaces this).
+        try {
+          await this.store.upsertDeadLetter({
+            transactionId: transferError.transactionId,
+            timestamp: new Date().toISOString(),
+            error: transferError.message,
+            kind: 'operator_fee_withdraw_uncertain',
+            details: {
+              recipientAccountId,
+              withdrawTxId: transferError.transactionId,
+              amount,
+              tokenKey,
+              token,
+            },
+          });
+        } catch (dlErr) {
+          logger.error(
+            'CRITICAL: operator_fee_withdraw_uncertain dead-letter write failed',
+            {
+              component: 'MultiUserAgent',
+              event: 'operator_fee_withdraw_uncertain_dl_write_failed',
+              withdrawTxId: transferError.transactionId,
+              error: dlErr instanceof Error ? dlErr.message : String(dlErr),
+            },
+          );
+          await escalateUncertainDlFailure({
+            kind: 'operator_fee_withdraw_uncertain',
+            uncertainTxId: transferError.transactionId,
+            cause: dlErr,
+          });
+        }
+        logger.error('operator fee withdrawal receipt timed out', {
+          component: 'MultiUserAgent',
+          event: 'operator_fee_withdraw_receipt_uncertain',
+          withdrawTxId: transferError.transactionId,
+          amount,
+          token,
+        });
+        throw transferError;
+      }
+      throw transferError;
     }
 
-    // Update operator state
+    // Update operator state — only on confirmed success.
     this.store.updateOperator((op) => ({
       ...op,
       balances: { ...op.balances, [tokenKey]: (op.balances[tokenKey] ?? 0) - amount },
@@ -1359,9 +1625,66 @@ export class MultiUserAgent {
 
   /**
    * Run on-chain balance reconciliation against the internal ledger.
+   * Threads the AccountingService and UserLedger through so the
+   * receipt-uncertain verification steps can complete the deferred
+   * bookkeeping (HCS-20 audit, settle/release reserve) when the
+   * on-chain outcome resolves.
    */
+  /**
+   * Expose the UserLedger for admin recovery tools (force-release
+   * endpoint, etc.). NOT for general use — normal callers should go
+   * through the higher-level domain methods. Throws if called before
+   * `initialize()` resolves.
+   */
+  getLedgerForRecovery(): UserLedger {
+    if (!this.ledger) {
+      throw new Error(
+        'MultiUserAgent.getLedgerForRecovery() called before initialize() — ledger not set',
+      );
+    }
+    return this.ledger;
+  }
+
+  /**
+   * Expose AccountingService for admin recovery tools that need to
+   * write HCS-20 audit anchors (e.g. force-release with override).
+   * Throws if called before initialize().
+   */
+  getAccountingForRecovery(): AccountingService {
+    if (!this.accounting) {
+      throw new Error(
+        'MultiUserAgent.getAccountingForRecovery() called before initialize() — accounting not set',
+      );
+    }
+    return this.accounting;
+  }
+
+  /**
+   * Expose the agent's own account id (the operator wallet). Used by
+   * recovery routes that need to attribute on-chain audit messages
+   * to the operator wallet without parsing env again.
+   */
+  getAgentAccountIdForRecovery(): string {
+    return getOperatorAccountId(this.client);
+  }
+
   async reconcile(): Promise<ReconciliationResult> {
-    return reconcile(this.client, this.store);
+    // M17: defensive — if a future internal caller invokes reconcile()
+    // before initialize() resolves (recovery path, test harness, etc.)
+    // we'd silently pass undefined accounting/ledger and skip the
+    // verifier post-conditions. Surface the misuse instead.
+    if (!this.accounting || !this.ledger) {
+      throw new Error(
+        'MultiUserAgent.reconcile() called before initialize() — accounting/ledger not set',
+      );
+    }
+    return reconcile(
+      this.client,
+      this.store,
+      undefined,
+      this.accounting,
+      this.ledger,
+    );
   }
 
   /**

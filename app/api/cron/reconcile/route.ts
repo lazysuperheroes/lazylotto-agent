@@ -34,12 +34,11 @@
  */
 
 import { NextResponse } from 'next/server';
-import { getClient } from '../../_lib/hedera';
 import { getStore } from '../../_lib/store';
 import { getAgentContext } from '../../_lib/mcp';
 import { acquireOperatorLock, releaseOperatorLock } from '../../_lib/locks';
 import { withStore } from '../../_lib/withStore';
-import { reconcile, type ReconciliationResult } from '~/custodial/Reconciliation';
+import type { ReconciliationResult } from '~/custodial/Reconciliation';
 import { isAuthorizedCron, escapeMrkdwn } from './helpers';
 
 // CORS for the cron endpoint isn't strictly necessary (Vercel Cron
@@ -93,13 +92,14 @@ export const GET = withStore(async (request: Request) => {
     const { multiUser } = await getAgentContext();
     await multiUser.pollDepositsOnce();
 
-    const client = getClient();
     const store = await getStore();
-
     // Refresh everything reconciliation reads
     await Promise.all([store.refreshUserIndex(), store.refreshOperator()]);
 
-    result = await reconcile(client, store);
+    // Drive reconcile through MultiUserAgent so it picks up both
+    // accounting (for refund audit writes) and the UserLedger (for
+    // withdrawal_uncertain settle/release).
+    result = await multiUser.reconcile();
   } catch (err) {
     await releaseOperatorLock('reconcile', lockToken);
     const message = err instanceof Error ? err.message : String(err);

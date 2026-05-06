@@ -22,11 +22,42 @@
  */
 
 import { getRedis } from '../auth/redis.js';
+import { PreserveClaimError } from '../hedera/transfers.js';
 
 export type IdempotencyResult<T> =
   | { kind: 'fresh'; result: T }
   | { kind: 'duplicate'; result: T }
   | { kind: 'in-flight' };
+
+/**
+ * Errors that extend `PreserveClaimError` (transfers.ts) retain the
+ * idempotency claim on throw — `withIdempotency`'s catch will NOT DEL
+ * the marker. Used to stop retries from racing past an in-flight
+ * on-chain action whose outcome is not yet known. The claim sticks at
+ * `'pending'` until either (a) the TTL expires (24h default), or
+ * (b) an explicit admin tool / reconcile pass clears it after
+ * verifying the on-chain outcome.
+ *
+ * Concrete subclasses today: `ReceiptUncertainError` (receipt
+ * timeout). Add new subclasses (extending PreserveClaimError) when a
+ * future on-chain helper introduces another "submitted but unknown"
+ * failure mode (e.g. SDK internal throw after tx.execute returns).
+ *
+ * Note: this mechanism activates ONLY when the caller actually wraps
+ * the body in `withIdempotency`. Refunds (src/hedera/refund.ts) use a
+ * different in-function SET-NX-EX claim keyed on the original deposit
+ * tx id and do NOT go through this code path.
+ */
+
+export function isPreserveClaim(err: unknown): err is PreserveClaimError {
+  if (err instanceof PreserveClaimError) return true;
+  // Defense in depth: cross-bundle module identity drift fallback.
+  // If a future bundling boundary produces a duplicate class, the
+  // instanceof check above fails silently. The error name is set in
+  // the constructor and survives the duplicate-class hazard.
+  if (err instanceof Error && err.name === 'ReceiptUncertainError') return true;
+  return false;
+}
 
 /**
  * Run `fn` with replay protection keyed by `key`.
@@ -89,7 +120,20 @@ export async function withIdempotency<T>(
     await redis.set(fullKey, JSON.stringify(result), { ex: ttlSec });
     return { kind: 'fresh', result };
   } catch (err) {
-    // Release the claim so the next attempt can run cleanly.
+    // PreserveClaimError sentinel (concrete: ReceiptUncertainError)
+    // means the body submitted an irreversible on-chain action whose
+    // outcome is unknown. Releasing the claim would let a retry
+    // execute a SECOND on-chain action that, combined with a
+    // successful original, double-spends. KEEP the claim — the next
+    // caller with the same key gets `'in-flight'` and bounces.
+    // Reconcile (or an admin tool) is responsible for verifying on
+    // chain and clearing.
+    if (isPreserveClaim(err)) {
+      throw err;
+    }
+    // Confirmed failure (no on-chain effect, or on-chain effect
+    // confirmed reverted). Release the claim so a retry can run
+    // cleanly.
     try {
       await redis.del(fullKey);
     } catch {

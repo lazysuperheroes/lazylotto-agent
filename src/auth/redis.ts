@@ -35,6 +35,10 @@ export const KEY_PREFIX = {
   pendingLedger: `lla:${NET}:pending-ledger`,
   // Withdrawal velocity counters, keyed per token + user
   velocity: `lla:${NET}:velocity:withdrawal:`,
+  // Per-txId verifier locks for *_uncertain dead-letters — prevents
+  // concurrent reconcile passes from double-mutating ledger / operator
+  // state for the same uncertain entry. SET NX EX with 60s TTL.
+  verifying: `lla:${NET}:verifying:`,
 } as const;
 
 // ── Token hashing ────────────────────────────────────────────

@@ -9,13 +9,11 @@
 
 import { NextResponse } from 'next/server';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
-import { getClient } from '../../_lib/hedera';
 import { getStore } from '../../_lib/store';
 import { getAgentContext } from '../../_lib/mcp';
 import { acquireOperatorLock, releaseOperatorLock } from '../../_lib/locks';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { withStore } from '../../_lib/withStore';
-import { reconcile } from '~/custodial/Reconciliation';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -59,7 +57,6 @@ export const POST = withStore(async (request: Request) => {
       const { multiUser } = await getAgentContext();
       await multiUser.pollDepositsOnce();
 
-      const client = getClient();
       const store = await getStore();
 
       // Refresh everything reconciliation reads: all user balances + operator.
@@ -67,7 +64,10 @@ export const POST = withStore(async (request: Request) => {
       // on click is fine.
       await Promise.all([store.refreshUserIndex(), store.refreshOperator()]);
 
-      const result = await reconcile(client, store);
+      // Drive reconcile through MultiUserAgent so it picks up both
+      // accounting (for refund audit writes) and the UserLedger (for
+      // withdrawal_uncertain settle/release).
+      const result = await multiUser.reconcile();
 
       return NextResponse.json(result, { headers: CORS_HEADERS });
     } finally {

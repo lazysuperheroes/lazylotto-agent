@@ -445,12 +445,26 @@ export async function withdrawOperatorFees(
   if (typeof ctx.to !== 'string' || !HEDERA_ID_REGEX.test(ctx.to)) {
     return { kind: 'invalid_input', reason: 'to must be a Hedera account id (0.0.X)' };
   }
+  // C2: idempotencyKey REQUIRED. Without it, withIdempotency falls
+  // through to a fresh execution path on every call — two sequential
+  // retries each submit their own on-chain transfer. Combined with
+  // the receipt-uncertain catch (which leaves operator state
+  // un-debited), this is a double-spend window. The route layer
+  // already enforces this at the HTTP boundary; this service-layer
+  // check protects MCP / direct callers.
+  if (typeof ctx.idempotencyKey !== 'string' || ctx.idempotencyKey.trim() === '') {
+    return {
+      kind: 'invalid_input',
+      reason:
+        'idempotencyKey is required for operator fee withdrawal (C2 finding — prevents double-pay on retry across receipt-uncertain timeouts)',
+    };
+  }
 
   // operatorWithdrawFees acquires its own operator-scoped lock + refreshOperator
   // (per 0.3.3/0.3.4 hardening). withIdempotency wraps for retry safety.
   const idempotent = await withIdempotency<OperatorWithdrawOk>(
     `withdraw-fees:${ctx.token}`,
-    ctx.idempotencyKey ?? null,
+    ctx.idempotencyKey,
     async () => {
       const txId = await deps.multiUser.operatorWithdrawFees(
         ctx.amount,

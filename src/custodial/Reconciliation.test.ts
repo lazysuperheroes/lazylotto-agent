@@ -161,6 +161,10 @@ function computeReconciliation(input: ReconInput): ReconciliationResult {
     },
     pendingLedgerDrained: { attempted: 0, applied: 0, deferred: 0, failed: 0 },
     pendingLedgerRemaining: 0,
+    uncertainRefundsVerified: [],
+    uncertainWithdrawalsVerified: [],
+    uncertainOperatorFeeWithdrawalsVerified: [],
+    uncertainPlaysVerified: [],
   };
 }
 

@@ -48,8 +48,40 @@ export type DeadLetterEntry = {
    *   neither the v2 close NOR the abort marker landed on the HCS-20
    *   topic — added in 0.3.4. External auditors see a phantom
    *   balance discrepancy until manual replay or reconcile.
+   * - `refund_uncertain`: a refund tx was submitted on chain but the
+   *   receipt could not be obtained within the bounded timeout —
+   *   added in 0.3.4 (audit finding C24). The Redis SET-NX-EX claim
+   *   is INTENTIONALLY retained so a retry cannot double-refund;
+   *   reconcile (or an admin tool) verifies the tx on the mirror
+   *   node and either completes the ledger/audit bookkeeping (on
+   *   chain success) or releases the claim (on chain failure).
+   * - `withdrawal_uncertain`: the same C24 pattern applied to user
+   *   withdrawals (added in 0.3.4 alongside C24). The reserve on the
+   *   user ledger is INTENTIONALLY retained so a retry cannot
+   *   re-spend the same balance; reconcile verifies on chain and
+   *   either settles (debits totalWithdrawn, releases reserve via
+   *   settleSpend) or releases the reserve.
+   * - `operator_fee_withdraw_uncertain`: C24 applied to operator
+   *   rake/fee withdrawals. The operator state is INTENTIONALLY not
+   *   debited yet — reconcile verifies on chain and only debits on
+   *   confirmed success.
+   * - `play_uncertain`: a play session's contract submission (buy /
+   *   roll / prize transfer) had its receipt time out. Per-token
+   *   reservations are INTENTIONALLY retained so the user cannot
+   *   re-play the same balance while the on-chain outcome is
+   *   unresolved. Reconcile verifies via mirror; on FAILED the
+   *   reservations are released, on SUCCESS they are flagged for
+   *   manual triage (in-band settlement code did not run, so the
+   *   operator must reconcile entries against the dApp pool state).
    */
-  kind?: 'deposit_failed' | 'prize_transfer_failed' | 'audit_trail_orphaned';
+  kind?:
+    | 'deposit_failed'
+    | 'prize_transfer_failed'
+    | 'audit_trail_orphaned'
+    | 'refund_uncertain'
+    | 'withdrawal_uncertain'
+    | 'operator_fee_withdraw_uncertain'
+    | 'play_uncertain';
   /**
    * Free-form details specific to the failure kind. For prize
    * transfer failures, this carries the userId, sessionId, prize

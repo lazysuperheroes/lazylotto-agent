@@ -143,3 +143,259 @@ describe('Refund deposit-validation gate — isDepositCredited', () => {
       'bounty payouts must not pass the deposit gate');
   });
 });
+
+// ── verifyUncertainRefunds: phase 4b coverage ────────────────────
+// The success/failure dispatch lives in refund.ts:verifyUncertainRefunds.
+// These tests pin the behaviour against mocked mirror-node responses.
+
+describe('verifyUncertainRefunds dispatch', () => {
+  const originalFetch = globalThis.fetch;
+
+  function installMirror(
+    responses: Map<string, { status: number; result?: string }>,
+  ): void {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const txMatch = url.match(/\/transactions\/([^?]+)/);
+      const txId = txMatch ? txMatch[1] : url;
+      const r = responses.get(txId);
+      if (!r) return new Response(null, { status: 404 });
+      if (r.status !== 200) return new Response(null, { status: r.status });
+      return new Response(
+        JSON.stringify({ transactions: r.result ? [{ result: r.result }] : [] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+  }
+
+  function installRedis(): { state: Map<string, unknown> } {
+    const state = new Map<string, unknown>();
+    const mock = {
+      async set(key: string, value: string | number, options?: { nx?: boolean; ex?: number }) {
+        if (options?.nx) {
+          if (state.has(key)) return null;
+          state.set(key, value);
+          return 'OK';
+        }
+        state.set(key, value);
+        return 'OK';
+      },
+      async get(key: string) { return state.get(key) ?? null; },
+      async del(key: string) { return state.delete(key) ? 1 : 0; },
+      async sadd() { return 0; },
+      async sismember() { return 0; },
+      async incr(k: string) { const n = Number(state.get(k) ?? 0) + 1; state.set(k, n); return n; },
+    };
+    (globalThis as unknown as { __lazylottoRedisClient__?: unknown }).__lazylottoRedisClient__ = mock;
+    return { state };
+  }
+
+  function uninstallRedis(): void {
+    (globalThis as unknown as { __lazylottoRedisClient__?: unknown }).__lazylottoRedisClient__ = undefined;
+  }
+
+  function teardown(): void {
+    globalThis.fetch = originalFetch;
+    uninstallRedis();
+  }
+
+  function makeFakeStore(entries: Array<{ transactionId: string; resolvedAt?: string; details: Record<string, unknown>; memo?: string; sender?: string; timestamp?: string; }>) {
+    const dls = entries.map((e) => ({
+      transactionId: e.transactionId,
+      timestamp: e.timestamp ?? new Date().toISOString(),
+      error: 'receipt timeout',
+      kind: 'refund_uncertain' as const,
+      sender: e.sender,
+      memo: e.memo,
+      details: e.details,
+      resolvedAt: e.resolvedAt,
+    }));
+    return {
+      async refreshDeadLetters() {},
+      getDeadLetters() { return dls; },
+      async upsertDeadLetter(entry: typeof dls[number]) {
+        const idx = dls.findIndex((d) => d.transactionId === entry.transactionId);
+        if (idx >= 0) dls[idx] = entry;
+        else dls.push(entry);
+      },
+      async flush() {},
+      getUserByMemo() { return undefined; },
+      updateBalance() { return {} as never; },
+    };
+  }
+
+  it('FAILED branch releases SET-NX-EX claim', async () => {
+    const responses = new Map([['refund-tx-fail', { status: 200, result: 'INSUFFICIENT_TX_FEE' }]]);
+    installMirror(responses);
+    const { state } = installRedis();
+    const claimKey = 'lla:testnet:refunded:original-tx-A';
+    state.set(claimKey, 'pending');
+
+    const store = makeFakeStore([
+      {
+        transactionId: 'refund-tx-fail',
+        details: {
+          originalTxId: 'original-tx-A',
+          refundTxId: 'refund-tx-fail',
+          humanAmount: 10,
+          tokenKey: 'hbar',
+          claimKey,
+        },
+      },
+    ]);
+
+    try {
+      const { verifyUncertainRefunds } = await import('./refund.js');
+      const outcomes = await verifyUncertainRefunds(undefined as unknown as never, store as never);
+      assert.equal(outcomes[0]!.status, 'failed');
+      assert.equal(state.get(claimKey) ?? null, null, 'claim must be DELed on confirmed FAILED');
+    } finally {
+      teardown();
+    }
+  });
+
+  it('NOT_FOUND >24h promoted to FAILED', async () => {
+    installMirror(new Map());
+    const { state } = installRedis();
+    const claimKey = 'lla:testnet:refunded:original-tx-B';
+    state.set(claimKey, 'pending');
+
+    const oldTimestamp = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    const store = makeFakeStore([
+      {
+        transactionId: 'refund-tx-old',
+        timestamp: oldTimestamp,
+        details: {
+          originalTxId: 'original-tx-B',
+          refundTxId: 'refund-tx-old',
+          humanAmount: 10,
+          tokenKey: 'hbar',
+          claimKey,
+        },
+      },
+    ]);
+
+    try {
+      const { verifyUncertainRefunds } = await import('./refund.js');
+      const outcomes = await verifyUncertainRefunds(undefined as unknown as never, store as never);
+      assert.equal(outcomes[0]!.status, 'failed');
+      assert.equal(state.get(claimKey) ?? null, null, 'old NOT_FOUND must release claim');
+    } finally {
+      teardown();
+    }
+  });
+
+  it('Unknown mirror result → still_uncertain (H8)', async () => {
+    installMirror(new Map([['refund-tx-unknown', { status: 200, result: 'UNKNOWN_FUTURE_CODE' }]]));
+    const { state } = installRedis();
+    const claimKey = 'lla:testnet:refunded:original-tx-C';
+    state.set(claimKey, 'pending');
+
+    const store = makeFakeStore([
+      {
+        transactionId: 'refund-tx-unknown',
+        details: {
+          originalTxId: 'original-tx-C',
+          refundTxId: 'refund-tx-unknown',
+          humanAmount: 10,
+          tokenKey: 'hbar',
+          claimKey,
+        },
+      },
+    ]);
+
+    try {
+      const { verifyUncertainRefunds } = await import('./refund.js');
+      const outcomes = await verifyUncertainRefunds(undefined as unknown as never, store as never);
+      assert.equal(outcomes[0]!.status, 'still_uncertain');
+      assert.equal(state.get(claimKey), 'pending', 'claim must be retained on unknown code');
+    } finally {
+      teardown();
+    }
+  });
+
+  it('Concurrent verifier lock held → still_uncertain', async () => {
+    installMirror(new Map([['refund-tx-x', { status: 200, result: 'SUCCESS' }]]));
+    const { state } = installRedis();
+    state.set('lla:testnet:verifying:refund:refund-tx-x', '1');
+
+    const store = makeFakeStore([
+      {
+        transactionId: 'refund-tx-x',
+        details: {
+          originalTxId: 'original-tx-X',
+          refundTxId: 'refund-tx-x',
+          humanAmount: 10,
+          tokenKey: 'hbar',
+          claimKey: 'lla:testnet:refunded:original-tx-X',
+        },
+      },
+    ]);
+
+    try {
+      const { verifyUncertainRefunds } = await import('./refund.js');
+      const outcomes = await verifyUncertainRefunds(undefined as unknown as never, store as never);
+      assert.equal(outcomes[0]!.status, 'still_uncertain');
+      assert.match(outcomes[0]!.note, /verifier lock/);
+    } finally {
+      teardown();
+    }
+  });
+
+  it('M15: ledgerAdjustedAt skip prevents double-debit on rerun', async () => {
+    installMirror(new Map([['refund-tx-y', { status: 200, result: 'SUCCESS' }]]));
+    const { state } = installRedis();
+    state.set('lla:testnet:refunded:original-tx-Y', 'pending');
+
+    let updateBalanceCalls = 0;
+    const dls = [
+      {
+        transactionId: 'refund-tx-y',
+        timestamp: new Date().toISOString(),
+        error: 'x',
+        kind: 'refund_uncertain' as const,
+        memo: 'memo-Y',
+        sender: '0.0.user',
+        details: {
+          originalTxId: 'original-tx-Y',
+          refundTxId: 'refund-tx-y',
+          humanAmount: 10,
+          tokenKey: 'hbar',
+          agentAccountId: '0.0.9999',
+          claimKey: 'lla:testnet:refunded:original-tx-Y',
+          // Already-applied marker: should skip ledger debit entirely.
+          ledgerAdjustedAt: new Date().toISOString(),
+        },
+      },
+    ];
+    const store = {
+      async refreshDeadLetters() {},
+      getDeadLetters() { return dls; },
+      async upsertDeadLetter(entry: typeof dls[number]) {
+        const idx = dls.findIndex((d) => d.transactionId === entry.transactionId);
+        if (idx >= 0) dls[idx] = entry;
+        else dls.push(entry);
+      },
+      async flush() {},
+      getUserByMemo() {
+        return {
+          userId: 'u',
+          balances: { tokens: { hbar: { available: 1000, reserved: 0 } } },
+        };
+      },
+      updateBalance() {
+        updateBalanceCalls++;
+        return {} as never;
+      },
+    };
+
+    try {
+      const { verifyUncertainRefunds } = await import('./refund.js');
+      const outcomes = await verifyUncertainRefunds(undefined as unknown as never, store as never);
+      assert.equal(outcomes[0]!.status, 'confirmed');
+      assert.equal(updateBalanceCalls, 0, 'pre-marked ledgerAdjustedAt must skip debit');
+    } finally {
+      teardown();
+    }
+  });
+});

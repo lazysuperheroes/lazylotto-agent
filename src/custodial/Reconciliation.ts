@@ -11,8 +11,23 @@
 
 import { getTokenBalances, sumTransactionFees } from '../hedera/mirror.js';
 import { getWalletInfo } from '../hedera/wallet.js';
+import {
+  verifyUncertainRefunds,
+  type RefundVerificationOutcome,
+} from '../hedera/refund.js';
+import {
+  verifyUncertainWithdrawals,
+  verifyUncertainOperatorFeeWithdrawals,
+  verifyUncertainPlays,
+  type WithdrawalVerificationOutcome,
+  type OperatorFeeWithdrawVerificationOutcome,
+  type PlayVerificationOutcome,
+} from './uncertainTxVerification.js';
+import { getOperatorAccountId } from '../hedera/wallet.js';
 import type { Client } from '@hashgraph/sdk';
 import type { IStore } from './IStore.js';
+import type { AccountingService } from './AccountingService.js';
+import type { UserLedger } from './UserLedger.js';
 import { hbarToNumber } from '../utils/format.js';
 import { roundToDecimals, getTokenMeta } from '../utils/math.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
@@ -22,6 +37,7 @@ import {
   getPendingLedgerCount,
   type DrainResult,
 } from './pendingLedger.js';
+import { logger } from '../lib/logger.js';
 
 export interface SchemaVersionReport {
   /** Version constant the current code stamps at write time. */
@@ -60,6 +76,31 @@ export interface ReconciliationResult {
   pendingLedgerDrained: DrainResult;
   /** How many pending adjustments are still queued after the drain. */
   pendingLedgerRemaining: number;
+  /**
+   * Per-entry verification outcomes for `refund_uncertain` dead-letters
+   * encountered at the start of this run. Empty when no uncertain
+   * refunds exist. Populated for both confirmed (success/failure) and
+   * still-uncertain entries — the admin UI can render each.
+   */
+  uncertainRefundsVerified: RefundVerificationOutcome[];
+  /**
+   * Per-entry verification outcomes for `withdrawal_uncertain` dead-letters.
+   * Same shape as the refund verification block — present so the admin
+   * UI can show "tx X for user Y was confirmed" / "released, retry OK".
+   */
+  uncertainWithdrawalsVerified: WithdrawalVerificationOutcome[];
+  /**
+   * Per-entry verification outcomes for `operator_fee_withdraw_uncertain`
+   * dead-letters.
+   */
+  uncertainOperatorFeeWithdrawalsVerified: OperatorFeeWithdrawVerificationOutcome[];
+  /**
+   * Per-entry verification outcomes for `play_uncertain` dead-letters.
+   * SUCCESS entries here always carry a manual-triage flag — see
+   * `verifyUncertainPlays` for why settlement state can't be auto-
+   * reconstructed.
+   */
+  uncertainPlaysVerified: PlayVerificationOutcome[];
 }
 
 /**
@@ -77,14 +118,152 @@ export async function reconcile(
   client: Client,
   store: IStore,
   fromTimestamp?: string,
+  accounting?: AccountingService,
+  ledger?: UserLedger,
 ): Promise<ReconciliationResult> {
   const warnings: string[] = [];
 
-  // 0. Drain pending ledger adjustments before snapshotting balances.
-  //    The queue exists because refunds can't always grab the per-user
-  //    lock at settle time — draining here ensures the ledger is caught
-  //    up before we measure drift, so we don't false-flag drift that's
-  //    just a queue waiting to be applied.
+  // 0a. Verify any refund_uncertain dead-letters BEFORE we drain
+  //     pending ledger adjustments. A confirmed-success verification
+  //     queues a ledger debit (when the user lock is contended), and
+  //     we want that debit to flow through the very next drain so the
+  //     reconcile snapshot reflects it.
+  let uncertainRefundsVerified: RefundVerificationOutcome[] = [];
+  try {
+    uncertainRefundsVerified = await verifyUncertainRefunds(
+      client,
+      store,
+      accounting,
+    );
+  } catch (e) {
+    logger.warn('refund_uncertain verification failed during reconcile', {
+      component: 'Reconciliation',
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+  for (const o of uncertainRefundsVerified) {
+    if (o.status === 'failed') {
+      warnings.push(
+        `Refund ${o.refundTxId} for original ${o.originalTxId} confirmed FAILED on chain — claim released, retry permitted.`,
+      );
+    } else if (o.status === 'still_uncertain') {
+      warnings.push(
+        `Refund ${o.refundTxId} for original ${o.originalTxId} still unverified: ${o.note}`,
+      );
+    }
+  }
+
+  // 0a-bis. Same treatment for withdrawal_uncertain dead-letters.
+  //         Requires a UserLedger so we can settle/release the
+  //         user-side reserve when the on-chain outcome is confirmed.
+  //         When ledger is undefined (CLI script with bare store, etc.)
+  //         we skip — the row remains for next reconcile to pick up
+  //         once a real ledger is wired in.
+  let uncertainWithdrawalsVerified: WithdrawalVerificationOutcome[] = [];
+  if (ledger) {
+    try {
+      uncertainWithdrawalsVerified = await verifyUncertainWithdrawals(
+        store,
+        ledger,
+        accounting,
+      );
+    } catch (e) {
+      logger.warn('withdrawal_uncertain verification failed during reconcile', {
+        component: 'Reconciliation',
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+    for (const o of uncertainWithdrawalsVerified) {
+      if (o.status === 'failed') {
+        warnings.push(
+          `Withdrawal ${o.withdrawTxId} for user ${o.userId} confirmed FAILED on chain — reserve released, retry permitted.`,
+        );
+      } else if (o.status === 'still_uncertain') {
+        warnings.push(
+          `Withdrawal ${o.withdrawTxId} for user ${o.userId} still unverified: ${o.note}`,
+        );
+      }
+    }
+  }
+
+  // 0a-ter. Same for operator_fee_withdraw_uncertain. No ledger
+  //         dependency — operator state mutation is on the store
+  //         directly.
+  let uncertainOperatorFeeWithdrawalsVerified: OperatorFeeWithdrawVerificationOutcome[] = [];
+  try {
+    const agentAccountId = getOperatorAccountId(client);
+    uncertainOperatorFeeWithdrawalsVerified =
+      await verifyUncertainOperatorFeeWithdrawals(store, agentAccountId, accounting);
+  } catch (e) {
+    logger.warn(
+      'operator_fee_withdraw_uncertain verification failed during reconcile',
+      {
+        component: 'Reconciliation',
+        error: e instanceof Error ? e.message : String(e),
+      },
+    );
+  }
+  for (const o of uncertainOperatorFeeWithdrawalsVerified) {
+    if (o.status === 'failed') {
+      warnings.push(
+        `Operator fee withdrawal ${o.withdrawTxId} confirmed FAILED on chain — operator state untouched, retry permitted.`,
+      );
+    } else if (o.status === 'still_uncertain') {
+      warnings.push(
+        `Operator fee withdrawal ${o.withdrawTxId} still unverified: ${o.note}`,
+      );
+    }
+  }
+
+  // 0a-quater. play_uncertain — the C1 path. SUCCESS entries always
+  //            need manual triage (settlement state can't be
+  //            auto-reconstructed); FAILED entries release reservations.
+  let uncertainPlaysVerified: PlayVerificationOutcome[] = [];
+  if (ledger) {
+    try {
+      uncertainPlaysVerified = await verifyUncertainPlays(store, ledger);
+    } catch (e) {
+      logger.warn('play_uncertain verification failed during reconcile', {
+        component: 'Reconciliation',
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+    for (const o of uncertainPlaysVerified) {
+      if (o.status === 'failed') {
+        warnings.push(
+          `Play ${o.uncertainTxId} for user ${o.userId} confirmed FAILED on chain — reservations released.`,
+        );
+      } else if (o.status === 'confirmed') {
+        warnings.push(
+          `MANUAL TRIAGE: play ${o.uncertainTxId} for user ${o.userId} confirmed on chain — settlement state must be reconstructed manually.`,
+        );
+      } else {
+        warnings.push(
+          `Play ${o.uncertainTxId} for user ${o.userId} still unverified: ${o.note}`,
+        );
+      }
+    }
+  }
+
+  // 0b. Drain pending ledger adjustments before snapshotting balances.
+  //     The queue exists because refunds can't always grab the per-user
+  //     lock at settle time — draining here ensures the ledger is caught
+  //     up before we measure drift, so we don't false-flag drift that's
+  //     just a queue waiting to be applied.
+  //
+  //     L22 — Ordering note for step 1 (balance snapshot reads):
+  //     The verifiers above (0a / 0a-bis / 0a-ter / 0a-quater) mutate
+  //     in-process state directly (`store.updateBalance`,
+  //     `store.updateOperator`, `ledger.settleSpend/releaseReserve`).
+  //     Because IStore implementations write through the in-process
+  //     cache synchronously, step 1's `getAllUsers()` and
+  //     `getOperator()` reads see those mutations without a fresh
+  //     remote pull. We do NOT call `refreshUserIndex()` /
+  //     `refreshOperator()` here — that would clobber the verifier
+  //     mutations until the deferred flush completes. The trade-off:
+  //     this reconcile is single-Lambda; another Lambda's recent
+  //     writes won't be visible. That's fine — reconcile is wrapped
+  //     in an operator lock and serialised by the cron schedule.
   const pendingLedgerDrained = await drainPendingLedgerAdjustments(store);
   if (pendingLedgerDrained.applied > 0) {
     warnings.push(
@@ -241,5 +420,9 @@ export async function reconcile(
     },
     pendingLedgerDrained,
     pendingLedgerRemaining,
+    uncertainRefundsVerified,
+    uncertainWithdrawalsVerified,
+    uncertainOperatorFeeWithdrawalsVerified,
+    uncertainPlaysVerified,
   };
 }

@@ -69,7 +69,7 @@ describe('getKillSwitchState: Upstash auto-decode regression', () => {
       assert.equal(state.enabledBy, '0.0.operator');
       assert.ok(state.enabledAt, 'enabledAt should be populated');
 
-      await disableKillSwitch();
+      await disableKillSwitch('0.0.operator');
       const after = await getKillSwitchState();
       assert.equal(after.enabled, false);
     });

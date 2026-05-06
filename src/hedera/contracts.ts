@@ -8,6 +8,7 @@ import {
   Status,
 } from '@hashgraph/sdk';
 import { GAS_ESTIMATES, HEDERA_DEFAULTS, PRIZE_TRANSFER_RETRY } from '../config/defaults.js';
+import { awaitReceipt, CONTRACT_RECEIPT_TIMEOUT_MS } from './transfers.js';
 
 export interface TransactionIntent {
   contractId: string;
@@ -91,7 +92,14 @@ export async function executeIntent(
   }
 
   const txResponse: TransactionResponse = await tx.execute(client);
-  const receipt = await txResponse.getReceipt(client);
+  // Bounded receipt wait — on timeout throws ReceiptUncertainError
+  // (the canonical "tx submitted, on-chain status unknown" sentinel).
+  // Callers wrapped in withIdempotency get claim retention for free
+  // because withIdempotency knows about ReceiptUncertainError. M13:
+  // contract receipts are slower than HBAR/token transfer receipts
+  // (storage writes, gas refunds, gas-laddered retries) so we use
+  // CONTRACT_RECEIPT_TIMEOUT_MS (2x the transfer ceiling).
+  const receipt = await awaitReceipt(client, txResponse, CONTRACT_RECEIPT_TIMEOUT_MS);
 
   if (receipt.status !== Status.Success) {
     throw new Error(
@@ -127,7 +135,14 @@ export async function executeEncodedCall(
     .setFunctionParameters(Buffer.from(encodedCalldata.slice(2), 'hex'));
 
   const txResponse: TransactionResponse = await tx.execute(client);
-  const receipt = await txResponse.getReceipt(client);
+  // Bounded receipt wait — on timeout throws ReceiptUncertainError
+  // (the canonical "tx submitted, on-chain status unknown" sentinel).
+  // Callers wrapped in withIdempotency get claim retention for free
+  // because withIdempotency knows about ReceiptUncertainError. M13:
+  // contract receipts are slower than HBAR/token transfer receipts
+  // (storage writes, gas refunds, gas-laddered retries) so we use
+  // CONTRACT_RECEIPT_TIMEOUT_MS (2x the transfer ceiling).
+  const receipt = await awaitReceipt(client, txResponse, CONTRACT_RECEIPT_TIMEOUT_MS);
 
   if (receipt.status !== Status.Success) {
     throw new Error(
