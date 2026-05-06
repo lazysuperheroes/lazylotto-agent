@@ -36,9 +36,10 @@ import { getAgentContext } from '../../../../_lib/mcp';
 import { withStore } from '../../../../_lib/withStore';
 import { checkRateLimit, rateLimitResponse } from '../../../../_lib/rateLimit';
 import { logger } from '~/lib/logger';
-import { getRedis, KEY_PREFIX, isRefundClaimKey } from '~/auth/redis';
+import { getRedis, KEY_PREFIX } from '~/auth/redis';
 import { getMirrorBaseUrl } from '~/hedera/mirror';
 import { classifyMirrorResult } from '~/hedera/responseCodes';
+import { applyForceRelease } from './handlers';
 
 /**
  * Verifier-lock TTL — must match `VERIFY_LOCK_TTL_SEC` in
@@ -54,24 +55,6 @@ interface MirrorTxLookup {
 }
 
 export type MirrorOutcome = 'SUCCESS' | 'FAILED' | 'NOT_FOUND' | 'transient';
-
-/**
- * Decides whether a force-release request must refuse with 409 because
- * the mirror outcome is unsafe to release without an explicit ack.
- *
- * F3 (2026-05-06 audit I-02): the ack must be **strictly** `true`. The
- * old check `!body.acknowledgeDoubleSpendRisk` accepted any truthy
- * value — including the string `"false"` (which is truthy) — which
- * meant a buggy admin UI sending form-text values could accidentally
- * trigger the SUCCESS double-spend override. Reject every non-boolean.
- *
- * F12 (Phase 3) drops the flag entirely; this helper exists so the
- * removal is mechanical (delete every `requiresAckOverride` callsite).
- */
-export function requiresAckOverride(mirror: MirrorOutcome, ack: unknown): boolean {
-  const acked = ack === true;
-  return (mirror === 'SUCCESS' || mirror === 'transient') && !acked;
-}
 
 /**
  * Mirror-node fetch timeout. F5 (2026-05-06 audit I-09): without
@@ -186,7 +169,7 @@ export const POST = withStore(async (request: Request) => {
     const rawBody = (await request.json().catch(() => null)) as unknown;
     const body =
       typeof rawBody === 'object' && rawBody !== null && !Array.isArray(rawBody)
-        ? (rawBody as { reason?: unknown; acknowledgeDoubleSpendRisk?: unknown })
+        ? (rawBody as { reason?: unknown })
         : {};
     if (
       typeof body.reason !== 'string' ||
@@ -208,6 +191,7 @@ export const POST = withStore(async (request: Request) => {
         { status: 400, headers: CORS_HEADERS },
       );
     }
+    const reason: string = body.reason;
 
     const { multiUser, store } = await getAgentContext();
 
@@ -285,297 +269,31 @@ export const POST = withStore(async (request: Request) => {
       );
     }
 
-    // ── R-MEDIUM-1: server-side mirror check BEFORE any state
-    // mutation. If the on-chain tx actually succeeded, releasing the
-    // reserve / claim here lets the user (or operator) re-spend the
-    // same balance, then a later reconcile pass would settle the
-    // confirmed-success and the operator wallet drains twice. Refuse
-    // with 409 unless caller explicitly acknowledges the risk.
-    //
-    // Pass-3 fix: mirror check runs for EVERY kind unconditionally
-    // (no operator-fee exemption). The previous shortcut "operator
-    // state was never debited so release is a no-op" was true at
-    // submit time but wrong at force-release time — if the on-chain
-    // tx actually succeeded, the operator wallet IS drained and we
-    // need to debit local state + write the audit anchor (mirror
-    // what the verifier would have done).
+    // F12: server-side mirror check. After Phase 3, mirror=SUCCESS
+    // automatically runs the verifier-equivalent post-conditions
+    // for every kind (no override flag — the route does the right
+    // thing for every outcome by construction). transient and
+    // recent NOT_FOUND refuse with 503/409 because we cannot act
+    // safely without a definitive on-chain outcome.
     const mirrorResult = await lookupMirrorOutcome(id);
-    if (mirrorResult === 'SUCCESS' && requiresAckOverride(mirrorResult, body.acknowledgeDoubleSpendRisk)) {
+
+    const redis = await getRedis();
+    const result = await applyForceRelease(entry, mirrorResult, {
+      store,
+      ledger: multiUser.getLedgerForRecovery(),
+      accounting: multiUser.getAccountingForRecovery(),
+      agentAccountId: multiUser.getAgentAccountIdForRecovery(),
+      redis,
+      log: logger,
+    });
+
+    if (!result.ok) {
       return NextResponse.json(
-        {
-          error:
-            'Mirror node reports this tx as SUCCESS on chain. Force-releasing ' +
-            'would let the user re-spend a balance the operator wallet has ' +
-            'already paid out (double-spend). Refusing.',
-          hint:
-            'Either let the verifier resolve this entry on the next reconcile ' +
-            'pass (it will detect SUCCESS and settle correctly), OR pass ' +
-            '`acknowledgeDoubleSpendRisk: true` (strict boolean) in the body to override. ' +
-            'Override is for cases where the operator has independently ' +
-            'manually compensated the resulting drift.',
-          mirrorResult,
-        },
-        { status: 409, headers: CORS_HEADERS },
+        result.hint ? { error: result.error, hint: result.hint } : { error: result.error },
+        { status: result.status, headers: CORS_HEADERS },
       );
     }
-    if (mirrorResult === 'transient' && requiresAckOverride(mirrorResult, body.acknowledgeDoubleSpendRisk)) {
-      return NextResponse.json(
-        {
-          error:
-            'Mirror node lookup failed (5xx / network). Cannot safely confirm ' +
-            'on-chain outcome. Retry shortly, or pass ' +
-            '`acknowledgeDoubleSpendRisk: true` to override.',
-        },
-        { status: 503, headers: CORS_HEADERS },
-      );
-    }
-
-    const ledger = multiUser.getLedgerForRecovery();
-
-    let action: string;
-    switch (entry.kind) {
-      case 'withdrawal_uncertain': {
-        const details = (entry.details ?? {}) as {
-          userId?: string;
-          amount?: number;
-          tokenKey?: string;
-        };
-        if (
-          typeof details.userId !== 'string' ||
-          typeof details.amount !== 'number' ||
-          typeof details.tokenKey !== 'string'
-        ) {
-          return NextResponse.json(
-            {
-              error:
-                'Cannot force-release: dead-letter is malformed (missing userId/amount/tokenKey).',
-            },
-            { status: 400, headers: CORS_HEADERS },
-          );
-        }
-        try {
-          ledger.releaseReserve(details.userId, details.amount, details.tokenKey);
-          action = `released ${details.amount} ${details.tokenKey} reserve for user ${details.userId}`;
-        } catch (e) {
-          return NextResponse.json(
-            {
-              error: `Failed to release reserve: ${e instanceof Error ? e.message : String(e)}`,
-            },
-            { status: 500, headers: CORS_HEADERS },
-          );
-        }
-        break;
-      }
-      case 'operator_fee_withdraw_uncertain': {
-        const details = (entry.details ?? {}) as {
-          amount?: number;
-          tokenKey?: string;
-        };
-        if (
-          typeof details.amount !== 'number' ||
-          typeof details.tokenKey !== 'string'
-        ) {
-          return NextResponse.json(
-            {
-              error:
-                'Cannot force-release: dead-letter is malformed (missing amount/tokenKey).',
-            },
-            { status: 400, headers: CORS_HEADERS },
-          );
-        }
-        // Pass-3 fix: at submit time the operator state was NOT debited
-        // (the verifier only debits on confirmed SUCCESS). If the
-        // operator is acknowledging an on-chain SUCCESS via override,
-        // we MUST run the same debit + audit-anchor that the verifier
-        // would have run — otherwise local state diverges from the
-        // chain and the operator could "withdraw" the same fees again
-        // from local state. For FAILED / NOT_FOUND outcomes the
-        // operator state stays at zero (correct).
-        if (mirrorResult === 'SUCCESS') {
-          // Pass-4 fix: stamp the same `operatorDebitedAt` /
-          // `auditWrittenAt` markers the verifier reads so that if
-          // the resolve write later fails (Redis blip after we
-          // return 200), a subsequent reconcile pass doesn't see
-          // `!resolvedAt` and re-debit + re-audit. Skip if already
-          // stamped (idempotent).
-          const priorMarkers = (entry.details ?? {}) as {
-            operatorDebitedAt?: string;
-            auditWrittenAt?: string;
-          };
-          if (!priorMarkers.operatorDebitedAt) {
-            try {
-              const tokenKey = details.tokenKey;
-              const amount = details.amount;
-              store.updateOperator((op) => ({
-                ...op,
-                balances: {
-                  ...op.balances,
-                  [tokenKey]: (op.balances[tokenKey] ?? 0) - amount,
-                },
-                totalWithdrawnByOperator: {
-                  ...op.totalWithdrawnByOperator,
-                  [tokenKey]:
-                    (op.totalWithdrawnByOperator[tokenKey] ?? 0) + amount,
-                },
-              }));
-              await store.upsertDeadLetter({
-                ...entry,
-                details: {
-                  ...(entry.details ?? {}),
-                  operatorDebitedAt: new Date().toISOString(),
-                },
-              });
-              await store.flush();
-            } catch (e) {
-              return NextResponse.json(
-                {
-                  error: `Failed to debit operator state: ${e instanceof Error ? e.message : String(e)}`,
-                },
-                { status: 500, headers: CORS_HEADERS },
-              );
-            }
-          }
-          if (!priorMarkers.auditWrittenAt) {
-            try {
-              const accounting = multiUser.getAccountingForRecovery();
-              await accounting.recordOperatorWithdrawal(
-                multiUser.getAgentAccountIdForRecovery(),
-                details.amount,
-                details.tokenKey,
-              );
-              await store.upsertDeadLetter({
-                ...entry,
-                details: {
-                  ...(entry.details ?? {}),
-                  operatorDebitedAt:
-                    priorMarkers.operatorDebitedAt ?? new Date().toISOString(),
-                  auditWrittenAt: new Date().toISOString(),
-                },
-              });
-            } catch (auditErr) {
-              // Audit failure is best-effort — log + audit_trail_orphaned
-              // (mirror the verifier's M16 pattern).
-              logger.warn(
-                'force-release operator_fee_withdraw_uncertain audit write failed',
-                {
-                  component: 'AdminForceRelease',
-                  uncertainTxId: id,
-                  error: auditErr instanceof Error ? auditErr.message : String(auditErr),
-                },
-              );
-              try {
-                await store.upsertDeadLetter({
-                  transactionId: `audit-orphan:${id}`,
-                  timestamp: new Date().toISOString(),
-                  error: `force-release audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
-                  kind: 'audit_trail_orphaned',
-                  details: {
-                    sourceKind: 'operator_fee_withdraw_uncertain',
-                    sourceTxId: id,
-                    amount: details.amount,
-                    tokenKey: details.tokenKey,
-                  },
-                });
-              } catch {
-                /* logged above */
-              }
-            }
-          }
-          action = `mirror reports SUCCESS — debited ${details.amount} ${details.tokenKey} from operator state and wrote HCS-20 audit anchor`;
-        } else {
-          action = `mirror reports ${mirrorResult} — operator state not debited (was never debited at submit)`;
-        }
-        break;
-      }
-      case 'play_uncertain': {
-        const details = (entry.details ?? {}) as {
-          userId?: string;
-          tokenReservations?: Array<{ token: string; amount: number }>;
-        };
-        if (
-          typeof details.userId !== 'string' ||
-          !Array.isArray(details.tokenReservations)
-        ) {
-          return NextResponse.json(
-            {
-              error:
-                'Cannot force-release: dead-letter is malformed (missing userId/tokenReservations).',
-            },
-            { status: 400, headers: CORS_HEADERS },
-          );
-        }
-        for (const { token, amount } of details.tokenReservations) {
-          try {
-            ledger.releaseReserve(details.userId, amount, token);
-          } catch (e) {
-            logger.warn('force-release play_uncertain releaseReserve failed', {
-              component: 'AdminForceRelease',
-              uncertainTxId: id,
-              token,
-              error: e instanceof Error ? e.message : String(e),
-            });
-          }
-        }
-        action = `released ${details.tokenReservations.length} reservation(s) for user ${details.userId}`;
-        break;
-      }
-      case 'refund_uncertain': {
-        const details = (entry.details ?? {}) as { claimKey?: string };
-        if (typeof details.claimKey !== 'string') {
-          return NextResponse.json(
-            {
-              error: 'Cannot force-release: dead-letter missing claimKey.',
-            },
-            { status: 400, headers: CORS_HEADERS },
-          );
-        }
-        // F2 (2026-05-06 audit I-07): refuse to DEL keys outside the
-        // refund-claim namespace. A tampered/migrated entry with a
-        // claimKey pointing at a session, user lock, killswitch flag,
-        // or agentSeq counter would otherwise let an operator-tier
-        // request delete arbitrary lla: keys.
-        if (!isRefundClaimKey(details.claimKey)) {
-          logger.error(
-            'force-release refund_uncertain claimKey outside KEY_PREFIX.refunded — refusing',
-            {
-              component: 'AdminForceRelease',
-              event: 'malicious_claim_key',
-              uncertainTxId: id,
-              operator: auth.accountId,
-              claimKeyPrefix: details.claimKey.slice(0, 24),
-            },
-          );
-          return NextResponse.json(
-            {
-              error:
-                'Dead-letter claimKey is not a refund-claim key. ' +
-                'Refusing to release — this entry is malformed and requires manual triage.',
-            },
-            { status: 400, headers: CORS_HEADERS },
-          );
-        }
-        try {
-          const redis = await getRedis();
-          await redis.del(details.claimKey);
-          action = `released SET-NX-EX claim ${details.claimKey}`;
-        } catch (e) {
-          return NextResponse.json(
-            {
-              error: `Failed to release claim: ${e instanceof Error ? e.message : String(e)}`,
-            },
-            { status: 500, headers: CORS_HEADERS },
-          );
-        }
-        break;
-      }
-      default:
-        return NextResponse.json(
-          {
-            error: `Force-release not supported for dead-letter kind '${entry.kind ?? 'unknown'}'.`,
-          },
-          { status: 400, headers: CORS_HEADERS },
-        );
-    }
+    const action = result.action;
 
     // Pass-3 fix: HCS-20 audit anchor for the force-release action.
     // Without an immutable on-chain record, the only trail of an
@@ -588,18 +306,13 @@ export const POST = withStore(async (request: Request) => {
     // resolution (the local mutation already happened).
     try {
       const accounting = multiUser.getAccountingForRecovery();
-      await accounting.recordControlEvent(
-        body.acknowledgeDoubleSpendRisk
-          ? 'force_release_override'
-          : 'force_release',
-        {
-          by: auth.accountId,
-          reason: body.reason,
-          uncertainTxId: id,
-          kind: entry.kind,
-          mirrorResult,
-        },
-      );
+      await accounting.recordControlEvent('force_release', {
+        by: auth.accountId,
+        reason,
+        uncertainTxId: id,
+        kind: entry.kind,
+        mirrorResult,
+      });
     } catch (auditErr) {
       logger.warn('force-release HCS-20 audit anchor write failed', {
         component: 'AdminForceRelease',
@@ -617,9 +330,8 @@ export const POST = withStore(async (request: Request) => {
             sourceTxId: id,
             originalKind: entry.kind,
             by: auth.accountId,
-            reason: body.reason,
+            reason,
             mirrorResult,
-            acknowledgeDoubleSpendRisk: !!body.acknowledgeDoubleSpendRisk,
           },
         });
       } catch {
@@ -631,7 +343,7 @@ export const POST = withStore(async (request: Request) => {
       await store.upsertDeadLetter({
         ...entry,
         resolvedAt: new Date().toISOString(),
-        resolvedBy: `operator-force-release:${auth.accountId}:${body.reason}`,
+        resolvedBy: `operator-force-release:${auth.accountId}:${reason}`,
         resolutionTxId: id,
       });
       await store.flush();
@@ -649,7 +361,7 @@ export const POST = withStore(async (request: Request) => {
       kind: entry.kind,
       uncertainTxId: id,
       operator: auth.accountId,
-      reason: body.reason,
+      reason,
       action,
     });
 
@@ -659,7 +371,7 @@ export const POST = withStore(async (request: Request) => {
         kind: entry.kind,
         uncertainTxId: id,
         resolvedBy: auth.accountId,
-        reason: body.reason,
+        reason,
         action,
       },
       { headers: CORS_HEADERS },

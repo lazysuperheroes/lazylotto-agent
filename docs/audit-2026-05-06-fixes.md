@@ -291,7 +291,7 @@ remains at-most-once protection but isn't the gate for refund.
 
 ## Phase 3 — Force-release rewrite (4 items)
 
-### `[ ]` F12 (C) — Force-release SUCCESS branches mirror verifier post-conditions for ALL kinds
+### `[x]` F12 (C) — Force-release SUCCESS branches mirror verifier post-conditions for ALL kinds
 **Closes:** A-08, A-09, A-10, U-01, U-02, U-09, OP-06, SM-07, partial DR-06
 
 **Bug:** today the operator-fee branch correctly settles+audits on
@@ -333,7 +333,7 @@ returns 503 retry-shortly. No need for an "ack" override path.
 
 ---
 
-### `[ ]` F13 (H) — Force-release reads progress markers before mutating
+### `[x]` F13 (H) — Force-release reads progress markers before mutating
 **Closes:** SM-09
 
 **Bug:** force-release `withdrawal_uncertain` branch unconditionally
@@ -353,7 +353,7 @@ is wrong. (Folds into F12's rewrite.)
 
 ---
 
-### `[ ]` F14 (H) — Force-release operator-fee SUCCESS marker ordering
+### `[x]` F14 (H) — Force-release operator-fee SUCCESS marker ordering
 **Closes:** OP-03, SM-10, C-03
 
 **Bug:** route mutates Redis (debit operator) at line 312, THEN
@@ -377,7 +377,7 @@ in the same Redis pipeline.
 
 ---
 
-### `[ ]` F15 (M) — Force-release refuses already-triaged play_uncertain
+### `[x]` F15 (M) — Force-release refuses already-triaged play_uncertain
 **Closes:** SM-04
 
 **Bug:** if a `play_uncertain` SUCCESS-triaged entry is somehow
