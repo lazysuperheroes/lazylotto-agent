@@ -163,7 +163,7 @@ ordering; switch malformed counter to Redis `INCR`.
 
 ## Phase 2 — Refund correctness (6 items)
 
-### `[ ]` F6 (C) — Refund verifier intermediate `stampProgress`
+### `[x]` F6 (C) — Refund verifier intermediate `stampProgress`
 **Closes:** U-03
 
 **Bug:** refund verifier (`verifyUncertainRefunds`) stamps markers
@@ -184,7 +184,7 @@ withdrawal verifier's pattern. Folds in F1's accumulator semantics.
 
 ---
 
-### `[ ]` F7 (H) — Refund of fully-spent deposit guard
+### `[x]` F7 (H) — Refund of fully-spent deposit guard
 **Closes:** U-04
 
 **Bug:** `processRefund` doesn't check whether the deposit has been
@@ -206,7 +206,7 @@ Reject 4xx; allow operator to specify partial refund amount.
 
 ---
 
-### `[ ]` F8 (M) — Refund debits user from deposit record, not memo
+### `[x]` F8 (M) — Refund debits user from deposit record, not memo
 **Closes:** U-06
 
 **Bug:** Alice deposits to agent with Bob's `depositMemo`
@@ -225,7 +225,7 @@ correct at deposit time; wrong key at refund time.
 
 ---
 
-### `[ ]` F9 (C) — Operator rake reversal on refund
+### `[x]` F9 (C) — Operator rake reversal on refund
 **Closes:** OP-01
 
 **Bug:** rake-on-deposit credits `op.balances[token] += rakeAmount`.
@@ -247,7 +247,7 @@ Emit a v2 `rake_reversal` audit op so the topic reflects the reversal.
 
 ---
 
-### `[ ]` F10 (H) — Refund verifier claim semantics
+### `[x]` F10 (H) — Refund verifier claim semantics
 **Closes:** SM-13
 
 **Bug:** verifier confirms FAILED → DELs `details.claimKey` →
@@ -267,7 +267,7 @@ retried; replay protection survives the resolve-write failure window.
 
 ---
 
-### `[ ]` F11 (M) — `isDepositCredited` uses recorded, not claimed
+### `[x]` F11 (M) — `isDepositCredited` uses recorded, not claimed
 **Closes:** OP-07
 
 **Bug:** `isDepositCredited` returns true on the SADD claim. SADD

@@ -151,6 +151,9 @@ function createMockStore(initial?: Partial<MockStoreState>): PersistentStore & {
     async isDepositCredited(txId: string): Promise<boolean> {
       return state.processedTxIds.has(txId);
     },
+    async getDepositByTxId(txId: string): Promise<DepositRecord | undefined> {
+      return state.deposits.find((d) => d.transactionId === txId);
+    },
     recordDeposit(record: DepositRecord): void {
       state.processedTxIds.add(record.transactionId);
       state.deposits.push(record);

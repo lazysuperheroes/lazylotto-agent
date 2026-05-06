@@ -27,6 +27,7 @@ import { getMirrorBaseUrl } from './mirror.js';
 import { getOperatorAccountId } from './wallet.js';
 import { withChecksum } from '../utils/checksum.js';
 import type { IStore, DeadLetterEntry } from '../custodial/IStore.js';
+import type { DepositRecord } from '../custodial/types.js';
 import type { AccountingService } from '../custodial/AccountingService.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
 import { getRedis, KEY_PREFIX, isRefundClaimKey } from '../auth/redis.js';
@@ -100,21 +101,60 @@ export async function processRefund(
 ): Promise<RefundResult> {
   const agentAccountId = getOperatorAccountId(client);
 
-  // ── Validation: only credited deposits can be refunded ───────
+  // ── Validation: only RECORDED deposits can be refunded ───────
   // Reject any txId that wasn't processed by the deposit watcher.
   // Without this, an admin could refund operator gas top-ups, prize
   // transfers, bounty payouts, or any other inbound transfer.
   //
-  // Uses `isDepositCredited` (cross-Lambda Redis check) rather than
-  // the local-cache `isTransactionProcessed`. The latter would return
-  // a false negative on a Lambda whose local cache hadn't yet seen the
-  // recent deposit, refusing a legitimate refund.
+  // F11 (2026-05-06 audit OP-07): the gate uses `getDepositByTxId`,
+  // not `isDepositCredited`. The latter returns true the moment
+  // `tryClaimTransaction` SADDs the txId into `processed-tx`, which
+  // happens BEFORE `recordDeposit` actually persists the
+  // `DepositRecord`. On lock contention or partial-failure paths the
+  // claim can persist without a record — so a parallel refund call
+  // would pass `isDepositCredited === true` and fire an on-chain
+  // refund against a never-credited deposit. Requiring the actual
+  // `DepositRecord` closes that gap AND gives us the canonical
+  // userId / netAmount / rakeAmount we need below.
+  //
+  // F8 (2026-05-06 audit U-06): the deposit record is also the
+  // canonical owner — we debit from depositRecord.userId rather
+  // than re-resolving via memo at refund time. Memo lookup is
+  // correct at deposit-watcher time; at refund time, a memo
+  // collision would otherwise debit the wrong user.
+  let depositRecord: DepositRecord | undefined;
   if (options?.store) {
-    if (!(await options.store.isDepositCredited(transactionId))) {
+    depositRecord = await options.store.getDepositByTxId(transactionId);
+    if (!depositRecord) {
       throw new Error(
-        `Transaction ${transactionId} was not credited as a user deposit. ` +
-        `Only deposits processed by the deposit watcher can be refunded.`,
+        `Transaction ${transactionId} was not credited as a user deposit ` +
+          `(no DepositRecord found). Only deposits processed by the ` +
+          `deposit watcher can be refunded.`,
       );
+    }
+
+    // F7 (2026-05-06 audit U-04): consumed-balance guard. Refuse the
+    // refund BEFORE submitting on chain if the deposit's net unspent
+    // (user.available + reserved for the deposit's token) is less
+    // than the deposit's netAmount. Otherwise the operator pays
+    // twice — once for the consumed plays/withdrawals, again for
+    // the refund. The guard is a per-user aggregate proxy: if total
+    // unspent for this token is less than this deposit's netAmount,
+    // some prior consumption has eaten into it, so a full refund
+    // would over-pay.
+    const user = options.store.getUser(depositRecord.userId);
+    if (user) {
+      const tokenKey = depositRecord.tokenId ?? HBAR_TOKEN_KEY;
+      const tokEntry = user.balances?.tokens?.[tokenKey];
+      const unspent = (tokEntry?.available ?? 0) + (tokEntry?.reserved ?? 0);
+      if (unspent < depositRecord.netAmount) {
+        throw new Error(
+          `Cannot refund deposit ${transactionId}: it has been ` +
+            `partially or fully consumed (unspent: ${unspent} ${tokenKey}, ` +
+            `deposit netAmount: ${depositRecord.netAmount}). Refunding ` +
+            `would drain operator funds against already-spent balance.`,
+        );
+      }
     }
   } else {
     console.warn(
@@ -153,21 +193,41 @@ export async function processRefund(
       // we can include the actual refundTxId in the error if the prior
       // refund completed; if it's still 'pending', surface that
       // explicitly so the operator knows to wait.
+      //
+      // F10 (2026-05-06 audit SM-13): a `failed:<refundTxId>` value
+      // means the verifier confirmed FAILED on chain. Surface that
+      // distinctly so the operator knows a previous attempt failed
+      // and that an explicit retry requires clearing the claim
+      // (e.g. via force-release).
       const existing = await redis.get<string>(redisLockKey);
-      throw new Error(
-        existing && existing !== 'pending'
-          ? `Transaction ${transactionId} has already been refunded. ` +
-            `Original refund tx: ${existing}`
-          : `Refund for ${transactionId} is already in progress on another ` +
-            `Lambda. Try again in a minute.`,
-      );
+      let message: string;
+      if (existing === 'pending') {
+        message =
+          `Refund for ${transactionId} is already in progress on another ` +
+          `Lambda. Try again in a minute.`;
+      } else if (typeof existing === 'string' && existing.startsWith('failed:')) {
+        message =
+          `Refund for ${transactionId} previously FAILED on chain ` +
+          `(prior refund tx: ${existing.slice('failed:'.length)}). ` +
+          `Clear the claim via force-release to retry.`;
+      } else if (typeof existing === 'string' && existing) {
+        message =
+          `Transaction ${transactionId} has already been refunded. ` +
+          `Original refund tx: ${existing}`;
+      } else {
+        message =
+          `Refund for ${transactionId} is already in progress on another ` +
+          `Lambda. Try again in a minute.`;
+      }
+      throw new Error(message);
     }
   } catch (e) {
     // Rethrow our own sentinels unchanged
     if (
       e instanceof Error &&
       (e.message.includes('already been refunded') ||
-        e.message.includes('already in progress'))
+        e.message.includes('already in progress') ||
+        e.message.includes('previously FAILED on chain'))
     ) {
       throw e;
     }
@@ -415,16 +475,31 @@ export async function processRefund(
   // ── Ledger adjustment ─────────────────────────────────────────
   // If this refund matches a user deposit, deduct from their balance
   // to prevent phantom funds (user keeps balance AND gets refund).
+  //
+  // F8 (2026-05-06 audit U-06): debit the user identified on the
+  // recorded `DepositRecord`. The previous `getUserByMemo(memo)`
+  // lookup was vulnerable to memo-collision attacks where an attacker
+  // sends a deposit with a victim's depositMemo — the deposit
+  // watcher routes the credit to the victim, but a refund would
+  // pay back the on-chain sender (attacker) while debiting the
+  // victim. Looking up by the recorded txId binds the debit to the
+  // canonical owner.
+  //
+  // F9 (2026-05-06 audit OP-01): reverse the operator's rake credit
+  // when refunding a previously-raked deposit. Without this, the
+  // operator's `balances[token]` retains `rakeAmount` for every
+  // refunded deposit, driving a persistent insolvency signal in
+  // reconcile.
   let ledgerAdjusted: string | undefined;
+  let rakeReversed = 0;
 
   if (options?.store) {
     try {
-      const memo = tx.memo_base64
-        ? Buffer.from(tx.memo_base64, 'base64').toString('utf-8')
-        : '';
-      const user = memo ? options.store.getUserByMemo(memo) : undefined;
+      const user = depositRecord
+        ? options.store.getUser(depositRecord.userId)
+        : undefined;
 
-      if (user) {
+      if (user && depositRecord) {
         const tokenKey = refundToken ?? HBAR_TOKEN_KEY;
         // humanRefundAmount was computed in the on-chain submit block
         // above — reuse it here so the audit, ledger, and on-chain
@@ -462,6 +537,24 @@ export async function processRefund(
             });
 
             ledgerAdjusted = user.userId;
+
+            // F9 (2026-05-06 audit OP-01): reverse the operator's
+            // rake credit. The deposit credited `op.balances[token]
+            // += rakeAmount`. The refund returns gross to the user;
+            // without this reversal the operator retains the rake
+            // with no on-chain backing — every refunded deposit
+            // drives a persistent insolvency signal.
+            if (depositRecord.rakeAmount > 0) {
+              options.store.updateOperator((op) => ({
+                ...op,
+                balances: {
+                  ...op.balances,
+                  [tokenKey]: (op.balances[tokenKey] ?? 0) - depositRecord!.rakeAmount,
+                },
+              }));
+              rakeReversed = depositRecord.rakeAmount;
+            }
+
             logger.info('refund ledger adjusted', {
               component: 'Refund',
               event: 'refund_ledger_adjusted',
@@ -469,6 +562,7 @@ export async function processRefund(
               amount: humanRefundAmount,
               token: tokenKey,
               originalTx: transactionId,
+              rakeReversed,
             });
           } finally {
             await releaseUserLock(user.userId, lockToken);
@@ -544,6 +638,14 @@ export async function processRefund(
         refundTxId: confirmedRefundTxId,
         reason: options.reason ?? 'operator_initiated',
         performedBy: options.performedBy ?? agentAccountId,
+        // F9: include the rake reversal in the audit anchor so a
+        // topic-only reader can apply the operator-balance change.
+        ...(rakeReversed > 0
+          ? {
+              rakeReversed,
+              rakeReversedToken: refundToken ?? HBAR_TOKEN_KEY,
+            }
+          : {}),
       });
     } catch (auditErr) {
       logger.warn('refund HCS-20 audit entry failed', {
@@ -739,12 +841,24 @@ export async function verifyUncertainRefunds(
       continue;
     }
 
-    // ── Confirmed FAILED: release claim, mark resolved ───────
+    // ── Confirmed FAILED: overwrite claim, mark resolved ─────
+    //
+    // F10 (2026-05-06 audit SM-13): we OVERWRITE the claim with
+    // `failed:<refundTxId>` and a fresh 30d TTL instead of DELing.
+    // Why: prior behaviour DELed → if the resolve-write then failed
+    // (Redis blip / Lambda freeze), the entry stayed unresolved AND
+    // the claim was gone. A subsequent `processRefund(originalTxId)`
+    // call would pass SET-NX-EX and run a second on-chain transfer.
+    // Overwriting ensures the claim survives the resolve-write
+    // failure window — a retry sees `failed:...` and refuses with a
+    // diagnostic message. Operators who want to genuinely retry
+    // must clear the claim explicitly via force-release.
+    //
+    // F2 (2026-05-06 audit I-07): refuse to write keys outside the
+    // refund-claim namespace. A tampered/migrated entry with
+    // `claimKey: 'lla:testnet:session:victim'` would otherwise let
+    // the verifier overwrite arbitrary lla: keys.
     if (result === 'FAILED') {
-      // F2 (2026-05-06 audit I-07): refuse to DEL keys outside the
-      // refund-claim namespace. A tampered/migrated entry with
-      // `claimKey: 'lla:testnet:session:victim'` would otherwise let
-      // the verifier delete arbitrary lla: keys.
       if (details.claimKey && !isRefundClaimKey(details.claimKey)) {
         logger.error(
           'refund_uncertain claimKey outside KEY_PREFIX.refunded — refusing to release',
@@ -759,10 +873,12 @@ export async function verifyUncertainRefunds(
       } else if (details.claimKey) {
         try {
           const redis = await getRedis();
-          await redis.del(details.claimKey);
+          await redis.set(details.claimKey, `failed:${refundTxId}`, {
+            ex: 30 * 24 * 60 * 60,
+          });
         } catch (e) {
           logger.warn(
-            'refund_uncertain claim release failed during verification',
+            'refund_uncertain claim overwrite failed during verification',
             {
               component: 'Refund',
               refundTxId,
@@ -805,17 +921,50 @@ export async function verifyUncertainRefunds(
     // failure (audit, ledger) doesn't block resolution. The claim
     // marker is already in place (kept by the original refund call)
     // so re-attempts are still rejected as duplicates.
+    //
+    // F6 (2026-05-06 audit U-03): intermediate `stampProgress` calls
+    // persist the `ledgerAdjustedAt` and `auditWrittenAt` markers
+    // BEFORE the final resolve write. Without these, a single
+    // resolve-write failure would lose the markers, and the next
+    // reconcile pass would re-debit the user + emit a duplicate
+    // HCS-20 burn op (`recordRefund` has no body-level idempotency
+    // we can rely on for cross-write dedup).
+
+    // Running progress accumulator — same pattern as F1 in
+    // `uncertainTxVerification.ts`. Each stamp writes the full
+    // accumulator so a stamp failure self-heals on the next step.
+    const refundProgress: {
+      ledgerAdjustedAt?: string;
+      auditWrittenAt?: string;
+    } = {
+      ledgerAdjustedAt:
+        typeof details.ledgerAdjustedAt === 'string'
+          ? details.ledgerAdjustedAt
+          : undefined,
+      auditWrittenAt:
+        typeof (details as { auditWrittenAt?: string }).auditWrittenAt === 'string'
+          ? (details as { auditWrittenAt: string }).auditWrittenAt
+          : undefined,
+    };
 
     // M15: skip ledger adjustment if a previous verification pass
     // already applied it. Re-running verifiers (idempotency-by-id)
     // must NOT re-debit the user's `available`.
-    const ledgerAdjusted = typeof details.ledgerAdjustedAt === 'string';
+    const ledgerAdjusted = !!refundProgress.ledgerAdjustedAt;
     let didAdjustLedger = false;
 
-    // Ledger adjustment (if user matches a memo and not already adjusted)
-    if (entry.memo && !ledgerAdjusted) {
+    // F8 (2026-05-06 audit U-06): debit the user identified on the
+    // recorded `DepositRecord` rather than re-resolving via memo.
+    // F9 (2026-05-06 audit OP-01): reverse the operator's rake
+    // credit by the deposit's recorded `rakeAmount`.
+    let rakeReversedHere = 0;
+    const depositRecordForVerifier = await store
+      .getDepositByTxId(originalTxId)
+      .catch(() => undefined);
+
+    if (!ledgerAdjusted && depositRecordForVerifier) {
       try {
-        const user = store.getUserByMemo(entry.memo);
+        const user = store.getUser?.(depositRecordForVerifier.userId);
         if (user && details.tokenKey && typeof details.humanAmount === 'number') {
           const tokenKey = details.tokenKey;
           const humanAmount = details.humanAmount;
@@ -838,6 +987,21 @@ export async function verifyUncertainRefunds(
                 return b;
               });
               didAdjustLedger = true;
+
+              // F9: rake reversal — same conditions as the in-flight
+              // path (see processRefund).
+              if (depositRecordForVerifier.rakeAmount > 0 && store.updateOperator) {
+                store.updateOperator((op) => ({
+                  ...op,
+                  balances: {
+                    ...op.balances,
+                    [tokenKey]:
+                      (op.balances[tokenKey] ?? 0) -
+                      depositRecordForVerifier.rakeAmount,
+                  },
+                }));
+                rakeReversedHere = depositRecordForVerifier.rakeAmount;
+              }
             } finally {
               await releaseUserLock(user.userId, lockToken);
             }
@@ -870,14 +1034,35 @@ export async function verifyUncertainRefunds(
       }
     }
 
+    // F6: stamp ledgerAdjustedAt the moment the debit lands. The
+    // intermediate stamp protects the next reconcile pass from
+    // re-debiting if the resolve-write later fails.
+    if (didAdjustLedger && !refundProgress.ledgerAdjustedAt) {
+      refundProgress.ledgerAdjustedAt = new Date().toISOString();
+      try {
+        await store.upsertDeadLetter({
+          ...entry,
+          details: { ...(entry.details ?? {}), ...refundProgress },
+        });
+      } catch (e) {
+        // Same self-healing semantics as F1: a failed stamp is logged
+        // but the running accumulator carries the marker forward to
+        // the next stamp attempt.
+        logger.warn('refund_uncertain ledgerAdjustedAt stamp failed', {
+          component: 'Refund',
+          refundTxId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+
     // HCS-20 audit entry (if accounting available and details intact).
     // R-HIGH-1: idempotency-marked via `auditWrittenAt`. A Lambda
     // crash AFTER recordRefund returns but BEFORE the resolve write
     // would otherwise let the next pass emit a SECOND HCS-20 burn op
     // for the same refund (`recordRefund` has no body-level
     // idempotency).
-    const auditAlreadyWritten =
-      typeof (details as { auditWrittenAt?: string }).auditWrittenAt === 'string';
+    const auditAlreadyWritten = !!refundProgress.auditWrittenAt;
     let didWriteAudit = false;
     if (
       accounting &&
@@ -896,8 +1081,30 @@ export async function verifyUncertainRefunds(
           refundTxId,
           reason: details.reason ?? 'operator_initiated',
           performedBy: details.performedBy ?? details.agentAccountId,
+          // F9: include rake reversal (if any) so the topic captures
+          // the operator-balance change.
+          ...(rakeReversedHere > 0 && details.tokenKey
+            ? {
+                rakeReversed: rakeReversedHere,
+                rakeReversedToken: details.tokenKey,
+              }
+            : {}),
         });
         didWriteAudit = true;
+        // F6: stamp auditWrittenAt the moment the audit anchor lands.
+        refundProgress.auditWrittenAt = new Date().toISOString();
+        try {
+          await store.upsertDeadLetter({
+            ...entry,
+            details: { ...(entry.details ?? {}), ...refundProgress },
+          });
+        } catch (stampErr) {
+          logger.warn('refund_uncertain auditWrittenAt stamp failed', {
+            component: 'Refund',
+            refundTxId,
+            error: stampErr instanceof Error ? stampErr.message : String(stampErr),
+          });
+        }
       } catch (e) {
         logger.warn('refund_uncertain verification: audit write failed', {
           component: 'Refund',
@@ -953,25 +1160,11 @@ export async function verifyUncertainRefunds(
     try {
       await store.upsertDeadLetter({
         ...entry,
-        // M15: stamp ledgerAdjustedAt so a re-run won't double-debit.
-        // R-HIGH-1: same treatment for auditWrittenAt — guards
-        // duplicate HCS-20 burn op on Lambda-crash + retry.
-        details: {
-          ...(entry.details ?? {}),
-          ...(didAdjustLedger || ledgerAdjusted
-            ? {
-                ledgerAdjustedAt:
-                  details.ledgerAdjustedAt ?? new Date().toISOString(),
-              }
-            : {}),
-          ...(didWriteAudit || auditAlreadyWritten
-            ? {
-                auditWrittenAt:
-                  (details as { auditWrittenAt?: string }).auditWrittenAt ??
-                  new Date().toISOString(),
-              }
-            : {}),
-        },
+        // F6: persist the running progress accumulator so a future
+        // re-run (e.g. operator clears resolvedAt) sees the correct
+        // skip gates. The intermediate stamps already wrote these,
+        // but include them here as belt-and-braces.
+        details: { ...(entry.details ?? {}), ...refundProgress },
         resolvedAt: new Date().toISOString(),
         resolvedBy: 'reconcile',
         resolutionTxId: refundTxId,

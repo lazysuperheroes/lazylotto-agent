@@ -181,6 +181,29 @@ export interface IStore {
   recordDeposit(record: DepositRecord): void;
   getDepositsForUser(userId: string): DepositRecord[];
 
+  /**
+   * Look up a deposit by its on-chain transaction id. Returns
+   * `undefined` if no deposit was recorded for that tx (which is
+   * STRICTLY DIFFERENT from "the SADD claim was set" — see the
+   * `isDepositCredited` claim/recorded distinction below).
+   *
+   * F11 (2026-05-06 audit OP-07): refund eligibility must check that
+   * a real `DepositRecord` exists, not just that the SADD claim was
+   * set by `tryClaimTransaction`. Otherwise a parallel refund call
+   * can pass `isDepositCredited === true` while no record exists yet
+   * (claim landed, lock contention prevented record write).
+   *
+   * F8 (2026-05-06 audit U-06): refund must debit the user identified
+   * on the deposit record (the canonical owner of the credited funds)
+   * rather than re-resolving via memo at refund time. Memo resolution
+   * is correct at deposit-watcher time; at refund time the deposit
+   * record is the authoritative key.
+   *
+   * F9 (2026-05-06 audit OP-01): refund must reverse the operator's
+   * rake credit; the deposit record carries `rakeAmount`.
+   */
+  getDepositByTxId(txId: string): Promise<DepositRecord | undefined>;
+
   // ── Play sessions ──────────────────────────────────────────────
   recordPlaySession(record: PlaySessionResult): void;
   getPlaySessionsForUser(userId: string): PlaySessionResult[];

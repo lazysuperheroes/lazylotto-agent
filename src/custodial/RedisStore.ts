@@ -582,6 +582,26 @@ export class RedisStore implements IStore {
     return this.deposits.filter((d) => d.userId === userId);
   }
 
+  /**
+   * Cross-Lambda deposit lookup. Returns the local-cache entry first
+   * (warm path); on miss, hits Redis directly so a Lambda whose local
+   * cache hasn't yet seen another Lambda's recent `recordDeposit`
+   * still gets the right answer.
+   */
+  async getDepositByTxId(txId: string): Promise<DepositRecord | undefined> {
+    const local = this.deposits.find((d) => d.transactionId === txId);
+    if (local) return local;
+    const raw = await this.redis.get<string | object>(k('deposits', txId));
+    if (raw == null) return undefined;
+    const parsed: DepositRecord =
+      typeof raw === 'string' ? JSON.parse(raw) : (raw as DepositRecord);
+    // Backfill the local cache so subsequent lookups stay warm.
+    if (!this.deposits.some((d) => d.transactionId === txId)) {
+      this.deposits.push(parsed);
+    }
+    return parsed;
+  }
+
   // ── Play sessions ────────────────────────────────────────────
 
   recordPlaySession(record: PlaySessionResult): void {

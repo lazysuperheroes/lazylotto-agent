@@ -199,6 +199,21 @@ export interface RefundMessage {
   reason: 'stuck_deposit' | 'operator_initiated' | 'admin' | string;
   performedBy: string;
   ts: string;
+  /**
+   * Rake amount reversed back from operator state. F9 (2026-05-06
+   * audit OP-01): when refunding a deposit that was raked at credit
+   * time, the operator's local `balances[token] += rakeAmount` is
+   * reversed by this much. Optional for backward compat — readers
+   * MUST default to 0 when absent (legacy refund messages predate
+   * this field).
+   */
+  rakeReversed?: string;
+  /**
+   * Token of the reversed rake (mirrors the deposit's token). Included
+   * explicitly so a topic-only reader doesn't need to back-reference
+   * `originalDepositTxId` to apply the operator-balance reversal.
+   */
+  rakeReversedToken?: string;
 }
 
 /**

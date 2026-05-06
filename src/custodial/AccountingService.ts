@@ -734,6 +734,15 @@ export class AccountingService {
     refundTxId: string;
     reason: string;
     performedBy: string;
+    /**
+     * F9 (2026-05-06 audit OP-01): if the refunded deposit was
+     * raked at credit time, pass `rakeAmount` here so the topic
+     * reflects the operator-balance reversal. Reader applies
+     * `op.balances[token] -= rakeReversed`. Omit for refunds of
+     * never-raked deposits.
+     */
+    rakeReversed?: number;
+    rakeReversedToken?: string;
   }): Promise<void> {
     const message: RefundMessage = {
       p: 'hcs-20',
@@ -747,6 +756,12 @@ export class AccountingService {
       reason: details.reason,
       performedBy: details.performedBy,
       ts: new Date().toISOString(),
+      ...(details.rakeReversed && details.rakeReversed > 0
+        ? {
+            rakeReversed: String(details.rakeReversed),
+            rakeReversedToken: details.rakeReversedToken,
+          }
+        : {}),
     };
     await this.submitV2Message(message);
   }

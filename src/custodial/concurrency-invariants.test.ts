@@ -441,6 +441,7 @@ describe('Cross-Lambda invariant: withUserLock contract', () => {
       isDepositCredited: async () => false,
       recordDeposit: () => {},
       getDepositsForUser: () => [],
+      getDepositByTxId: async () => undefined,
       recordPlaySession: () => {},
       getPlaySessionsForUser: () => [],
       recordWithdrawal: () => {},

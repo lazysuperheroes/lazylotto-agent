@@ -419,6 +419,10 @@ export class PersistentStore implements IStore {
     return this.deposits.filter((d) => d.userId === userId);
   }
 
+  async getDepositByTxId(txId: string): Promise<DepositRecord | undefined> {
+    return this.deposits.find((d) => d.transactionId === txId);
+  }
+
   // ── Play sessions ────────────────────────────────────────────
 
   recordPlaySession(record: PlaySessionResult): void {
