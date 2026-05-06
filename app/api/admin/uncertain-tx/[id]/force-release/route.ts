@@ -269,6 +269,27 @@ export const POST = withStore(async (request: Request) => {
       );
     }
 
+    // R3-FG-5 (round-3 P9-002): release the verifier-lock on EVERY exit.
+    // R2-FG-1 promised "release on ok=false paths" but the route never
+    // released the lock at all — every force-release call leaked the
+    // 60s TTL, blocking concurrent reconcile + repeat operator clicks.
+    // The lock has no fence (literal 'force-release' value), so a plain
+    // DEL is safe; we don't risk nuking another acquirer because the
+    // SET-NX above guaranteed we own this exact instance.
+    const releaseLock = async (): Promise<void> => {
+      try {
+        const r = await getRedis();
+        await r.del(lockKey);
+      } catch (e) {
+        logger.warn('force-release verifier-lock release failed; relying on TTL', {
+          component: 'AdminForceRelease',
+          uncertainTxId: id,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    };
+
+    try {
     // R2-FG-9 (round-2 B-11): re-read the entry AFTER lock acquisition.
     // Between the initial read above and the lock-acquire, a concurrent
     // verifier (whose F26 release just landed under the lowercase
@@ -375,9 +396,27 @@ export const POST = withStore(async (request: Request) => {
       }
     }
 
+    // R3-FG-1 (round-3 P2-002 / P4-001 / P9-003): re-refresh + re-fetch
+    // BEFORE the resolve write so we don't spread the pre-lock `entry`
+    // snapshot and clobber every progress marker (settledAt,
+    // totalWithdrawnAt, historyWrittenAt, auditWrittenAt,
+    // operatorDebitedAt, successTriagedAt, ledgerAdjustedAt) that the
+    // handler just stamped. Pre-fix the resolve-write at this site
+    // spread `...entry` which silently reverted every stamp, allowing
+    // a subsequent re-run (operator clears resolvedAt, or the
+    // play-uncertain SUCCESS triage path which intentionally retains
+    // visible state) to re-execute every step → double-debit.
+    let latestEntry = freshEntry;
+    try {
+      await store.refreshDeadLetters();
+      const post = store.getDeadLetters().find((e) => e.transactionId === id);
+      if (post) latestEntry = post;
+    } catch {
+      // Fall through with freshEntry — at least it's post-lock.
+    }
     try {
       await store.upsertDeadLetter({
-        ...entry,
+        ...latestEntry,
         resolvedAt: new Date().toISOString(),
         resolvedBy: `operator-force-release:${auth.accountId}:${reason}`,
         resolutionTxId: id,
@@ -412,6 +451,11 @@ export const POST = withStore(async (request: Request) => {
       },
       { headers: CORS_HEADERS },
     );
+    } finally {
+      // R3-FG-5: always release the verifier lock — every prior `return`
+      // inside the try-block flows through this finally first.
+      await releaseLock();
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(

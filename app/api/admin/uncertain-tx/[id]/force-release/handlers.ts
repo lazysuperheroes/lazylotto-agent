@@ -41,7 +41,7 @@ import type { AccountingService } from '~/custodial/AccountingService';
 import type { MirrorOutcome } from './route';
 import { KEY_PREFIX, isRefundClaimKey } from '~/auth/redis';
 import { HBAR_TOKEN_KEY } from '~/config/strategy';
-import { tryAcquireUserLockWithBackoff, releaseUserLock } from '~/lib/locks';
+import { RELEASE_SCRIPT, tryAcquireUserLockWithBackoff, releaseUserLock } from '~/lib/locks';
 
 /**
  * Standard error envelope for the per-user-lock contention path.
@@ -83,6 +83,8 @@ export interface ForceReleaseContext {
     /** R2-FG-11: read claim values before overwriting them. */
     get<T = string>(key: string): Promise<T | null>;
     del(...keys: string[]): Promise<number>;
+    /** R3-FG-2: fenced compare-and-delete via lowercase RELEASE_SCRIPT. */
+    eval<T = unknown>(script: string, keys: string[], args: string[]): Promise<T>;
   };
   log: {
     warn(msg: string, meta: Record<string, unknown>): void;
@@ -386,19 +388,25 @@ async function handleOperatorFee(
   }
 
   if (mirrorResult === 'FAILED') {
-    // R2-FG-16: also release the F24 per-token pending claim so the
-    // operator can retry that token immediately after force-release.
-    try {
-      await ctx.redis.del(
-        `${KEY_PREFIX.lockOperator}withdraw-pending:${details.tokenKey}`,
-      );
-    } catch (e) {
-      ctx.log.warn('force-release operator-fee F24 pending-claim release failed', {
-        component: 'AdminForceRelease',
-        uncertainTxId: entry.transactionId,
-        tokenKey: details.tokenKey,
-        error: e instanceof Error ? e.message : String(e),
-      });
+    // R2-FG-16 + R3-FG-2: fenced release of F24 per-token pending claim.
+    // Read fence from `details.pendingClaimFence` and compare-and-delete.
+    // Pre-fix: unfenced DEL nuked fresh acquirers' claims → operator double-pay.
+    const failedFence = (details as { pendingClaimFence?: string }).pendingClaimFence;
+    if (typeof failedFence === 'string' && failedFence.length > 0) {
+      try {
+        await ctx.redis.eval(
+          RELEASE_SCRIPT,
+          [`${KEY_PREFIX.lockOperator}withdraw-pending:${details.tokenKey}`],
+          [failedFence],
+        );
+      } catch (e) {
+        ctx.log.warn('force-release operator-fee F24 pending-claim release failed', {
+          component: 'AdminForceRelease',
+          uncertainTxId: entry.transactionId,
+          tokenKey: details.tokenKey,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
     }
     return {
       ok: true,
@@ -527,18 +535,23 @@ async function handleOperatorFee(
     }
   }
 
-  // R2-FG-16: release the F24 per-token pending claim.
-  try {
-    await ctx.redis.del(
-      `${KEY_PREFIX.lockOperator}withdraw-pending:${details.tokenKey}`,
-    );
-  } catch (e) {
-    ctx.log.warn('force-release operator-fee F24 pending-claim release failed', {
-      component: 'AdminForceRelease',
-      uncertainTxId: entry.transactionId,
-      tokenKey: details.tokenKey,
-      error: e instanceof Error ? e.message : String(e),
-    });
+  // R2-FG-16 + R3-FG-2: fenced release of F24 per-token pending claim.
+  const successFence = (details as { pendingClaimFence?: string }).pendingClaimFence;
+  if (typeof successFence === 'string' && successFence.length > 0) {
+    try {
+      await ctx.redis.eval(
+        RELEASE_SCRIPT,
+        [`${KEY_PREFIX.lockOperator}withdraw-pending:${details.tokenKey}`],
+        [successFence],
+      );
+    } catch (e) {
+      ctx.log.warn('force-release operator-fee F24 pending-claim release failed', {
+        component: 'AdminForceRelease',
+        uncertainTxId: entry.transactionId,
+        tokenKey: details.tokenKey,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
   }
 
   return {

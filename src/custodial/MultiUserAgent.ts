@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { reconcile, type ReconciliationResult } from './Reconciliation.js';
 import { logger } from '../lib/logger.js';
 import { assertKillSwitchDisabled } from '../lib/killswitch.js';
-import { acquireOperatorLock, releaseOperatorLock } from '../lib/locks.js';
+import { RELEASE_SCRIPT, acquireOperatorLock, releaseOperatorLock } from '../lib/locks.js';
 import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
 import {
@@ -1593,12 +1593,20 @@ export class MultiUserAgent {
     // operators clear the claim via force-release if needed).
     const PENDING_CLAIM_KEY = `${KEY_PREFIX.lockOperator}withdraw-pending:${tokenKey}`;
     const PENDING_CLAIM_TTL_SEC = 30 * 60;
+    // R3-FG-2 (round-3 P2-003 / P5-OF-001): fence the claim VALUE so
+    // releasers compare-and-delete via RELEASE_SCRIPT instead of an
+    // unfenced DEL. Pre-fix release sites used plain `redis.del()` —
+    // a stale verifier or force-release completion DEL'd a fresh
+    // acquirer's claim → operator double-pay. Persist the fence onto
+    // the dead-letter row so the verifier + force-release release
+    // paths can match it.
+    const pendingClaimFence = randomUUID();
     let pendingClaimAcquired = false;
     try {
       const redis = await getRedis();
       const claimResult = await redis.set(
         PENDING_CLAIM_KEY,
-        new Date().toISOString(),
+        pendingClaimFence,
         { nx: true, ex: PENDING_CLAIM_TTL_SEC },
       );
       if (claimResult === null) {
@@ -1645,8 +1653,9 @@ export class MultiUserAgent {
         !(transferError instanceof ReceiptUncertainError)
       ) {
         try {
+          // R3-FG-2: fenced compare-and-delete instead of unfenced DEL.
           const redis = await getRedis();
-          await redis.del(PENDING_CLAIM_KEY);
+          await redis.eval(RELEASE_SCRIPT, [PENDING_CLAIM_KEY], [pendingClaimFence]);
         } catch {
           /* TTL is the fallback */
         }
@@ -1674,6 +1683,10 @@ export class MultiUserAgent {
               amount,
               tokenKey,
               token,
+              // R3-FG-2: persist the F24 claim fence so the verifier
+              // and force-release release paths can compare-and-delete
+              // only their own claim, never a fresh acquirer's.
+              pendingClaimFence,
             },
           });
         } catch (dlErr) {
@@ -1722,8 +1735,9 @@ export class MultiUserAgent {
     }
     if (pendingClaimAcquired) {
       try {
+        // R3-FG-2: fenced compare-and-delete.
         const redis = await getRedis();
-        await redis.del(PENDING_CLAIM_KEY);
+        await redis.eval(RELEASE_SCRIPT, [PENDING_CLAIM_KEY], [pendingClaimFence]);
       } catch {
         /* TTL is the fallback */
       }

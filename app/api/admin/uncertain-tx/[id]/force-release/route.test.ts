@@ -153,6 +153,23 @@ function makeContext(initialState: Partial<FakeStoreState> = {}) {
         for (const k of keys) if (redisStore.delete(k)) n++;
         return n;
       },
+      // R3-FG-2: lowercase RELEASE_SCRIPT compare-and-delete shim.
+      async eval<T = unknown>(script: string, keys: string[], args: string[]): Promise<T> {
+        if (
+          script.includes('get') &&
+          script.includes('del') &&
+          keys.length === 1 &&
+          args.length === 1
+        ) {
+          const cur = redisStore.get(keys[0]!);
+          if (cur === args[0]) {
+            redisStore.delete(keys[0]!);
+            return 1 as unknown as T;
+          }
+          return 0 as unknown as T;
+        }
+        throw new Error('mock eval: unsupported script');
+      },
     },
     log: {
       warn() {},

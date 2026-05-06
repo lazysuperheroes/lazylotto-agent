@@ -34,7 +34,7 @@ import { getRedis, KEY_PREFIX, isRefundClaimKey } from '../auth/redis.js';
 import { logger } from '../lib/logger.js';
 import { escalateUncertainDlFailure } from '../lib/escalation.js';
 import { classifyMirrorResult } from './responseCodes.js';
-import { RELEASE_SCRIPT, acquireUserLock, releaseUserLock } from '../lib/locks.js';
+import { RELEASE_SCRIPT, acquireUserLock, releaseUserLock, tryAcquireUserLockWithBackoff } from '../lib/locks.js';
 import { parseTxIdTimestamp } from '../custodial/uncertainTxVerification.js';
 
 const REFUND_KEY_PREFIX = KEY_PREFIX.refunded;
@@ -131,6 +131,23 @@ export async function processRefund(
   // correct at deposit-watcher time; at refund time, a memo
   // collision would otherwise debit the wrong user.
   let depositRecord: DepositRecord | undefined;
+  // R3-FG-4 (round-3 P1-001): the user lock must be acquired EARLY —
+  // BEFORE the F7 guard, mirror cross-check, on-chain submit, and
+  // ledger debit. R2-FG-19's commit message claimed this was the
+  // case ("guard runs UNDER the user lock acquired upstream") but the
+  // actual production code only acquired the lock around the ledger
+  // debit AFTER the on-chain refund had already settled. A concurrent
+  // in-band play that reserved+settled between the guard at line 164
+  // and the submit at line 526 silently drained `available` while
+  // the refund was still in flight → operator double-pay (the play
+  // settles + the refund returns gross). Now we hold the lock from
+  // depositRecord lookup through awaitReceipt + ledger debit + audit
+  // anchor + SADD permanent set + claim overwrite. The inner
+  // acquireUserLock at line ~682 is now redundant (we own the lock
+  // the whole time) so its mutation block runs directly without the
+  // queue fallback (queue path was R3-FG-25 — drops rake reversal).
+  let outerUserLockToken: string | null = null;
+  let outerUserLockUserId: string | null = null;
   if (options?.store) {
     depositRecord = await options.store.getDepositByTxId(transactionId);
     if (!depositRecord) {
@@ -140,6 +157,24 @@ export async function processRefund(
           `deposit watcher can be refunded.`,
       );
     }
+    // R3-FG-4: acquire the outer user lock with backoff. Refuse the
+    // refund entirely if the lock can't be acquired — better to
+    // surface the contention than to fire the on-chain refund and
+    // race a concurrent in-band op.
+    outerUserLockUserId = depositRecord.userId;
+    outerUserLockToken = await tryAcquireUserLockWithBackoff(outerUserLockUserId, 60);
+    if (!outerUserLockToken) {
+      throw new Error(
+        `Refund blocked: per-user lock contention for ${outerUserLockUserId} did not ` +
+          `clear after retries. The user is mid-play / mid-withdraw / mid-refund. ` +
+          `Wait for the in-flight op to complete and retry.`,
+      );
+    }
+  }
+
+  // R3-FG-4: outer try/finally so the user lock releases on every exit.
+  try {
+  if (options?.store && depositRecord) {
 
     // F7 + R2-FG-19 (round-2 G-01 / F7 caveat): consumed-balance
     // guard. Pre-fix used `available + reserved >= netAmount` — a
@@ -676,98 +711,45 @@ export async function processRefund(
         // persist a pending ledger adjustment that a drain sweep
         // (called at the top of each reconcile, and on-demand by admin)
         // will apply once the user lock is free.
-        let lockToken: string | null = null;
-        const backoffMs = [50, 100, 200, 500, 1000, 2000, 3000];
-        for (const delay of backoffMs) {
-          lockToken = await acquireUserLock(user.userId, 30);
-          if (lockToken) break;
-          await new Promise((resolve) => setTimeout(resolve, delay));
+        // R3-FG-4: we already hold the outer user lock acquired at the
+        // top of processRefund, so we mutate directly. The pre-fix
+        // inner acquireUserLock + queue fallback (R3-FG-25 — drops
+        // rake reversal) is unreachable now that the refund refuses
+        // upfront on outer-lock contention.
+        options.store.updateBalance(user.userId, (b) => {
+          const entry = b.tokens[tokenKey];
+          if (!entry) return b;
+          entry.available = Math.max(0, entry.available - humanRefundAmount);
+          return b;
+        });
+        ledgerAdjusted = user.userId;
+
+        // F9 (2026-05-06 audit OP-01): reverse the operator's
+        // rake credit. The deposit credited `op.balances[token]
+        // += rakeAmount`. The refund returns gross to the user;
+        // without this reversal the operator retains the rake
+        // with no on-chain backing — every refunded deposit
+        // drives a persistent insolvency signal.
+        if (depositRecord.rakeAmount > 0) {
+          options.store.updateOperator((op) => ({
+            ...op,
+            balances: {
+              ...op.balances,
+              [tokenKey]: (op.balances[tokenKey] ?? 0) - depositRecord!.rakeAmount,
+            },
+          }));
+          rakeReversed = depositRecord.rakeAmount;
         }
 
-        if (lockToken) {
-          try {
-            options.store.updateBalance(user.userId, (b) => {
-              const entry = b.tokens[tokenKey];
-              if (!entry) return b;
-              // Deduct from available (clamp to 0)
-              entry.available = Math.max(0, entry.available - humanRefundAmount);
-              return b;
-            });
-
-            ledgerAdjusted = user.userId;
-
-            // F9 (2026-05-06 audit OP-01): reverse the operator's
-            // rake credit. The deposit credited `op.balances[token]
-            // += rakeAmount`. The refund returns gross to the user;
-            // without this reversal the operator retains the rake
-            // with no on-chain backing — every refunded deposit
-            // drives a persistent insolvency signal.
-            if (depositRecord.rakeAmount > 0) {
-              options.store.updateOperator((op) => ({
-                ...op,
-                balances: {
-                  ...op.balances,
-                  [tokenKey]: (op.balances[tokenKey] ?? 0) - depositRecord!.rakeAmount,
-                },
-              }));
-              rakeReversed = depositRecord.rakeAmount;
-            }
-
-            logger.info('refund ledger adjusted', {
-              component: 'Refund',
-              event: 'refund_ledger_adjusted',
-              userId: user.userId,
-              amount: humanRefundAmount,
-              token: tokenKey,
-              originalTx: transactionId,
-              rakeReversed,
-            });
-          } finally {
-            await releaseUserLock(user.userId, lockToken);
-          }
-        } else {
-          // Lock contention never cleared — queue a pending adjustment
-          // so a later drain sweep applies it. This closes the phantom
-          // funds gap: refund amount cannot be silently dropped.
-          try {
-            const { queuePendingLedgerAdjustment } = await import(
-              '../custodial/pendingLedger.js'
-            );
-            await queuePendingLedgerAdjustment({
-              userId: user.userId,
-              tokenKey,
-              amount: humanRefundAmount,
-              reason: 'refund',
-              sourceTx: transactionId,
-              createdAt: new Date().toISOString(),
-            });
-            logger.warn(
-              'refund ledger adjustment queued — user lock contention did not clear, will apply on next drain',
-              {
-                component: 'Refund',
-                userId: user.userId,
-                originalTx: transactionId,
-                amount: humanRefundAmount,
-                token: tokenKey,
-              },
-            );
-            ledgerAdjusted = user.userId; // recorded in the pending queue
-          } catch (queueErr) {
-            // If even the pending queue is unreachable we're in real
-            // trouble — surface loudly so the operator can manually fix.
-            logger.error(
-              'CRITICAL: refund ledger adjustment could not be queued — PHANTOM FUNDS POSSIBLE',
-              {
-                component: 'Refund',
-                userId: user.userId,
-                originalTx: transactionId,
-                amount: humanRefundAmount,
-                token: tokenKey,
-                error: queueErr,
-              },
-            );
-          }
-        }
+        logger.info('refund ledger adjusted', {
+          component: 'Refund',
+          event: 'refund_ledger_adjusted',
+          userId: user.userId,
+          amount: humanRefundAmount,
+          token: tokenKey,
+          originalTx: transactionId,
+          rakeReversed,
+        });
       }
     } catch (e) {
       // Ledger adjustment is best-effort — the on-chain refund already succeeded.
@@ -863,6 +845,13 @@ export async function processRefund(
     refundTxId: confirmedRefundTxId,
     ledgerAdjusted,
   };
+  } finally {
+    // R3-FG-4: release the outer user lock acquired before the F7
+    // guard so concurrent in-band ops on this user can resume.
+    if (outerUserLockToken && outerUserLockUserId) {
+      await releaseUserLock(outerUserLockUserId, outerUserLockToken);
+    }
+  }
 }
 
 // ── Reconcile-time verification of refund_uncertain dead-letters ──

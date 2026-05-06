@@ -136,47 +136,39 @@ function isValidTokenReservation(
  * when progress markers indicate impossible state (e.g.
  * `totalWithdrawnAt` set without `settledAt`).
  *
- * R2-FG-13 (round-2 S-01): self-heal instead of permanently
- * rejecting. A crash mid-flight that landed only the LATER stamp
- * (because the earlier stampProgress call landed in Redis but the
- * intermediate one didn't, or because the in-memory details snapshot
- * dropped a field) wedges the entry forever — `still_uncertain` for
- * 24h, then escalates. Inferring "if a later marker is set, the
- * earlier step must have run too" is safe because dead-letter
- * `details` is only writable by trusted verifier / force-release
- * paths; tampering is not the realistic threat model.
+ * R3-FG-3 (round-3 P6-001 / P2-004): REVERTS R2-FG-13's self-heal.
+ * Self-heal back-filled unset earlier markers from the latest set
+ * marker's timestamp. The verifier's per-step gate (`if
+ * (!progress.settledAt)`) is a TRUTHY check — back-fill set the
+ * field, gate skipped, the actual mutation (`ledger.settleSpend`)
+ * NEVER RAN, reservation held forever, balance silently understated.
+ * The "tampering not realistic" justification was wrong: any
+ * partial-Redis-failure or version-skew deploy that lands a later
+ * stamp without an earlier one triggered the silent skip on the
+ * next pass.
  *
- * Returns a back-fill record mapping unset earlier markers → the
- * timestamp of the latest set marker. Callers stamp the back-fill
- * via `stampProgress` so subsequent passes see coherent state.
- * Empty record = nothing to back-fill.
+ * Restored F4 behavior: return a string error reason; caller
+ * escalates via bumpVerificationAttempts and refuses to proceed.
+ * The 24h NOT_FOUND→FAILED max-age policy is the intended recovery
+ * path; an entry that wedges past 24h gets a real operator page,
+ * which is preferable to silent corruption.
+ *
+ * Returns `null` if markers are coherent; otherwise a reason string.
  */
 function validateProgressOrdering(
   entry: DeadLetterEntry,
   order: string[],
-): Record<string, string> {
+): string | null {
   const details = (entry.details ?? {}) as Record<string, unknown>;
-  const backfill: Record<string, string> = {};
-  // Find the latest set marker.
-  let latestSetIdx = -1;
-  let latestSetTs: string | null = null;
-  for (let i = order.length - 1; i >= 0; i--) {
-    const v = details[order[i]!];
-    if (typeof v === 'string' && v.length > 0) {
-      latestSetIdx = i;
-      latestSetTs = v;
-      break;
+  let sawUnset = false;
+  for (const marker of order) {
+    const set = typeof details[marker] === 'string';
+    if (set && sawUnset) {
+      return `inconsistent progress markers: ${marker} set without prior step`;
     }
+    if (!set) sawUnset = true;
   }
-  if (latestSetIdx < 0 || latestSetTs === null) return backfill;
-  // Back-fill any unset earlier markers with the latest set timestamp.
-  for (let i = 0; i < latestSetIdx; i++) {
-    const m = order[i]!;
-    if (typeof details[m] !== 'string') {
-      backfill[m] = latestSetTs;
-    }
-  }
-  return backfill;
+  return null;
 }
 
 /**
@@ -684,25 +676,29 @@ export async function verifyUncertainWithdrawals(
       continue;
     }
 
-    // F4 + R2-FG-13 (round-2 S-01): progress-marker ordering. The
-    // pre-fix path escalated permanently when a later marker was
-    // set without an earlier one (Lambda crash mid-stamp). The
-    // self-heal version back-fills the inferred timestamps so the
-    // entry can resolve on the next pass instead of wedging.
-    const orderingBackfill = validateProgressOrdering(entry, [
+    // F4 + R3-FG-3 (round-3 P6-001 / P2-004): REVERTS R2-FG-13's
+    // self-heal. The self-heal silently caused the verifier to skip
+    // real settleSpend / updateBalance mutations because the per-step
+    // gate is a TRUTHY check on the back-filled marker. Restored F4:
+    // escalate as malformed; the 24h max-age policy promotes
+    // NOT_FOUND→FAILED for mirror-confirmed dead entries; truly
+    // wedged entries get a real operator page after
+    // MAX_VERIFICATION_ATTEMPTS_BEFORE_PAGE.
+    const orderingErr = validateProgressOrdering(entry, [
       'settledAt',
       'totalWithdrawnAt',
       'historyWrittenAt',
       'auditWrittenAt',
     ]);
-    if (Object.keys(orderingBackfill).length > 0) {
-      await stampProgress(store, entry, orderingBackfill);
-      // Refresh `entry.details` so downstream gates see the back-filled
-      // markers without re-fetching.
-      entry = {
-        ...entry,
-        details: { ...(entry.details ?? {}), ...orderingBackfill },
-      };
+    if (orderingErr) {
+      await bumpVerificationAttempts(store, entry);
+      outcomes.push({
+        withdrawTxId,
+        userId,
+        status: 'still_uncertain',
+        note: `Dead-letter ${orderingErr}. Manual triage required.`,
+      });
+      continue;
     }
 
     // C4: per-txId lock. Skip if another reconcile is processing.
@@ -1012,19 +1008,20 @@ export async function verifyUncertainOperatorFeeWithdrawals(
       continue;
     }
 
-    // F4 + R2-FG-13: self-heal progress-marker ordering for the
-    // operator-fee verifier. Same shape as the withdrawal-verifier
-    // path above.
-    const orderingBackfill = validateProgressOrdering(entry, [
+    // F4 + R3-FG-3: REVERTS R2-FG-13 self-heal in operator-fee path.
+    // See R3-FG-3 comment in the withdrawal verifier above.
+    const orderingErr = validateProgressOrdering(entry, [
       'operatorDebitedAt',
       'auditWrittenAt',
     ]);
-    if (Object.keys(orderingBackfill).length > 0) {
-      await stampProgress(store, entry, orderingBackfill);
-      entry = {
-        ...entry,
-        details: { ...(entry.details ?? {}), ...orderingBackfill },
-      };
+    if (orderingErr) {
+      await bumpVerificationAttempts(store, entry);
+      outcomes.push({
+        withdrawTxId,
+        status: 'still_uncertain',
+        note: `Dead-letter ${orderingErr}. Manual triage required.`,
+      });
+      continue;
     }
 
     const opLockFence = await acquireVerifyLock(withdrawTxId);
@@ -1073,22 +1070,26 @@ export async function verifyUncertainOperatorFeeWithdrawals(
       await markResolved(store, entry, withdrawTxId);
       // F26: release lock after resolve.
       await releaseVerifyLock(withdrawTxId, opLockFence);
-      // R2-FG-16: also release the F24 pending claim on FAILED so
-      // the operator can retry that token immediately.
-      try {
-        const redis = await getRedis();
-        const pendingKey = `${KEY_PREFIX.lockOperator}withdraw-pending:${details.tokenKey}`;
-        await redis.del(pendingKey);
-      } catch (e) {
-        logger.warn(
-          'operator_fee_withdraw_uncertain F24 pending-claim release failed (FAILED branch)',
-          {
-            component: 'UncertainTx',
-            withdrawTxId,
-            tokenKey: details.tokenKey,
-            error: e instanceof Error ? e.message : String(e),
-          },
-        );
+      // R2-FG-16 + R3-FG-2: fenced release of F24 pending claim on FAILED.
+      // Read fence from `details.pendingClaimFence` (R3-FG-2) and
+      // compare-and-delete via RELEASE_SCRIPT instead of unfenced DEL.
+      const failedFence = (details as { pendingClaimFence?: string }).pendingClaimFence;
+      if (typeof failedFence === 'string' && failedFence.length > 0) {
+        try {
+          const redis = await getRedis();
+          const pendingKey = `${KEY_PREFIX.lockOperator}withdraw-pending:${details.tokenKey}`;
+          await redis.eval(RELEASE_SCRIPT, [pendingKey], [failedFence]);
+        } catch (e) {
+          logger.warn(
+            'operator_fee_withdraw_uncertain F24 pending-claim release failed (FAILED branch)',
+            {
+              component: 'UncertainTx',
+              withdrawTxId,
+              tokenKey: details.tokenKey,
+              error: e instanceof Error ? e.message : String(e),
+            },
+          );
+        }
       }
       outcomes.push({
         withdrawTxId,
@@ -1206,25 +1207,33 @@ export async function verifyUncertainOperatorFeeWithdrawals(
     await markResolved(store, entry, withdrawTxId, operatorProgress);
     // F26: release lock after successful resolve.
     await releaseVerifyLock(withdrawTxId, opLockFence);
-    // R2-FG-16 (round-2 S-05 / R-14): release the F24 per-token
-    // pending claim now that we've resolved this withdrawal. Without
-    // this, the operator can't retry that token's fee withdrawal for
-    // up to 30 minutes after the verifier already finished — the
-    // claim TTLs out instead. The claim key shape mirrors
-    // `MultiUserAgent.withdrawOperatorFeesForToken` (F24).
-    try {
-      const redis = await getRedis();
-      const pendingKey = `${KEY_PREFIX.lockOperator}withdraw-pending:${details.tokenKey}`;
-      await redis.del(pendingKey);
-    } catch (e) {
+    // R2-FG-16 + R3-FG-2 (round-3 P2-003): fenced release of F24
+    // pending claim. Read fence from `details.pendingClaimFence`
+    // (R3-FG-2) and compare-and-delete via RELEASE_SCRIPT instead of
+    // unfenced DEL. Pre-fix: a stale verifier completion DEL'd a
+    // fresh in-band acquirer's claim → operator double-pay.
+    const successFence = (details as { pendingClaimFence?: string }).pendingClaimFence;
+    if (typeof successFence === 'string' && successFence.length > 0) {
+      try {
+        const redis = await getRedis();
+        const pendingKey = `${KEY_PREFIX.lockOperator}withdraw-pending:${details.tokenKey}`;
+        await redis.eval(RELEASE_SCRIPT, [pendingKey], [successFence]);
+      } catch (e) {
+        logger.warn(
+          'operator_fee_withdraw_uncertain F24 pending-claim release failed',
+          {
+            component: 'UncertainTx',
+            withdrawTxId,
+            tokenKey: details.tokenKey,
+            error: e instanceof Error ? e.message : String(e),
+          },
+        );
+      }
+    } else {
+      // Legacy DL (pre-R3-FG-2) — TTL is the only safe release path.
       logger.warn(
-        'operator_fee_withdraw_uncertain F24 pending-claim release failed',
-        {
-          component: 'UncertainTx',
-          withdrawTxId,
-          tokenKey: details.tokenKey,
-          error: e instanceof Error ? e.message : String(e),
-        },
+        'operator_fee_withdraw_uncertain F24 pending-claim release skipped (no fence — legacy DL)',
+        { component: 'UncertainTx', withdrawTxId, tokenKey: details.tokenKey },
       );
     }
 

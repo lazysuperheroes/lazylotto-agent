@@ -510,14 +510,19 @@ describe('verifyUncertainWithdrawals', () => {
     );
   });
 
-  it('R2-FG-13: progress-marker ordering self-heals instead of wedging the entry', async () => {
-    // R2-FG-13 (round-2 S-01): pre-fix code permanently rejected an
-    // entry where a later marker was set but an earlier one was unset
-    // (e.g. crash mid-stamp leaves `totalWithdrawnAt` set without
-    // `settledAt`). The entry would wedge in `still_uncertain` until
-    // the 24h max-age promotion kicked in. The self-heal version
-    // back-fills the inferred earlier markers from the latest set
-    // marker's timestamp so the verifier can resolve cleanly.
+  it('R3-FG-3: progress-marker incoherence escalates as malformed (REVERTS R2-FG-13 self-heal)', async () => {
+    // R3-FG-3 (round-3 P6-001 / P2-004): R2-FG-13's self-heal silently
+    // caused the verifier to skip real settleSpend / updateBalance
+    // mutations because the per-step gate is a TRUTHY check on the
+    // back-filled marker. The "tampering not realistic" justification
+    // was wrong — partial-Redis-failure or version-skew deploy that
+    // landed a later stamp without an earlier one triggered the silent
+    // skip on the next pass. Reverted to F4's escalate-on-incoherent.
+    //
+    // revert-proof: if validateProgressOrdering goes back to returning
+    // a backfill object, this test fails on the `still_uncertain`
+    // assertion (the resolved-confirmed self-heal path returns
+    // `confirmed`).
     const lateMarker = '2026-05-06T00:00:00.000Z';
     const partial: DeadLetterEntry = {
       transactionId: 'tx-partial',
@@ -531,8 +536,6 @@ describe('verifyUncertainWithdrawals', () => {
         recipientAccountId: '0.0.1234',
         isHbar: true,
         // settledAt deliberately UNSET; totalWithdrawnAt SET.
-        // Pre-fix: rejected forever. Post-fix: settledAt back-filled
-        // with totalWithdrawnAt's timestamp + verifier proceeds.
         totalWithdrawnAt: lateMarker,
       },
     };
@@ -542,25 +545,25 @@ describe('verifyUncertainWithdrawals', () => {
       body: { transactions: [{ result: 'SUCCESS' }] },
     });
 
+    const userBefore = store.getUser('user-1')!;
+    const totalWithdrawnBefore = userBefore.balances.tokens.hbar!.totalWithdrawn;
+
     const outcomes = await verifyUncertainWithdrawals(store, ledger, noopAccounting());
 
-    // Verifier resolves the entry instead of wedging it.
-    assert.equal(outcomes[0]!.status, 'confirmed');
-    // The back-fill landed in the store.
+    // Escalate — not self-heal.
+    assert.equal(outcomes[0]!.status, 'still_uncertain');
+    assert.match(outcomes[0]!.note, /inconsistent progress markers/);
+    // No mutation happened.
+    const userAfter = store.getUser('user-1')!;
+    assert.equal(
+      userAfter.balances.tokens.hbar!.totalWithdrawn,
+      totalWithdrawnBefore,
+      'totalWithdrawn must NOT advance on incoherent entry',
+    );
+    // settledAt must NOT be back-filled (no silent self-heal).
     const fresh = store.getDeadLetters().find((e) => e.transactionId === 'tx-partial')!;
     const det = fresh.details as Record<string, unknown>;
-    assert.equal(
-      det.settledAt,
-      lateMarker,
-      'settledAt back-filled with totalWithdrawnAt\'s timestamp',
-    );
-    // Sanity: F1 idempotency markers ensured no double-mutation.
-    const user = store.getUser('user-1')!;
-    assert.equal(
-      user.balances.tokens.hbar!.totalWithdrawn,
-      0,
-      'totalWithdrawn already stamped (skipped on this pass thanks to idempotency)',
-    );
+    assert.equal(det.settledAt, undefined, 'settledAt must NOT be auto-back-filled');
   });
 
   it('Audit-write failure produces audit_trail_orphaned DL (M16)', async () => {
@@ -894,6 +897,77 @@ describe('verifyUncertainOperatorFeeWithdrawals', () => {
 
     const lockValue = await redisMock.get(lockKey);
     assert.equal(lockValue, null, 'verifier lock key must be deleted after release');
+  });
+
+  it('R3-FG-2: F24 fenced release with matching fence DELs the pending-claim key', async () => {
+    // R3-FG-2 (round-3 P2-003 / P5-OF-001): pre-fix release sites used
+    // unfenced `redis.del` — a stale verifier completion DEL'd a fresh
+    // acquirer's claim → operator double-pay. Now the verifier reads
+    // the fence persisted on `details.pendingClaimFence` and
+    // compare-and-deletes via RELEASE_SCRIPT.
+    //
+    // revert-proof: if the production code reverts to unfenced
+    // `redis.del(pendingKey)`, the assertion at the bottom fails (the
+    // wrong-fence pre-seeded value would also get nuked).
+    const tokenKey = 'hbar';
+    const pendingKey = `lla:testnet:lock:operator:withdraw-pending:${tokenKey}`;
+    const myFence = 'fence-uuid-mine';
+    const dl = makeOperatorFeeDl(TX_OK);
+    (dl.details as Record<string, unknown>).pendingClaimFence = myFence;
+    await store.upsertDeadLetter(dl);
+    store.updateOperator((op) => ({ ...op, balances: { ...op.balances, hbar: 100 } }));
+    mirror.responses.set(TX_OK, { status: 200, body: { transactions: [{ result: 'SUCCESS' }] } });
+
+    const redisMock = (globalThis as unknown as {
+      __lazylottoRedisClient__?: {
+        set(k: string, v: string, opts?: { ex?: number; nx?: boolean }): Promise<unknown>;
+        get(k: string): Promise<unknown>;
+      };
+    }).__lazylottoRedisClient__!;
+    // Pre-seed pending claim with my fence — verifier should DEL it.
+    await redisMock.set(pendingKey, myFence);
+
+    await verifyUncertainOperatorFeeWithdrawals(store, '0.0.9999', noopAccounting());
+
+    const after = await redisMock.get(pendingKey);
+    assert.equal(after, null, 'pending claim with matching fence is DELed');
+  });
+
+  it('R3-FG-2: F24 fenced release with WRONG fence does NOT nuke a fresh acquirer\'s claim', async () => {
+    // R3-FG-2: the critical safety property. If the verifier's stored
+    // fence doesn't match the current claim value (because the original
+    // claim TTLed out and a fresh acquirer SET-NX'd with a different
+    // fence), the compare-and-delete is a no-op — the fresh acquirer's
+    // claim survives.
+    //
+    // revert-proof: pre-fix unfenced DEL would nuke the freshFence.
+    const tokenKey = 'hbar';
+    const pendingKey = `lla:testnet:lock:operator:withdraw-pending:${tokenKey}`;
+    const verifierFence = 'fence-stale-verifier';
+    const freshFence = 'fence-fresh-acquirer';
+    const dl = makeOperatorFeeDl(TX_OK);
+    (dl.details as Record<string, unknown>).pendingClaimFence = verifierFence;
+    await store.upsertDeadLetter(dl);
+    store.updateOperator((op) => ({ ...op, balances: { ...op.balances, hbar: 100 } }));
+    mirror.responses.set(TX_OK, { status: 200, body: { transactions: [{ result: 'SUCCESS' }] } });
+
+    const redisMock = (globalThis as unknown as {
+      __lazylottoRedisClient__?: {
+        set(k: string, v: string, opts?: { ex?: number; nx?: boolean }): Promise<unknown>;
+        get(k: string): Promise<unknown>;
+      };
+    }).__lazylottoRedisClient__!;
+    // Fresh acquirer's claim already in Redis (different fence).
+    await redisMock.set(pendingKey, freshFence);
+
+    await verifyUncertainOperatorFeeWithdrawals(store, '0.0.9999', noopAccounting());
+
+    const after = await redisMock.get(pendingKey);
+    assert.equal(
+      after,
+      freshFence,
+      'fresh acquirer\'s claim must survive the stale verifier\'s release attempt',
+    );
   });
 
   it('R2-FG-5: SUCCESS branch stamps operatorDebitedAt BEFORE store.updateOperator', async () => {

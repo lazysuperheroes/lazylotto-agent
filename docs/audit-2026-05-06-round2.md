@@ -257,7 +257,7 @@ SAME row; their fields are silently overwritten on the next stamp.
 
 ---
 
-### `[x]` R2-FG-13 (H) — `validateProgressOrdering` self-heals
+### `[REVERTED]` R2-FG-13 (H) — `validateProgressOrdering` self-heals (round-3 R3-FG-3 restored F4 escalate-on-incoherent: the self-heal silently caused verifier to skip real settleSpend mutations)
 **Closes:** S-01.
 
 **Bug:** A crash mid-flight where intermediate stamp failed (e.g.

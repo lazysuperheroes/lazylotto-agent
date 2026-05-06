@@ -426,6 +426,75 @@ describe('R2-FG-0 / F7 / R2-FG-19: processRefund consumed-balance guard', () => 
     }
   });
 
+  it('R3-FG-4: processRefund refuses when outer user lock cannot be acquired (pre-fix: lock acquired only AFTER on-chain refund)', async () => {
+    // R3-FG-4 (round-3 P1-001): R2-FG-19's commit message claimed the
+    // F7 guard runs UNDER the user lock. It didn't — the lock was
+    // acquired only around the ledger debit AFTER the on-chain refund.
+    // Concurrent in-band play could reserve+settle between the guard
+    // and the on-chain submit, draining `available` while the refund
+    // flew → operator double-pay. Now we acquire the lock BEFORE the
+    // F7 guard and HOLD across awaitReceipt + ledger debit + audit
+    // anchor + SADD. If the lock can't be acquired, refuse the refund
+    // entirely (no on-chain submit).
+    //
+    // revert-proof: pre-acquire the lock from a separate "lambda" via
+    // direct acquireUserLock; processRefund must reject. If the outer
+    // lock is reverted, processRefund proceeds to the F7 guard + on-chain
+    // submit + inner lock acquire (the inner one may queue or fail).
+    // Either way the rejection message would not match the R3-FG-4 string.
+    const fakeClient = {
+      operatorAccountId: { toString: () => '0.0.9999' },
+    } as unknown as import('@hashgraph/sdk').Client;
+
+    const fakeStore = {
+      async isDepositCredited(): Promise<boolean> { return true; },
+      async getDepositByTxId() {
+        return {
+          transactionId: 'tx-locked',
+          userId: 'u-locked',
+          grossAmount: 100,
+          rakeAmount: 0,
+          netAmount: 100,
+          tokenId: null,
+          memo: 'm',
+          timestamp: '2026-05-01T00:00:00Z',
+        };
+      },
+      getUser(userId: string) {
+        if (userId !== 'u-locked') return undefined;
+        return {
+          userId: 'u-locked',
+          balances: {
+            tokens: {
+              hbar: { available: 100, reserved: 0, totalDeposited: 100, totalWithdrawn: 0, totalRake: 0 },
+            },
+          },
+        };
+      },
+    };
+
+    // Pre-acquire the user lock from a "concurrent lambda" so the
+    // outer acquire fails after backoff.
+    const { acquireUserLock } = await import('../lib/locks.js');
+    const concurrentToken = await acquireUserLock('u-locked', 60);
+    assert.ok(concurrentToken, 'pre-condition: concurrent lock acquired');
+
+    try {
+      const { processRefund } = await import('./refund.js');
+      await assert.rejects(
+        () =>
+          processRefund(fakeClient, 'tx-locked', {
+            store: fakeStore as never,
+            skipMirrorCrossCheck: true,
+          }),
+        /per-user lock contention.*did not clear/,
+      );
+    } finally {
+      const { releaseUserLock } = await import('../lib/locks.js');
+      await releaseUserLock('u-locked', concurrentToken!);
+    }
+  });
+
   it('R2-FG-19: throws when balance is FULLY RESERVED (pre-fix would have allowed double-pay)', async () => {
     // Pre-fix guard: `available + reserved >= netAmount` — passes here
     // (0 + 100 >= 100), the operator paid both the play settlement and
