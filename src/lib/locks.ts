@@ -34,8 +34,17 @@ import type { IStore } from '../custodial/IStore.js';
 const USER_LOCK_PREFIX = KEY_PREFIX.lockUser;
 const OPERATOR_LOCK_PREFIX = KEY_PREFIX.lockOperator;
 
-/** Lua: delete the key only if its value matches the expected token. */
-const RELEASE_SCRIPT = `
+/**
+ * Lua: delete the key only if its value matches the expected token.
+ *
+ * Exported (R2-FG-6) so callers like `releaseVerifyLock` and
+ * `releaseRefundLock` can share this exact lowercase script. The
+ * in-memory Redis mock in `src/auth/redis.ts` matches `eval` payloads
+ * by lowercase substring (`get` / `del`); using a custom uppercase
+ * variant in caller code makes the release a SILENT NO-OP under
+ * `installRedisMock` — exactly the case our tests exercise.
+ */
+export const RELEASE_SCRIPT = `
 if redis.call("get", KEYS[1]) == ARGV[1] then
   return redis.call("del", KEYS[1])
 else

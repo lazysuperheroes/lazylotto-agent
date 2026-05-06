@@ -66,12 +66,22 @@ export interface ForceReleaseContext {
   ledger: UserLedger;
   accounting: AccountingService;
   agentAccountId: string;
+  /**
+   * Operator identity stamped into HCS-20 control events written from
+   * force-release handlers (R2-FG-7: play_uncertain SUCCESS triage
+   * anchor, mirroring the verifier's `recordControlEvent` call). The
+   * route layer already has `auth.accountId` — passing it through
+   * keeps the audit trail attributable.
+   */
+  by: string;
   redis: {
     set(
       key: string,
       value: string,
       options?: { nx?: boolean; ex?: number },
     ): Promise<unknown>;
+    /** R2-FG-11: read claim values before overwriting them. */
+    get<T = string>(key: string): Promise<T | null>;
     del(...keys: string[]): Promise<number>;
   };
   log: {
@@ -316,7 +326,9 @@ async function handleWithdrawal(
       });
       try {
         await ctx.store.upsertDeadLetter({
-          transactionId: `audit-orphan:${entry.transactionId}`,
+          // R2-FG-17: salt synthetic id by writer phase so multiple
+          // audit-orphan writes for the same source tx don't collide.
+          transactionId: `audit-orphan:force-release:${entry.transactionId}`,
           timestamp: new Date().toISOString(),
           error: `force-release audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
           kind: 'audit_trail_orphaned',
@@ -327,6 +339,8 @@ async function handleWithdrawal(
             amount: details.amount,
             tokenKey: details.tokenKey,
             recipientAccountId: details.recipientAccountId ?? '',
+            // R2-FG-8: stamp phase for replay tooling.
+            phase: 'audit_failed',
           },
         });
       } catch {
@@ -437,7 +451,8 @@ async function handleOperatorFee(
       // double-debit). Marker + orphan is the safest combo.
       try {
         await ctx.store.upsertDeadLetter({
-          transactionId: `audit-orphan:${entry.transactionId}`,
+          // R2-FG-17: salt synthetic id by writer phase.
+          transactionId: `audit-orphan:force-release:${entry.transactionId}`,
           timestamp: new Date().toISOString(),
           error: `force-release operator debit failed after stamp: ${e instanceof Error ? e.message : String(e)}`,
           kind: 'audit_trail_orphaned',
@@ -479,7 +494,8 @@ async function handleOperatorFee(
       });
       try {
         await ctx.store.upsertDeadLetter({
-          transactionId: `audit-orphan:${entry.transactionId}`,
+          // R2-FG-17: salt synthetic id by writer phase.
+          transactionId: `audit-orphan:force-release:${entry.transactionId}`,
           timestamp: new Date().toISOString(),
           error: `force-release operator audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
           kind: 'audit_trail_orphaned',
@@ -584,12 +600,48 @@ async function handlePlay(
     };
   }
 
-  // F12: mirror=SUCCESS — KEEP reservations held. The on-chain play
-  // landed but the in-band settlement code never ran, so we cannot
-  // reconstruct the per-pool spend / prize state from here. Stamp
-  // `successTriagedAt` (F15 gate) and let the operator complete the
-  // manual reconstruction. F16 in Phase 4 will add the matching
-  // HCS-20 manual-triage anchor.
+  // F12 / R2-FG-7: mirror=SUCCESS — KEEP reservations held. The
+  // on-chain play landed but the in-band settlement code never ran,
+  // so we cannot reconstruct the per-pool spend / prize state from
+  // here. Stamp `successTriagedAt` (F15 gate) AND write the matching
+  // HCS-20 `play_uncertain_success_pending_triage` anchor that the
+  // verifier sibling already writes (F16). Without the anchor, a
+  // topic-only auditor sees the user's pre-play balance with the
+  // operator wallet short by the spend amount — silent insolvency
+  // exactly when force-release is the resolution path.
+  try {
+    await ctx.accounting.recordControlEvent('play_uncertain_success_pending_triage', {
+      by: ctx.by,
+      uncertainTxId: entry.transactionId,
+      userId: details.userId,
+      tokenReservations: details.tokenReservations,
+    });
+  } catch (anchorErr) {
+    ctx.log.warn('force-release play_uncertain SUCCESS triage anchor write failed', {
+      component: 'AdminForceRelease',
+      uncertainTxId: entry.transactionId,
+      error: anchorErr instanceof Error ? anchorErr.message : String(anchorErr),
+    });
+    // R2-FG-8: include `phase` for replay tooling.
+    try {
+      await ctx.store.upsertDeadLetter({
+        transactionId: `audit-orphan:force-release:${entry.transactionId}`,
+        timestamp: new Date().toISOString(),
+        error: `force-release play_uncertain SUCCESS triage anchor write failed: ${anchorErr instanceof Error ? anchorErr.message : String(anchorErr)}`,
+        kind: 'audit_trail_orphaned',
+        details: {
+          sourceKind: 'play_uncertain',
+          sourceTxId: entry.transactionId,
+          userId: details.userId,
+          tokenReservations: details.tokenReservations,
+          phase: 'success_triage_anchor',
+        },
+      });
+    } catch {
+      /* logged above */
+    }
+  }
+
   try {
     await ctx.store.upsertDeadLetter({
       ...entry,
@@ -608,7 +660,7 @@ async function handlePlay(
 
   return {
     ok: true,
-    action: `mirror reports SUCCESS — reservations held for manual settlement reconstruction (operator must reconcile against dApp pool state)`,
+    action: `mirror reports SUCCESS — reservations held for manual settlement reconstruction (operator must reconcile against dApp pool state); HCS-20 triage anchor written`,
   };
 }
 
@@ -703,6 +755,22 @@ async function handleRefund(
     };
   }
 
+  // R2-FG-10 (round-2 B-12): require agentAccountId upfront. The
+  // pre-fix SUCCESS branch silently skipped audit if `agentAccountId`
+  // was missing while still returning 200 with a misleading "audit
+  // anchor" action message — the topic was missing the refund anchor
+  // and the operator wouldn't notice. Fail loud instead.
+  if (typeof details.agentAccountId !== 'string' || details.agentAccountId.length === 0) {
+    return {
+      ok: false,
+      status: 400,
+      error:
+        'Cannot force-release: refund_uncertain dead-letter is missing `agentAccountId` ' +
+        'in details. Without it the HCS-20 audit anchor cannot be written; the operator ' +
+        'must reconstruct this field before release.',
+    };
+  }
+
   const progress: RefundProgress = {
     ledgerAdjustedAt: details.ledgerAdjustedAt,
     auditWrittenAt: details.auditWrittenAt,
@@ -727,6 +795,25 @@ async function handleRefund(
   const depositRecord = await ctx.store
     .getDepositByTxId(details.originalTxId)
     .catch(() => undefined);
+
+  // R2-FG-10 (round-2 R-15): without a depositRecord we have no
+  // canonical user/from/rake to attribute the refund against, and the
+  // pre-fix code wrote an audit anchor with `from === to === agentAccountId`
+  // — a meaningless tautology. Refuse SUCCESS so the operator
+  // reconstructs the deposit record first (typically by re-running
+  // the deposit watcher or hand-seeding from the mirror).
+  // Skip this guard if the ledger has already been adjusted on a
+  // prior pass — the depositRecord may have since been pruned.
+  if (!progress.ledgerAdjustedAt && !depositRecord) {
+    return {
+      ok: false,
+      status: 400,
+      error:
+        `Cannot force-release: no deposit record found for originalTxId=${details.originalTxId}. ` +
+        `Without it the audit anchor would be a meaningless self-loop and the rake-reversal ` +
+        `cannot be sized correctly. Reconstruct the deposit record before retrying.`,
+    };
+  }
 
   let rakeReversed = 0;
   if (!progress.ledgerAdjustedAt && depositRecord) {
@@ -793,7 +880,8 @@ async function handleRefund(
       });
       try {
         await ctx.store.upsertDeadLetter({
-          transactionId: `audit-orphan:${entry.transactionId}`,
+          // R2-FG-17: salt synthetic id by writer phase.
+          transactionId: `audit-orphan:force-release:${entry.transactionId}`,
           timestamp: new Date().toISOString(),
           error: `force-release refund audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
           kind: 'audit_trail_orphaned',
@@ -803,12 +891,67 @@ async function handleRefund(
             originalTxId: details.originalTxId,
             humanAmount: details.humanAmount,
             tokenKey: details.tokenKey,
+            // R2-FG-8: stamp phase for replay tooling.
+            phase: 'audit_failed',
           },
         });
       } catch {
         /* logged above */
       }
     }
+  }
+
+  // R2-FG-11 (round-2 X-12 / B-17): refuse to silently overwrite a
+  // verifier-stamped `failed:<refundTxId>` claim. The pre-fix SUCCESS
+  // path blindly clobbered any existing value, destroying the
+  // on-chain-failed evidence the verifier wrote. Now: GET first; if
+  // we see `failed:`, write an audit-orphan anchor + return 409 so
+  // the operator must explicitly clear the claim before retrying.
+  let existingClaim: string | null = null;
+  try {
+    existingClaim = await ctx.redis.get<string>(details.claimKey);
+  } catch {
+    // GET failure is non-fatal; fall through to the overwrite.
+  }
+  if (typeof existingClaim === 'string' && existingClaim.startsWith('failed:')) {
+    ctx.log.error(
+      'force-release refund SUCCESS attempted to overwrite failed: claim — refusing',
+      {
+        component: 'AdminForceRelease',
+        event: 'failed_claim_overwrite_blocked',
+        uncertainTxId: entry.transactionId,
+        existingClaimPrefix: existingClaim.slice(0, 32),
+      },
+    );
+    try {
+      await ctx.store.upsertDeadLetter({
+        transactionId: `audit-orphan:force-release:${entry.transactionId}`,
+        timestamp: new Date().toISOString(),
+        error:
+          `force-release refund SUCCESS refused to overwrite an existing failed: claim ` +
+          `(${existingClaim.slice(0, 64)}). Operator must clear the claim explicitly.`,
+        kind: 'audit_trail_orphaned',
+        details: {
+          sourceKind: 'refund_uncertain',
+          sourceTxId: entry.transactionId,
+          phase: 'failed_claim_overwrite_blocked',
+          existingClaim,
+        },
+      });
+    } catch {
+      /* logged above */
+    }
+    return {
+      ok: false,
+      status: 409,
+      error:
+        `Refund claim ${details.claimKey} is already marked failed by the verifier (${existingClaim}). ` +
+        `Force-release SUCCESS would destroy on-chain-failed evidence. Clear the claim explicitly ` +
+        `with operator override + reason before retrying.`,
+      hint:
+        'This usually means the verifier has already classified this refund as on-chain-failed. ' +
+        'If you have new mirror evidence that contradicts that, update the claim manually and retry.',
+    };
   }
 
   // Overwrite claim to refundTxId — same semantic as the verifier's

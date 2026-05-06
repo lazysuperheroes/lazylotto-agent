@@ -269,6 +269,38 @@ export const POST = withStore(async (request: Request) => {
       );
     }
 
+    // R2-FG-9 (round-2 B-11): re-read the entry AFTER lock acquisition.
+    // Between the initial read above and the lock-acquire, a concurrent
+    // verifier (whose F26 release just landed under the lowercase
+    // RELEASE_SCRIPT R2-FG-6 fix) could have stamped progress markers
+    // and resolved the entry. Operating on a stale snapshot would
+    // re-apply mutations that already ran — exactly the double-mutate
+    // R2-FG-1 closes for the lock layer; this closes the read-snapshot
+    // hole on top of it.
+    await store.refreshDeadLetters().catch(() => undefined);
+    const refreshed = store
+      .getDeadLetters()
+      .find((e) => e.transactionId === id);
+    if (!refreshed) {
+      return NextResponse.json(
+        {
+          error: `Dead-letter ${id} disappeared during force-release (concurrent verifier resolved it).`,
+        },
+        { status: 409, headers: CORS_HEADERS },
+      );
+    }
+    if (refreshed.resolvedAt) {
+      return NextResponse.json(
+        {
+          error: `Dead-letter ${id} was resolved by a concurrent verifier (${refreshed.resolvedBy ?? 'unknown'}) at ${refreshed.resolvedAt}.`,
+          hint: 'No action needed — the verifier already handled it.',
+        },
+        { status: 409, headers: CORS_HEADERS },
+      );
+    }
+    // Use the fresh snapshot from here on.
+    const freshEntry = refreshed;
+
     // F12: server-side mirror check. After Phase 3, mirror=SUCCESS
     // automatically runs the verifier-equivalent post-conditions
     // for every kind (no override flag — the route does the right
@@ -278,11 +310,15 @@ export const POST = withStore(async (request: Request) => {
     const mirrorResult = await lookupMirrorOutcome(id);
 
     const redis = await getRedis();
-    const result = await applyForceRelease(entry, mirrorResult, {
+    const result = await applyForceRelease(freshEntry, mirrorResult, {
       store,
       ledger: multiUser.getLedgerForRecovery(),
       accounting: multiUser.getAccountingForRecovery(),
       agentAccountId: multiUser.getAgentAccountIdForRecovery(),
+      // R2-FG-7: route layer threads operator identity into handlers
+      // so the F16 triage anchor (and any future control-event
+      // emissions from handlers) are attributable.
+      by: auth.accountId,
       redis,
       log: logger,
     });

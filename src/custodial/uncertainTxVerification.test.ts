@@ -163,6 +163,26 @@ function installRedisMock(): { calls: { setNxCount: number } } {
     async sismember() { return 0; },
     async incr(k: string) { const n = Number(state.get(k) ?? 0) + 1; state.set(k, n); return n; },
     async expire() { return 1; },
+    // R2-FG-6: emulate the lowercase compare-and-delete Lua so the
+    // verifier's lock release actually deletes the key under this
+    // mock. Without this the release became a silent no-op once the
+    // get-then-del fallback was removed.
+    async eval(script: string, keys: string[], args: string[]) {
+      if (
+        script.includes('get') &&
+        script.includes('del') &&
+        keys.length === 1 &&
+        args.length === 1
+      ) {
+        const cur = state.get(keys[0]!);
+        if (cur === args[0]) {
+          state.delete(keys[0]!);
+          return 1;
+        }
+        return 0;
+      }
+      throw new Error('mock eval: unsupported script');
+    },
   };
   (globalThis as unknown as { __lazylottoRedisClient__?: unknown }).__lazylottoRedisClient__ = mock;
   return { calls };
@@ -773,6 +793,68 @@ describe('verifyUncertainOperatorFeeWithdrawals', () => {
     assert.ok(
       lastStamp.auditWrittenAt,
       'final intermediate stamp must include auditWrittenAt from step 2',
+    );
+  });
+
+  it('R2-FG-6: verifier-lock release actually deletes the key (no longer a silent no-op under in-memory mock)', async () => {
+    // R2-FG-6 (round-2 R-01 / R-02): the previous releaseVerifyLock
+    // used uppercase Lua (`GET`/`DEL`) while the in-memory mock
+    // matched on lowercase substrings. Release was a silent no-op
+    // for every test path, so subsequent verifier passes saw the
+    // verifier-lock still held (TTL eventually cleared it). Now
+    // releaseVerifyLock reuses the lowercase RELEASE_SCRIPT from
+    // src/lib/locks.ts. Assert the key is actually gone after a
+    // successful verification pass.
+    const lockKey = `lla:testnet:verifying:${TX_OK}`;
+    store.updateOperator((op) => ({ ...op, balances: { ...op.balances, hbar: 100 } }));
+    await store.upsertDeadLetter(makeOperatorFeeDl(TX_OK));
+    mirror.responses.set(TX_OK, { status: 200, body: { transactions: [{ result: 'SUCCESS' }] } });
+
+    const redisMock = (globalThis as unknown as {
+      __lazylottoRedisClient__?: { get(k: string): Promise<unknown> };
+    }).__lazylottoRedisClient__!;
+
+    await verifyUncertainOperatorFeeWithdrawals(store, '0.0.9999', noopAccounting());
+
+    const lockValue = await redisMock.get(lockKey);
+    assert.equal(lockValue, null, 'verifier lock key must be deleted after release');
+  });
+
+  it('R2-FG-5: SUCCESS branch stamps operatorDebitedAt BEFORE store.updateOperator', async () => {
+    // R2-FG-5 (round-2 G-02 / R-06): the verifier's SUCCESS branch
+    // must stamp the `operatorDebitedAt` marker BEFORE mutating
+    // operator state, mirroring F14 in `handlers.ts`. With the
+    // pre-fix order (mutate → stamp), a Lambda freeze between the
+    // mutation and the stamp leaves the next pass with no marker →
+    // double-debit.
+    store.updateOperator((op) => ({ ...op, balances: { ...op.balances, hbar: 100 } }));
+    await store.upsertDeadLetter(makeOperatorFeeDl(TX_OK));
+    mirror.responses.set(TX_OK, { status: 200, body: { transactions: [{ result: 'SUCCESS' }] } });
+
+    const events: Array<{ kind: 'stamp' | 'mutate'; debitedAt?: string }> = [];
+    const originalUpsert = store.upsertDeadLetter.bind(store);
+    store.upsertDeadLetter = async (entry: DeadLetterEntry) => {
+      const det = (entry.details ?? {}) as Record<string, unknown>;
+      if (det.operatorDebitedAt && !entry.resolvedAt) {
+        events.push({ kind: 'stamp', debitedAt: det.operatorDebitedAt as string });
+      }
+      return originalUpsert(entry);
+    };
+    const originalUpdateOperator = store.updateOperator.bind(store);
+    store.updateOperator = (mutator) => {
+      events.push({ kind: 'mutate' });
+      return originalUpdateOperator(mutator);
+    };
+
+    await verifyUncertainOperatorFeeWithdrawals(store, '0.0.9999', noopAccounting());
+
+    const firstStamp = events.findIndex((e) => e.kind === 'stamp');
+    const firstMutate = events.findIndex((e) => e.kind === 'mutate');
+    assert.ok(firstStamp >= 0, 'expected at least one stamp event');
+    assert.ok(firstMutate >= 0, 'expected at least one mutate event');
+    assert.ok(
+      firstStamp < firstMutate,
+      `stamp(operatorDebitedAt) must precede updateOperator (stamp=${firstStamp} mutate=${firstMutate})`,
     );
   });
 });

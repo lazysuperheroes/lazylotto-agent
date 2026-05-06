@@ -134,12 +134,19 @@ function makeContext(initialState: Partial<FakeStoreState> = {}) {
       async recordRefund(details: unknown) {
         accountingCalls.push({ method: 'recordRefund', args: [details] });
       },
+      async recordControlEvent(event: string, details: unknown) {
+        accountingCalls.push({ method: 'recordControlEvent', args: [event, details] });
+      },
     } as never,
     agentAccountId: '0.0.9999',
+    by: '0.0.42',
     redis: {
       async set(key: string, value: string) {
         redisStore.set(key, value);
         return 'OK';
+      },
+      async get<T = string>(key: string): Promise<T | null> {
+        return (redisStore.get(key) as T | undefined) ?? null;
       },
       async del(...keys: string[]) {
         let n = 0;
@@ -391,6 +398,51 @@ describe('F12 + F15: applyForceRelease — play_uncertain', () => {
     );
   });
 
+  it('R2-FG-7: SUCCESS writes play_uncertain_success_pending_triage HCS-20 control event', async () => {
+    // R2-FG-7: parity with verifier's F16 anchor. Force-release SUCCESS
+    // previously only stamped `successTriagedAt` locally — a topic-only
+    // auditor saw the user's pre-play balance with the operator wallet
+    // short by the spend amount and no on-chain explanation. The
+    // control-event anchor closes that visibility gap.
+    const entry: DeadLetterEntry = {
+      transactionId: 'tx-r2fg7',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'play_uncertain',
+      details: {
+        userId: 'u-r2fg7',
+        tokenReservations: [
+          { token: 'hbar', amount: 30 },
+          { token: 'lazy', amount: 100 },
+        ],
+      },
+    };
+    const { ctx, accountingCalls } = makeContext({
+      dls: new Map([[entry.transactionId, entry]]),
+    });
+
+    const result = await applyForceRelease(entry, 'SUCCESS', ctx);
+
+    expect(result.ok).toBe(true);
+    const triageCalls = accountingCalls.filter(
+      (c) =>
+        c.method === 'recordControlEvent' &&
+        c.args[0] === 'play_uncertain_success_pending_triage',
+    );
+    expect(triageCalls.length).toBe(1);
+    const [, anchorDetails] = triageCalls[0]!.args as [
+      string,
+      { uncertainTxId: string; userId: string; by: string; tokenReservations: unknown },
+    ];
+    expect(anchorDetails.uncertainTxId).toBe('tx-r2fg7');
+    expect(anchorDetails.userId).toBe('u-r2fg7');
+    expect(anchorDetails.by).toBe('0.0.42');
+    expect(anchorDetails.tokenReservations).toEqual([
+      { token: 'hbar', amount: 30 },
+      { token: 'lazy', amount: 100 },
+    ]);
+  });
+
   it('F15: refuses already-triaged play_uncertain', async () => {
     const entry: DeadLetterEntry = {
       transactionId: 'tx-p3',
@@ -504,6 +556,126 @@ describe('F12 + F8 + F9 + F10: applyForceRelease — refund_uncertain', () => {
     const stored = redisStore.get(claimKey);
     expect(typeof stored).toBe('string');
     expect((stored as string).startsWith('failed:')).toBe(true);
+  });
+
+  it('R2-FG-10: SUCCESS without agentAccountId returns 400, not silent skip', async () => {
+    const claimKey = 'lla:testnet:refunded:original-tx-r2fg10';
+    const entry: DeadLetterEntry = {
+      transactionId: 'refund-tx-r2fg10',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'refund_uncertain',
+      details: {
+        claimKey,
+        originalTxId: 'original-tx-r2fg10',
+        refundTxId: 'refund-tx-r2fg10',
+        humanAmount: 10,
+        tokenKey: 'hbar',
+        // agentAccountId DELIBERATELY MISSING — pre-fix code returned 200
+        // with a misleading "audit anchor" action message.
+      },
+    };
+    const { ctx, accountingCalls } = makeContext({
+      dls: new Map([[entry.transactionId, entry]]),
+    });
+
+    const result = await applyForceRelease(entry, 'SUCCESS', ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe(400);
+    expect(result.error).toMatch(/agentAccountId/);
+    // Crucially: NO audit anchor written.
+    expect(accountingCalls.filter((c) => c.method === 'recordRefund').length).toBe(0);
+  });
+
+  it('R2-FG-10: SUCCESS with no depositRecord refuses with 400 (no meaningless self-loop anchor)', async () => {
+    const claimKey = 'lla:testnet:refunded:original-tx-r2fg10b';
+    const entry: DeadLetterEntry = {
+      transactionId: 'refund-tx-r2fg10b',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'refund_uncertain',
+      details: {
+        claimKey,
+        originalTxId: 'original-tx-missing-deposit',
+        refundTxId: 'refund-tx-r2fg10b',
+        humanAmount: 10,
+        tokenKey: 'hbar',
+        agentAccountId: '0.0.9999',
+      },
+    };
+    const { ctx, accountingCalls } = makeContext({
+      dls: new Map([[entry.transactionId, entry]]),
+      // deposits map is empty → getDepositByTxId returns undefined.
+    });
+
+    const result = await applyForceRelease(entry, 'SUCCESS', ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe(400);
+    expect(result.error).toMatch(/no deposit record/);
+    expect(accountingCalls.filter((c) => c.method === 'recordRefund').length).toBe(0);
+  });
+
+  it('R2-FG-11: SUCCESS refuses to overwrite a `failed:` claim left by the verifier', async () => {
+    const claimKey = 'lla:testnet:refunded:original-tx-r2fg11';
+    const entry: DeadLetterEntry = {
+      transactionId: 'refund-tx-r2fg11',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'refund_uncertain',
+      details: {
+        claimKey,
+        originalTxId: 'original-tx-r2fg11',
+        refundTxId: 'refund-tx-r2fg11',
+        humanAmount: 10,
+        tokenKey: 'hbar',
+        agentAccountId: '0.0.9999',
+      },
+    };
+    const { ctx, redisStore, state } = makeContext({
+      dls: new Map([[entry.transactionId, entry]]),
+      balances: new Map([['u-bob', makeBalance('hbar', 10, 0)]]),
+      deposits: new Map([
+        [
+          'original-tx-r2fg11',
+          {
+            transactionId: 'original-tx-r2fg11',
+            userId: 'u-bob',
+            grossAmount: 10,
+            rakeAmount: 0,
+            netAmount: 10,
+            tokenId: null,
+            memo: 'm',
+            timestamp: '2026-05-01T00:00:00Z',
+          },
+        ],
+      ]),
+    });
+    // Verifier already classified this refund as on-chain-failed.
+    redisStore.set(claimKey, 'failed:earlier-tx');
+
+    const result = await applyForceRelease(entry, 'SUCCESS', ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe(409);
+    expect(result.error).toMatch(/failed/);
+    // The failed: marker MUST still be present (not clobbered).
+    expect(redisStore.get(claimKey)).toBe('failed:earlier-tx');
+    // Audit-orphan recorded so manual triage can pick it up.
+    const orphans = Array.from(state.dls.values()).filter(
+      (e) => e.kind === 'audit_trail_orphaned',
+    );
+    expect(orphans.length).toBeGreaterThanOrEqual(1);
+    expect(
+      orphans.some(
+        (e) =>
+          (e.details as Record<string, unknown>).phase === 'failed_claim_overwrite_blocked',
+      ),
+    ).toBe(true);
   });
 
   it('F2: refuses claimKey outside KEY_PREFIX.refunded', async () => {

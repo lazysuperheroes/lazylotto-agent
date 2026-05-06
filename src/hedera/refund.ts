@@ -34,7 +34,7 @@ import { getRedis, KEY_PREFIX, isRefundClaimKey } from '../auth/redis.js';
 import { logger } from '../lib/logger.js';
 import { escalateUncertainDlFailure } from '../lib/escalation.js';
 import { classifyMirrorResult } from './responseCodes.js';
-import { acquireUserLock, releaseUserLock } from '../lib/locks.js';
+import { RELEASE_SCRIPT, acquireUserLock, releaseUserLock } from '../lib/locks.js';
 import { parseTxIdTimestamp } from '../custodial/uncertainTxVerification.js';
 
 const REFUND_KEY_PREFIX = KEY_PREFIX.refunded;
@@ -856,23 +856,17 @@ export async function verifyUncertainRefunds(
       });
       continue;
     }
-    // F25 / F26: best-effort compare-and-delete release. Defined as a
-    // closure over `refundLockKey` / `refundLockFence` so each branch
-    // can call it without re-passing both.
+    // F25 / F26 / R2-FG-6: best-effort compare-and-delete release.
+    // Reuses the lowercase `RELEASE_SCRIPT` from `src/lib/locks.ts` so
+    // the in-memory Redis mock (matches `script.includes('get') &&
+    // script.includes('del')`, lowercase) actually deletes the key.
+    // Previously this had its own uppercase Lua + a racy get-then-del
+    // fallback — both gone. If `redis.eval` ever throws (unsupported
+    // pattern under a stricter mock), we rely on the TTL.
     const releaseRefundLock = async (): Promise<void> => {
       try {
         const redis = await getRedis();
-        const r = redis as { eval?: (script: string, keys: string[], args: string[]) => Promise<unknown> };
-        if (typeof r.eval === 'function') {
-          await r.eval(
-            'if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end',
-            [refundLockKey],
-            [refundLockFence],
-          );
-        } else {
-          const cur = await redis.get<string>(refundLockKey);
-          if (cur === refundLockFence) await redis.del(refundLockKey);
-        }
+        await redis.eval(RELEASE_SCRIPT, [refundLockKey], [refundLockFence]);
       } catch {
         /* TTL is the fallback */
       }

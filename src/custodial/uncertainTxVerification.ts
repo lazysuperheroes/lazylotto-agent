@@ -45,6 +45,7 @@ import { logger } from '../lib/logger.js';
 import { escalateUncertainDlFailure } from '../lib/escalation.js';
 import {
   releaseUserLock,
+  RELEASE_SCRIPT,
   tryAcquireUserLockWithBackoff,
 } from '../lib/locks.js';
 
@@ -208,22 +209,14 @@ async function releaseVerifyLock(txId: string, fence: string): Promise<void> {
   try {
     const redis = await getRedis();
     const key = `${KEY_PREFIX.verifying}${txId}`;
-    // Use eval with a Lua script if available; otherwise fall back to
-    // get-then-del (which is racy but acceptable for the
-    // best-effort liveness path — TTL still bounds the worst case).
-    const redisAny = redis as { eval?: (script: string, keys: string[], args: string[]) => Promise<unknown> };
-    if (typeof redisAny.eval === 'function') {
-      await redisAny.eval(
-        'if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end',
-        [key],
-        [fence],
-      );
-    } else {
-      // Best-effort fallback — read, compare, delete. The window is
-      // narrow and the TTL bounds any orphaned lock.
-      const current = await redis.get<string>(key);
-      if (current === fence) await redis.del(key);
-    }
+    // R2-FG-6: share the lowercase RELEASE_SCRIPT with `src/lib/locks.ts`.
+    // The in-memory Redis mock matches eval bodies by `script.includes('get')
+    // && script.includes('del')` (lowercase) — the previous in-line
+    // uppercase Lua made every release a silent no-op under the mock,
+    // which is exactly what every test in the suite uses. Also drops
+    // the get-then-del fallback (racy — another acquire could win
+    // between get and del); TTL-expire is preferable to that risk.
+    await redis.eval(RELEASE_SCRIPT, [key], [fence]);
   } catch (e) {
     logger.warn('verifier lock release failed; relying on TTL', {
       component: 'UncertainTx',
@@ -958,6 +951,17 @@ export async function verifyUncertainOperatorFeeWithdrawals(
     };
 
     if (!operatorProgress.operatorDebitedAt) {
+      // R2-FG-5 (round-2 G-02 / R-06): stamp BEFORE mutate, mirroring
+      // the F14 pattern that already lives in `handlers.ts`. Without
+      // this, a Lambda freeze between `updateOperator` and
+      // `stampProgress` leaves the next pass with `operatorDebitedAt`
+      // unset → second debit. Stamp-before-mutate inverts the failure
+      // mode to "stamp landed but mutate didn't" which `reconcile`
+      // detects as wallet < ledger insolvency, plus we write an
+      // `audit_trail_orphaned` row on mutation failure so an operator
+      // can manually replay.
+      operatorProgress.operatorDebitedAt = new Date().toISOString();
+      await stampProgress(store, entry, operatorProgress);
       try {
         const tokenKey = details.tokenKey;
         const amount = details.amount;
@@ -972,14 +976,26 @@ export async function verifyUncertainOperatorFeeWithdrawals(
             [tokenKey]: (op.totalWithdrawnByOperator[tokenKey] ?? 0) + amount,
           },
         }));
-        operatorProgress.operatorDebitedAt = new Date().toISOString();
-        await stampProgress(store, entry, operatorProgress);
       } catch (e) {
         logger.warn('operator_fee_withdraw_uncertain operator state update failed', {
           component: 'UncertainTx',
           withdrawTxId,
           error: e instanceof Error ? e.message : String(e),
         });
+        await recordAuditOrphan(
+          store,
+          'operator_fee_withdraw_uncertain',
+          withdrawTxId,
+          {
+            amount: details.amount,
+            tokenKey: details.tokenKey,
+            agentAccountId,
+            recipientAccountId: details.recipientAccountId ?? '',
+            withdrawTxId,
+            phase: 'debit_failed_after_stamp',
+          },
+          e,
+        );
       }
     }
 

@@ -146,7 +146,7 @@ Compromised operator can debit any user any amount.
 
 ## Phase R2-2 — High (force-release / verifier symmetry; 7 items)
 
-### `[ ]` R2-FG-5 (H) — F14 verifier path stamp-before-mutate
+### `[x]` R2-FG-5 (H) — F14 verifier path stamp-before-mutate
 **Closes:** G-02 (P1) + R-06.
 
 **Bug:** F14's stamp-before-mutate ordering landed in `handlers.ts` but
@@ -160,7 +160,7 @@ freeze between mutate and stamp → next pass debits again.
 
 ---
 
-### `[ ]` R2-FG-6 (H) — F25/F26 Lua case-mismatch
+### `[x]` R2-FG-6 (H) — F25/F26 Lua case-mismatch
 **Closes:** R-01 + R-02 (partial overlap with B-03).
 
 **Bug:** Both `releaseVerifyLock` (`uncertainTxVerification.ts:204-232`)
@@ -177,7 +177,7 @@ while `src/auth/redis.ts:428` in-memory eval predicate is `script.includes('get'
 
 ---
 
-### `[ ]` R2-FG-7 (H) — `handlePlay` SUCCESS emits F16 anchor
+### `[x]` R2-FG-7 (H) — `handlePlay` SUCCESS emits F16 anchor
 **Closes:** R-05 + G-03 (P1) + P6 follow-up.
 
 **Bug:** Verifier path writes `recordControlEvent('play_uncertain_success_pending_triage')` before escalating + resolving (F16). Force-release `handlePlay` SUCCESS only stamps `successTriagedAt` locally — no on-chain anchor. The handler comment even says "F16 in Phase 4 will add the matching HCS-20 manual-triage anchor" — never added. Topic-only auditor sees the user's pre-play balance with operator wallet short.
@@ -188,7 +188,7 @@ while `src/auth/redis.ts:428` in-memory eval predicate is `script.includes('get'
 
 ---
 
-### `[ ]` R2-FG-8 (M) — Audit-orphan rows include `phase` field
+### `[x]` R2-FG-8 (M) — Audit-orphan rows include `phase` field
 **Closes:** R-07 + G-05 (P2).
 
 **Bug:** `handleWithdrawal` / `handleOperatorFee` audit-orphan rows omit
@@ -201,7 +201,7 @@ the `phase` field that the F14 path sets (`debit_failed_after_stamp`,
 
 ---
 
-### `[ ]` R2-FG-9 (M) — Force-release re-reads entry post-lock
+### `[x]` R2-FG-9 (M) — Force-release re-reads entry post-lock
 **Closes:** B-11.
 
 **Bug:** Route reads `entry` at line 200, acquires lock at line 247.
@@ -215,7 +215,7 @@ on stale snapshot.
 
 ---
 
-### `[ ]` R2-FG-10 (M) — `handleRefund` validates `agentAccountId` upfront
+### `[x]` R2-FG-10 (M) — `handleRefund` validates `agentAccountId` upfront
 **Closes:** B-12 + R-15.
 
 **Bug:** SUCCESS path silently skips audit if `details.agentAccountId`
@@ -230,7 +230,7 @@ meaningless audit.
 
 ---
 
-### `[ ]` R2-FG-11 (M) — F12 SUCCESS detects prior `failed:` claim
+### `[x]` R2-FG-11 (M) — F12 SUCCESS detects prior `failed:` claim
 **Closes:** X-12 + B-17.
 
 **Bug:** Force-release SUCCESS overwrites the verifier's `failed:<txId>`
