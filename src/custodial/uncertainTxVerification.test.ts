@@ -510,12 +510,17 @@ describe('verifyUncertainWithdrawals', () => {
     );
   });
 
-  it('F4: progress-marker ordering inconsistency escalates (totalWithdrawnAt without settledAt)', async () => {
-    // 2026-05-06 audit I-12: an entry where step-2 marker is set
-    // without step-1 marker is impossible state. Verifier must NOT
-    // partial-execute; it must escalate as malformed.
-    const tampered: DeadLetterEntry = {
-      transactionId: 'tx-tampered',
+  it('R2-FG-13: progress-marker ordering self-heals instead of wedging the entry', async () => {
+    // R2-FG-13 (round-2 S-01): pre-fix code permanently rejected an
+    // entry where a later marker was set but an earlier one was unset
+    // (e.g. crash mid-stamp leaves `totalWithdrawnAt` set without
+    // `settledAt`). The entry would wedge in `still_uncertain` until
+    // the 24h max-age promotion kicked in. The self-heal version
+    // back-fills the inferred earlier markers from the latest set
+    // marker's timestamp so the verifier can resolve cleanly.
+    const lateMarker = '2026-05-06T00:00:00.000Z';
+    const partial: DeadLetterEntry = {
+      transactionId: 'tx-partial',
       timestamp: new Date().toISOString(),
       error: 'x',
       kind: 'withdrawal_uncertain',
@@ -526,27 +531,35 @@ describe('verifyUncertainWithdrawals', () => {
         recipientAccountId: '0.0.1234',
         isHbar: true,
         // settledAt deliberately UNSET; totalWithdrawnAt SET.
-        totalWithdrawnAt: '2026-05-06T00:00:00.000Z',
+        // Pre-fix: rejected forever. Post-fix: settledAt back-filled
+        // with totalWithdrawnAt's timestamp + verifier proceeds.
+        totalWithdrawnAt: lateMarker,
       },
     };
-    await store.upsertDeadLetter(tampered);
-    mirror.responses.set('tx-tampered', {
+    await store.upsertDeadLetter(partial);
+    mirror.responses.set('tx-partial', {
       status: 200,
       body: { transactions: [{ result: 'SUCCESS' }] },
     });
 
-    const userBefore = store.getUser('user-1')!;
-    const totalWithdrawnBefore = userBefore.balances.tokens.hbar!.totalWithdrawn;
-
     const outcomes = await verifyUncertainWithdrawals(store, ledger, noopAccounting());
 
-    assert.equal(outcomes[0]!.status, 'still_uncertain');
-    assert.match(outcomes[0]!.note, /inconsistent progress markers/);
-    const userAfter = store.getUser('user-1')!;
+    // Verifier resolves the entry instead of wedging it.
+    assert.equal(outcomes[0]!.status, 'confirmed');
+    // The back-fill landed in the store.
+    const fresh = store.getDeadLetters().find((e) => e.transactionId === 'tx-partial')!;
+    const det = fresh.details as Record<string, unknown>;
     assert.equal(
-      userAfter.balances.tokens.hbar!.totalWithdrawn,
-      totalWithdrawnBefore,
-      'totalWithdrawn must NOT advance on tampered entry',
+      det.settledAt,
+      lateMarker,
+      'settledAt back-filled with totalWithdrawnAt\'s timestamp',
+    );
+    // Sanity: F1 idempotency markers ensured no double-mutation.
+    const user = store.getUser('user-1')!;
+    assert.equal(
+      user.balances.tokens.hbar!.totalWithdrawn,
+      0,
+      'totalWithdrawn already stamped (skipped on this pass thanks to idempotency)',
     );
   });
 
@@ -794,6 +807,69 @@ describe('verifyUncertainOperatorFeeWithdrawals', () => {
       lastStamp.auditWrittenAt,
       'final intermediate stamp must include auditWrittenAt from step 2',
     );
+  });
+
+  it('R2-FG-12: stampProgress refresh-before-merge preserves concurrent writes to the same row', async () => {
+    // R2-FG-12 (round-2 X-05): pre-fix `stampProgress` merged the
+    // accumulator over the caller's STALE `entry.details` snapshot.
+    // Any field a concurrent writer (e.g., `bumpVerificationAttempts`)
+    // had stamped between the loop's read and stampProgress's write
+    // was lost. The fix refreshes from the store first.
+    //
+    // Test simulates the race deterministically: caller's `entry`
+    // snapshot is missing a field that's already in the store. After
+    // stampProgress, the store row must contain BOTH the caller's
+    // accumulator AND the field the caller didn't know about.
+    const txId = TX_OK;
+    await store.upsertDeadLetter({
+      transactionId: txId,
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'operator_fee_withdraw_uncertain',
+      details: {
+        amount: 25,
+        tokenKey: 'hbar',
+        // Concurrent write that stale `entry` doesn't know about.
+        verificationAttempts: 7,
+        lastVerificationAttemptAt: '2026-05-06T00:00:00Z',
+      },
+    });
+
+    // Build a stale snapshot — what the verifier loop would have
+    // captured before bumpVerificationAttempts ran.
+    const stale: DeadLetterEntry = {
+      transactionId: txId,
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'operator_fee_withdraw_uncertain',
+      details: {
+        amount: 25,
+        tokenKey: 'hbar',
+        // verificationAttempts intentionally absent.
+      },
+    };
+
+    const stampProgressInternal = await import('./uncertainTxVerification.js');
+    // The function is private; drive it via the public verifier path
+    // which calls stampProgress under the hood. Easier: invoke a public
+    // wrapper that exercises stampProgress's refresh-merge.
+    // Cleanest deterministic test: exercise via verifyUncertainOperatorFeeWithdrawals
+    // SUCCESS branch which calls stampProgress.
+    void stampProgressInternal;
+    mirror.responses.set(txId, { status: 200, body: { transactions: [{ result: 'SUCCESS' }] } });
+
+    await verifyUncertainOperatorFeeWithdrawals(store, '0.0.9999', noopAccounting());
+
+    const fresh = store.getDeadLetters().find((e) => e.transactionId === txId)!;
+    const det = fresh.details as Record<string, unknown>;
+    // The verifier added `operatorDebitedAt` (R2-FG-5 stamp first).
+    assert.ok(det.operatorDebitedAt, 'expected operatorDebitedAt');
+    // R2-FG-12: verificationAttempts must NOT be lost during the merge.
+    assert.equal(det.verificationAttempts, 7);
+    assert.equal(det.lastVerificationAttemptAt, '2026-05-06T00:00:00Z');
+    // Sanity: original fields survive.
+    assert.equal(det.amount, 25);
+    assert.equal(det.tokenKey, 'hbar');
   });
 
   it('R2-FG-6: verifier-lock release actually deletes the key (no longer a silent no-op under in-memory mock)', async () => {

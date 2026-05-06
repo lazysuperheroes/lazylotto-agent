@@ -623,6 +623,40 @@ describe('hcs20-reader: v1 token attribution', () => {
     }
   });
 
+  it('R2-FG-18: detects agentSeq duplicates as critical (Set→Map<seq,sessionIds>)', async () => {
+    // R2-FG-18 (round-2 S-08 / TR-09): pre-fix reader used a
+    // Set<number> for seen agentSeqs — two messages with the same
+    // agentSeq from the same agent silently collapsed and the
+    // duplicate went undetected. The fix tracks `Map<seq, sessions[]>`
+    // so duplicates surface as `agentSeqDuplicates` for the verifier
+    // to flag as critical.
+    const sessionA = 'session-aaaa';
+    const sessionB = 'session-bbbb';
+    const messages: RawTopicMessage[] = [
+      open(10, sessionA, 1),
+      pool(11, sessionA, 1, 0, 5, 0, [], T0),
+      // Session A close — uses agentSeq=12.
+      await close(12, sessionA, 1, [{ poolId: 1, spent: 5, spentToken: 'HBAR', wins: 0, prizes: [] }], 0),
+      // Session B opens at agentSeq=12 — DUPLICATE with session A's close.
+      // Same agent (AGENT). Pre-fix: silently collapsed; post-fix: surfaces.
+      open(13, sessionB, 1),
+    ];
+    // Re-stamp session B's open with agentSeq=12 by mutating the payload.
+    (messages[3]!.payload as { agentSeq: number }).agentSeq = 12;
+
+    const result = await parseAuditTopic(messages, NOW);
+
+    assert.ok(
+      result.stats.agentSeqDuplicates.length >= 1,
+      `expected at least one duplicate, got ${result.stats.agentSeqDuplicates.length}`,
+    );
+    const dup = result.stats.agentSeqDuplicates.find((d) => d.seq === 12);
+    assert.ok(dup, 'expected dup at seq=12');
+    assert.equal(dup!.agent, AGENT);
+    assert.ok(dup!.sessions.includes(sessionA), 'expected sessionA in collision');
+    assert.ok(dup!.sessions.includes(sessionB), 'expected sessionB in collision');
+  });
+
   it('operator withdrawal burn respects explicit token field', async () => {
     const messages: RawTopicMessage[] = [
       {

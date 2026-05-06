@@ -213,6 +213,19 @@ export interface AuditReaderResult {
     sessionsByStatus: Record<SessionStatus, number>;
     /** agentSeq gaps detected. Each entry is `[agent, gap_after_seq]`. */
     agentSeqGaps: { agent: string; afterSeq: number }[];
+    /**
+     * R2-FG-18 (round-2 S-08 / TR-09): agentSeq DUPLICATES detected.
+     * Each entry lists the agent, the colliding seq, and the session
+     * ids that claimed it. Two messages with the same `agentSeq` from
+     * the same agent indicate either:
+     *   (a) seed mis-set (e.g. mirror lag → SETNX seeded with a value
+     *       that overlapped existing on-chain history), or
+     *   (b) a compromised submitter forged a duplicate to mask a real
+     *       session.
+     * Either way, downstream balance reconstruction is suspect — the
+     * verifier surfaces this as a critical alert.
+     */
+    agentSeqDuplicates: { agent: string; seq: number; sessions: string[] }[];
   };
 }
 
@@ -264,7 +277,11 @@ export async function parseAuditTopic(
   // messages to keep size under 1024 bytes; this two-phase
   // approach restores gap-detection without paying the size cost
   // on every pool/close message.
-  const seenAgentSeqByAgent = new Map<string, Set<number>>();
+  // R2-FG-18: agent → seq → list of session ids that claimed that
+  // seq. A `Set<number>` would silently collapse duplicates; the
+  // bug it hides (two sessions claiming the same seq) is exactly
+  // the pathological case we need to surface.
+  const seenAgentSeqByAgent = new Map<string, Map<number, string[]>>();
   const stats: AuditReaderResult['stats'] = {
     totalMessages: messages.length,
     v1Messages: 0,
@@ -279,6 +296,7 @@ export async function parseAuditTopic(
       corrupt: 0,
     },
     agentSeqGaps: [],
+    agentSeqDuplicates: [],
   };
 
   for (const msg of messages) {
@@ -511,20 +529,29 @@ export async function parseAuditTopic(
     // bucket so the gaps still surface even for orphaned sessions.
     const agent = bucket.open?.agent ?? '__unknown_agent__';
     if (!seenAgentSeqByAgent.has(agent)) {
-      seenAgentSeqByAgent.set(agent, new Set());
+      seenAgentSeqByAgent.set(agent, new Map());
     }
-    const set = seenAgentSeqByAgent.get(agent)!;
+    const seqMap = seenAgentSeqByAgent.get(agent)!;
     for (const seq of bucket.sessionAgentSeqs) {
-      set.add(seq);
+      const sessions = seqMap.get(seq) ?? [];
+      sessions.push(session.sessionId);
+      seqMap.set(seq, sessions);
     }
   }
 
-  // Phase 3: detect agentSeq gaps. For each agent, sort the seen
-  // values and check for gaps. Each gap is reported as the seq
-  // value that was followed by a missing successor.
-  for (const [agent, seqSet] of seenAgentSeqByAgent) {
+  // Phase 3: detect agentSeq gaps + R2-FG-18 duplicates. For each
+  // agent, sort the seen values, check for gaps, and flag any seq
+  // claimed by >1 session.
+  for (const [agent, seqMap] of seenAgentSeqByAgent) {
     if (agent === '__unknown_agent__') continue;
-    const seqs = Array.from(seqSet).sort((a, b) => a - b);
+    const seqs = Array.from(seqMap.keys()).sort((a, b) => a - b);
+    // Duplicates first (independent of gap detection).
+    for (const seq of seqs) {
+      const sessions = seqMap.get(seq)!;
+      if (sessions.length > 1) {
+        stats.agentSeqDuplicates.push({ agent, seq, sessions });
+      }
+    }
     if (seqs.length < 2) continue;
     for (let i = 1; i < seqs.length; i++) {
       const prev = seqs[i - 1]!;

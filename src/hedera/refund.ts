@@ -1217,7 +1217,8 @@ export async function verifyUncertainRefunds(
         // entry (which has the same refundTxId as transactionId).
         try {
           await store.upsertDeadLetter({
-            transactionId: `audit-orphan:${refundTxId}`,
+            // R2-FG-17: salt by writer phase.
+            transactionId: `audit-orphan:refund-verifier:${refundTxId}`,
             timestamp: new Date().toISOString(),
             error: `refund verifier audit write failed: ${e instanceof Error ? e.message : String(e)}`,
             kind: 'audit_trail_orphaned',
@@ -1226,6 +1227,7 @@ export async function verifyUncertainRefunds(
               sourceTxId: refundTxId,
               originalTxId: details.originalTxId,
               humanAmount: details.humanAmount,
+              phase: 'audit_failed',
             },
           });
         } catch {

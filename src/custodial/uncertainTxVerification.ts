@@ -134,25 +134,49 @@ function isValidTokenReservation(
 /**
  * F4 (2026-05-06 audit I-12): a verifier must NOT partial-execute
  * when progress markers indicate impossible state (e.g.
- * `totalWithdrawnAt` set without `settledAt`). Such an entry has
- * been hand-tampered, hit a previously-buggy verifier version, or
- * a write reordered. Returns `null` if markers are coherent;
- * otherwise returns a reason string to escalate.
+ * `totalWithdrawnAt` set without `settledAt`).
+ *
+ * R2-FG-13 (round-2 S-01): self-heal instead of permanently
+ * rejecting. A crash mid-flight that landed only the LATER stamp
+ * (because the earlier stampProgress call landed in Redis but the
+ * intermediate one didn't, or because the in-memory details snapshot
+ * dropped a field) wedges the entry forever — `still_uncertain` for
+ * 24h, then escalates. Inferring "if a later marker is set, the
+ * earlier step must have run too" is safe because dead-letter
+ * `details` is only writable by trusted verifier / force-release
+ * paths; tampering is not the realistic threat model.
+ *
+ * Returns a back-fill record mapping unset earlier markers → the
+ * timestamp of the latest set marker. Callers stamp the back-fill
+ * via `stampProgress` so subsequent passes see coherent state.
+ * Empty record = nothing to back-fill.
  */
 function validateProgressOrdering(
   entry: DeadLetterEntry,
   order: string[],
-): string | null {
+): Record<string, string> {
   const details = (entry.details ?? {}) as Record<string, unknown>;
-  let sawUnset = false;
-  for (const marker of order) {
-    const set = typeof details[marker] === 'string';
-    if (set && sawUnset) {
-      return `inconsistent progress markers: ${marker} set without prior step`;
+  const backfill: Record<string, string> = {};
+  // Find the latest set marker.
+  let latestSetIdx = -1;
+  let latestSetTs: string | null = null;
+  for (let i = order.length - 1; i >= 0; i--) {
+    const v = details[order[i]!];
+    if (typeof v === 'string' && v.length > 0) {
+      latestSetIdx = i;
+      latestSetTs = v;
+      break;
     }
-    if (!set) sawUnset = true;
   }
-  return null;
+  if (latestSetIdx < 0 || latestSetTs === null) return backfill;
+  // Back-fill any unset earlier markers with the latest set timestamp.
+  for (let i = 0; i < latestSetIdx; i++) {
+    const m = order[i]!;
+    if (typeof details[m] !== 'string') {
+      backfill[m] = latestSetTs;
+    }
+  }
+  return backfill;
 }
 
 /**
@@ -394,6 +418,88 @@ async function bumpVerificationAttempts(
 }
 
 /**
+ * R2-FG-14 (round-2 B-01 / S-07 / R-03 partial): bump a per-entry
+ * counter for "verifier deferred this pass because the user lock was
+ * held". Sustained contention (legit long play, or a user spamming
+ * plays) wedges the verifier indefinitely — telemetry-only "still
+ * uncertain" looks identical to mirror-flake from the operator's
+ * point of view. Page after `MAX_USER_LOCK_CONTENTION_BEFORE_PAGE`
+ * consecutive defers so an operator gets a real escalation instead
+ * of silent stuckness.
+ *
+ * Counter is stored in Redis (cross-Lambda atomic) plus mirrored
+ * into the DL row's `userLockContentionAttempts` for operator
+ * visibility. The escalation hook is idempotent so multiple Lambdas
+ * crossing the threshold simultaneously don't multi-page.
+ */
+const MAX_USER_LOCK_CONTENTION_BEFORE_PAGE = 6;
+
+async function bumpUserLockContentionAttempts(
+  store: IStore,
+  entry: DeadLetterEntry,
+): Promise<void> {
+  let next: number;
+  try {
+    const redis = await getRedis();
+    const counterKey = `${KEY_PREFIX.verifying}${entry.transactionId}:user-lock-contention`;
+    next = await redis.incr(counterKey);
+    if (next === 1) {
+      try {
+        await redis.expire(counterKey, 7 * 24 * 60 * 60);
+      } catch {
+        /* TTL hygiene */
+      }
+    }
+  } catch (e) {
+    const prior =
+      (entry.details?.userLockContentionAttempts as number | undefined) ?? 0;
+    next = prior + 1;
+    logger.warn('bumpUserLockContentionAttempts INCR failed; using local fallback', {
+      component: 'UncertainTx',
+      txId: entry.transactionId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+  try {
+    await store.upsertDeadLetter({
+      ...entry,
+      details: {
+        ...(entry.details ?? {}),
+        userLockContentionAttempts: next,
+      },
+    });
+  } catch {
+    /* visible in next stamp */
+  }
+  if (next >= MAX_USER_LOCK_CONTENTION_BEFORE_PAGE) {
+    logger.error(
+      `verifier deferred for ${MAX_USER_LOCK_CONTENTION_BEFORE_PAGE}+ consecutive passes ` +
+        `due to per-user lock contention — operator triage required`,
+      {
+        component: 'UncertainTx',
+        event: 'user_lock_contention_threshold_reached',
+        kind: entry.kind,
+        txId: entry.transactionId,
+        userId: entry.details?.userId,
+        attempts: next,
+      },
+    );
+    await escalateUncertainDlFailure({
+      kind: (entry.kind ?? 'withdrawal_uncertain') as
+        | 'withdrawal_uncertain'
+        | 'operator_fee_withdraw_uncertain'
+        | 'play_uncertain'
+        | 'refund_uncertain',
+      uncertainTxId: entry.transactionId,
+      userId: entry.details?.userId as string | undefined,
+      cause: new Error(
+        `Verifier deferred ${next} consecutive passes — per-user lock held by long-running in-band op or runaway play loop`,
+      ),
+    });
+  }
+}
+
+/**
  * Write an `audit_trail_orphaned` dead-letter when a verifier's
  * audit-write fails. Mirrors the in-band path's failure handling —
  * audit asymmetry was finding M16.
@@ -406,12 +512,14 @@ async function recordAuditOrphan(
   cause: unknown,
 ): Promise<void> {
   try {
-    // Synthetic id so this row coexists with the original (which the
-    // verifier resolves at the same `transactionId`). Without the
-    // suffix, upsertDeadLetter dedups them and the orphan vanishes
-    // when the verifier writes the resolve marker.
+    // R2-FG-17 (round-2 S-02): salt the synthetic id by writer phase
+    // (`verifier:`) so multiple audit-orphan writes for the same
+    // source tx (verifier + force-release + creditDeposit) don't
+    // collide. `upsertDeadLetter` is REPLACE — without the salt, a
+    // later force-release orphan would obliterate the verifier's
+    // earlier orphan history.
     await store.upsertDeadLetter({
-      transactionId: `audit-orphan:${sourceTxId}`,
+      transactionId: `audit-orphan:verifier:${sourceTxId}`,
       timestamp: new Date().toISOString(),
       error: `verifier audit write failed: ${cause instanceof Error ? cause.message : String(cause)}`,
       kind: 'audit_trail_orphaned',
@@ -478,9 +586,28 @@ async function stampProgress(
   progress: Record<string, unknown>,
 ): Promise<void> {
   try {
+    // R2-FG-12 (round-2 X-05): refresh-before-merge. The `entry.details`
+    // we receive is a snapshot from the verifier's loop entry. A
+    // concurrent writer (e.g., F4's `bumpVerificationAttempts`) writes
+    // to the SAME row; their fields are silently lost on the next stamp
+    // when we merge over the stale snapshot. Re-read the latest entry
+    // (best-effort — if `getDeadLetters` fails we fall back to the
+    // caller's snapshot rather than skipping the stamp entirely).
+    let baseDetails: Record<string, unknown> = entry.details ?? {};
+    try {
+      await store.refreshDeadLetters();
+      const fresh = store
+        .getDeadLetters()
+        .find((e) => e.transactionId === entry.transactionId);
+      if (fresh) {
+        baseDetails = (fresh.details ?? {}) as Record<string, unknown>;
+      }
+    } catch {
+      /* fall back to the caller-supplied snapshot */
+    }
     await store.upsertDeadLetter({
       ...entry,
-      details: { ...(entry.details ?? {}), ...progress },
+      details: { ...baseDetails, ...progress },
     });
   } catch (e) {
     logger.warn('uncertain dead-letter progress stamp failed', {
@@ -503,6 +630,18 @@ async function stampProgress(
  */
 const tryAcquireUserLockForVerify = tryAcquireUserLockWithBackoff;
 
+/**
+ * R2-FG-15 (round-2 R-03): namespace decision recorded here so future
+ * refactors don't re-litigate it. The verifier intentionally shares
+ * `lockUser:<userId>` with `processRefund` and in-band withdraw —
+ * separate keys would let an in-band withdraw and a verifier mutation
+ * proceed concurrently, which is exactly the race R2-FG-1 closes.
+ * Sustained contention (legit long play, runaway client) is observed
+ * via R2-FG-14's `bumpUserLockContentionAttempts` counter rather than
+ * by giving the verifier a different lock; visibility, not correctness,
+ * was the gap.
+ */
+
 // ── verifyUncertainWithdrawals ────────────────────────────────────
 
 export async function verifyUncertainWithdrawals(
@@ -518,7 +657,7 @@ export async function verifyUncertainWithdrawals(
     .filter((e) => e.kind === 'withdrawal_uncertain' && !e.resolvedAt);
   if (open.length === 0) return outcomes;
 
-  for (const entry of open) {
+  for (let entry of open) {
     const withdrawTxId = entry.transactionId;
     const details = (entry.details ?? {}) as {
       userId?: string;
@@ -545,25 +684,25 @@ export async function verifyUncertainWithdrawals(
       continue;
     }
 
-    // F4: progress markers must be in order. An entry with
-    // totalWithdrawnAt set without settledAt has been hand-tampered
-    // or hit a previously-buggy verifier; partial-execute would
-    // double-mutate or leak. Escalate as malformed.
-    const orderingErr = validateProgressOrdering(entry, [
+    // F4 + R2-FG-13 (round-2 S-01): progress-marker ordering. The
+    // pre-fix path escalated permanently when a later marker was
+    // set without an earlier one (Lambda crash mid-stamp). The
+    // self-heal version back-fills the inferred timestamps so the
+    // entry can resolve on the next pass instead of wedging.
+    const orderingBackfill = validateProgressOrdering(entry, [
       'settledAt',
       'totalWithdrawnAt',
       'historyWrittenAt',
       'auditWrittenAt',
     ]);
-    if (orderingErr) {
-      await bumpVerificationAttempts(store, entry);
-      outcomes.push({
-        withdrawTxId,
-        userId,
-        status: 'still_uncertain',
-        note: `Dead-letter ${orderingErr}. Manual triage required.`,
-      });
-      continue;
+    if (Object.keys(orderingBackfill).length > 0) {
+      await stampProgress(store, entry, orderingBackfill);
+      // Refresh `entry.details` so downstream gates see the back-filled
+      // markers without re-fetching.
+      entry = {
+        ...entry,
+        details: { ...(entry.details ?? {}), ...orderingBackfill },
+      };
     }
 
     // C4: per-txId lock. Skip if another reconcile is processing.
@@ -612,6 +751,9 @@ export async function verifyUncertainWithdrawals(
       // F23: serialize per-user mutation against active withdraw/play.
       const userToken = await tryAcquireUserLockForVerify(details.userId);
       if (!userToken) {
+        // R2-FG-14: bump counter + page after threshold so sustained
+        // contention escalates instead of silently looping.
+        await bumpUserLockContentionAttempts(store, entry);
         await releaseVerifyLock(withdrawTxId, lockFence);
         outcomes.push({
           withdrawTxId,
@@ -692,6 +834,8 @@ export async function verifyUncertainWithdrawals(
     ) {
       userMutateToken = await tryAcquireUserLockForVerify(details.userId);
       if (!userMutateToken) {
+        // R2-FG-14: bump counter + escalate at threshold.
+        await bumpUserLockContentionAttempts(store, entry);
         await releaseVerifyLock(withdrawTxId, lockFence);
         outcomes.push({
           withdrawTxId,
@@ -845,7 +989,7 @@ export async function verifyUncertainOperatorFeeWithdrawals(
     .filter((e) => e.kind === 'operator_fee_withdraw_uncertain' && !e.resolvedAt);
   if (open.length === 0) return outcomes;
 
-  for (const entry of open) {
+  for (let entry of open) {
     const withdrawTxId = entry.transactionId;
     const details = (entry.details ?? {}) as {
       withdrawTxId?: string;
@@ -868,19 +1012,19 @@ export async function verifyUncertainOperatorFeeWithdrawals(
       continue;
     }
 
-    // F4: progress-marker ordering invariant.
-    const orderingErr = validateProgressOrdering(entry, [
+    // F4 + R2-FG-13: self-heal progress-marker ordering for the
+    // operator-fee verifier. Same shape as the withdrawal-verifier
+    // path above.
+    const orderingBackfill = validateProgressOrdering(entry, [
       'operatorDebitedAt',
       'auditWrittenAt',
     ]);
-    if (orderingErr) {
-      await bumpVerificationAttempts(store, entry);
-      outcomes.push({
-        withdrawTxId,
-        status: 'still_uncertain',
-        note: `Dead-letter ${orderingErr}. Manual triage required.`,
-      });
-      continue;
+    if (Object.keys(orderingBackfill).length > 0) {
+      await stampProgress(store, entry, orderingBackfill);
+      entry = {
+        ...entry,
+        details: { ...(entry.details ?? {}), ...orderingBackfill },
+      };
     }
 
     const opLockFence = await acquireVerifyLock(withdrawTxId);
@@ -929,6 +1073,23 @@ export async function verifyUncertainOperatorFeeWithdrawals(
       await markResolved(store, entry, withdrawTxId);
       // F26: release lock after resolve.
       await releaseVerifyLock(withdrawTxId, opLockFence);
+      // R2-FG-16: also release the F24 pending claim on FAILED so
+      // the operator can retry that token immediately.
+      try {
+        const redis = await getRedis();
+        const pendingKey = `${KEY_PREFIX.lockOperator}withdraw-pending:${details.tokenKey}`;
+        await redis.del(pendingKey);
+      } catch (e) {
+        logger.warn(
+          'operator_fee_withdraw_uncertain F24 pending-claim release failed (FAILED branch)',
+          {
+            component: 'UncertainTx',
+            withdrawTxId,
+            tokenKey: details.tokenKey,
+            error: e instanceof Error ? e.message : String(e),
+          },
+        );
+      }
       outcomes.push({
         withdrawTxId,
         status: 'failed',
@@ -1045,6 +1206,27 @@ export async function verifyUncertainOperatorFeeWithdrawals(
     await markResolved(store, entry, withdrawTxId, operatorProgress);
     // F26: release lock after successful resolve.
     await releaseVerifyLock(withdrawTxId, opLockFence);
+    // R2-FG-16 (round-2 S-05 / R-14): release the F24 per-token
+    // pending claim now that we've resolved this withdrawal. Without
+    // this, the operator can't retry that token's fee withdrawal for
+    // up to 30 minutes after the verifier already finished — the
+    // claim TTLs out instead. The claim key shape mirrors
+    // `MultiUserAgent.withdrawOperatorFeesForToken` (F24).
+    try {
+      const redis = await getRedis();
+      const pendingKey = `${KEY_PREFIX.lockOperator}withdraw-pending:${details.tokenKey}`;
+      await redis.del(pendingKey);
+    } catch (e) {
+      logger.warn(
+        'operator_fee_withdraw_uncertain F24 pending-claim release failed',
+        {
+          component: 'UncertainTx',
+          withdrawTxId,
+          tokenKey: details.tokenKey,
+          error: e instanceof Error ? e.message : String(e),
+        },
+      );
+    }
 
     outcomes.push({
       withdrawTxId,
@@ -1082,7 +1264,7 @@ export async function verifyUncertainPlays(
     .filter((e) => e.kind === 'play_uncertain' && !e.resolvedAt);
   if (open.length === 0) return outcomes;
 
-  for (const entry of open) {
+  for (let entry of open) {
     const uncertainTxId = entry.transactionId;
     const details = (entry.details ?? {}) as {
       userId?: string;
@@ -1150,6 +1332,8 @@ export async function verifyUncertainPlays(
       // in-band withdraw / play / refund.
       const playUserToken = await tryAcquireUserLockForVerify(details.userId);
       if (!playUserToken) {
+        // R2-FG-14: bump counter + escalate at threshold.
+        await bumpUserLockContentionAttempts(store, entry);
         await releaseVerifyLock(uncertainTxId, playLockFence);
         outcomes.push({
           uncertainTxId,
@@ -1235,7 +1419,11 @@ export async function verifyUncertainPlays(
         });
         try {
           await store.upsertDeadLetter({
-            transactionId: `audit-orphan:${uncertainTxId}`,
+            // R2-FG-17: salt by writer phase (`verifier:`) — same source
+            // tx may also have a force-release orphan or creditDeposit
+            // orphan; without the salt, REPLACE-semantics in
+            // upsertDeadLetter would clobber the earlier history.
+            transactionId: `audit-orphan:verifier:${uncertainTxId}`,
             timestamp: new Date().toISOString(),
             error: `play_uncertain SUCCESS triage anchor write failed: ${anchorErr instanceof Error ? anchorErr.message : String(anchorErr)}`,
             kind: 'audit_trail_orphaned',

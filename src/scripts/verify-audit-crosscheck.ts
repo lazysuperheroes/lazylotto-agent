@@ -33,6 +33,8 @@ export interface MirrorTxResult {
 }
 
 export type AlertCategory =
+  /** R2-FG-18: reader detected the same agentSeq claimed by multiple sessions. */
+  | 'agent_seq_duplicate'
   | 'phantom_mint'
   | 'phantom_mint_amount_mismatch'
   | 'phantom_mint_wrong_recipient'

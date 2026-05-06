@@ -314,6 +314,12 @@ async function main() {
         console.log(`          ${gap.agent} after seq ${gap.afterSeq}`);
       }
     }
+    if (result.stats.agentSeqDuplicates.length > 0) {
+      console.log(`        ✖ agentSeq DUPLICATES (R2-FG-18):`);
+      for (const dup of result.stats.agentSeqDuplicates) {
+        console.log(`          ${dup.agent} seq=${dup.seq} sessions=${dup.sessions.join(',')}`);
+      }
+    }
     console.log('');
   }
 
@@ -592,6 +598,18 @@ async function main() {
     if (!args.json && txCache.cacheHits > 0) {
       console.log(`        cross-check cache hits: ${txCache.cacheHits}`);
     }
+  }
+
+  // R2-FG-18: surface agentSeq duplicates as critical alerts.
+  for (const dup of result.stats.agentSeqDuplicates) {
+    alerts.push({
+      severity: 'critical',
+      category: 'agent_seq_duplicate',
+      message:
+        `agent=${dup.agent} claimed agentSeq=${dup.seq} for ${dup.sessions.length} sessions: ` +
+        `[${dup.sessions.join(', ')}]. Either the agentSeq was re-seeded with overlap (mirror lag at ` +
+        `seed time) or a forged duplicate masks a real session — balance reconstruction is suspect.`,
+    });
   }
 
   if (preF18BurnCount > 0) {

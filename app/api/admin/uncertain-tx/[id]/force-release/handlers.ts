@@ -39,7 +39,7 @@ import type { DeadLetterEntry, IStore } from '~/custodial/IStore';
 import type { UserLedger } from '~/custodial/UserLedger';
 import type { AccountingService } from '~/custodial/AccountingService';
 import type { MirrorOutcome } from './route';
-import { isRefundClaimKey } from '~/auth/redis';
+import { KEY_PREFIX, isRefundClaimKey } from '~/auth/redis';
 import { HBAR_TOKEN_KEY } from '~/config/strategy';
 import { tryAcquireUserLockWithBackoff, releaseUserLock } from '~/lib/locks';
 
@@ -386,6 +386,20 @@ async function handleOperatorFee(
   }
 
   if (mirrorResult === 'FAILED') {
+    // R2-FG-16: also release the F24 per-token pending claim so the
+    // operator can retry that token immediately after force-release.
+    try {
+      await ctx.redis.del(
+        `${KEY_PREFIX.lockOperator}withdraw-pending:${details.tokenKey}`,
+      );
+    } catch (e) {
+      ctx.log.warn('force-release operator-fee F24 pending-claim release failed', {
+        component: 'AdminForceRelease',
+        uncertainTxId: entry.transactionId,
+        tokenKey: details.tokenKey,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
     return {
       ok: true,
       action: `mirror reports FAILED — operator state untouched (was never debited at submit)`,
@@ -511,6 +525,20 @@ async function handleOperatorFee(
         /* logged above */
       }
     }
+  }
+
+  // R2-FG-16: release the F24 per-token pending claim.
+  try {
+    await ctx.redis.del(
+      `${KEY_PREFIX.lockOperator}withdraw-pending:${details.tokenKey}`,
+    );
+  } catch (e) {
+    ctx.log.warn('force-release operator-fee F24 pending-claim release failed', {
+      component: 'AdminForceRelease',
+      uncertainTxId: entry.transactionId,
+      tokenKey: details.tokenKey,
+      error: e instanceof Error ? e.message : String(e),
+    });
   }
 
   return {

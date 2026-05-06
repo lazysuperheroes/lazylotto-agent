@@ -1343,7 +1343,9 @@ export class MultiUserAgent {
         });
         try {
           await this.store.upsertDeadLetter({
-            transactionId: `audit-orphan:${transactionId}`,
+            // R2-FG-17: salt by writer phase (`in-band`) so orphans
+            // from different layers don't collide.
+            transactionId: `audit-orphan:in-band:${transactionId}`,
             timestamp: new Date().toISOString(),
             error: `in-band withdrawal audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
             kind: 'audit_trail_orphaned',
@@ -1703,7 +1705,8 @@ export class MultiUserAgent {
       });
       try {
         await this.store.upsertDeadLetter({
-          transactionId: `audit-orphan:${transactionId}`,
+          // R2-FG-17: salt by writer phase (`in-band`).
+          transactionId: `audit-orphan:in-band:${transactionId}`,
           timestamp: new Date().toISOString(),
           error: `in-band operator-fee withdraw audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
           kind: 'audit_trail_orphaned',

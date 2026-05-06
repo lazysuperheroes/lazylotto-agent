@@ -244,7 +244,7 @@ claim without warning, destroying the on-chain-failed evidence.
 
 ## Phase R2-3 — High (concurrency / state; 7 items)
 
-### `[ ]` R2-FG-12 (H) — `stampProgress` refresh-before-merge
+### `[x]` R2-FG-12 (H) — `stampProgress` refresh-before-merge
 **Closes:** X-05.
 
 **Bug:** F1 stamp reads stale `entry.details` (snapshot from loop entry).
@@ -257,7 +257,7 @@ SAME row; their fields are silently overwritten on the next stamp.
 
 ---
 
-### `[ ]` R2-FG-13 (H) — `validateProgressOrdering` self-heals
+### `[x]` R2-FG-13 (H) — `validateProgressOrdering` self-heals
 **Closes:** S-01.
 
 **Bug:** A crash mid-flight where intermediate stamp failed (e.g.
@@ -270,7 +270,7 @@ rejected by `validateProgressOrdering`. Entry wedges; no auto-recovery.
 
 ---
 
-### `[ ]` R2-FG-14 (H) — F23 user-lock contention escalation
+### `[x]` R2-FG-14 (H) — F23 user-lock contention escalation
 **Closes:** B-01 + S-07 + R-03 partial.
 
 **Bug:** Sustained user-lock contention (legit long play, or user
@@ -284,7 +284,7 @@ a paged escalation.
 
 ---
 
-### `[ ]` R2-FG-15 (M) — Verifier user-lock uses different key prefix
+### `[x]` R2-FG-15 (M) — Verifier user-lock uses different key prefix
 **Closes:** R-03.
 
 **Bug:** F23 uses the same `lockUser:<userId>` key as `processRefund`
@@ -300,7 +300,7 @@ namespace so contention is observable.
 
 ---
 
-### `[ ]` R2-FG-16 (M) — F24 per-token claim released by verifier
+### `[x]` R2-FG-16 (M) — F24 per-token claim released by verifier
 **Closes:** S-05 + R-14.
 
 **Bug:** Verifier resolves `operator_fee_withdraw_uncertain` but doesn't
@@ -314,7 +314,7 @@ resolved.
 
 ---
 
-### `[ ]` R2-FG-17 (H) — Audit-orphan synthetic-id collision
+### `[x]` R2-FG-17 (H) — Audit-orphan synthetic-id collision
 **Closes:** S-02.
 
 **Bug:** Multiple writers (in-band, verifier, force-release) use the
@@ -331,7 +331,7 @@ so later writes destroy earlier orphan history.
 
 ---
 
-### `[ ]` R2-FG-18 (H) — agentSeq duplicate detection
+### `[x]` R2-FG-18 (H) — agentSeq duplicate detection
 **Closes:** S-08 + TR-09.
 
 **Bug:** Reader uses `Set<number>` for agentSeq — silently collapses
