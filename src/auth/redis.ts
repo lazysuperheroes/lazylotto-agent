@@ -48,6 +48,24 @@ export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
+// ── Refund claim-key prefix guard (F2 / 2026-05-06 audit I-07) ─
+
+/**
+ * Validates that a refund-uncertain dead-letter's `details.claimKey`
+ * is actually a refund claim key (lives under `KEY_PREFIX.refunded`)
+ * before any caller does `redis.del`/`redis.set` against it.
+ *
+ * Without this guard, a hand-edited or migration-corrupted entry
+ * with `claimKey: 'lla:testnet:session:victim'` would let
+ * operator-tier (force-release) or the verifier delete arbitrary
+ * `lla:` keys — sessions, user locks, killswitch flag, agentSeq
+ * counter (rewinding HCS-20 sequence numbers). The verifier and
+ * the force-release route MUST gate every claimKey op behind this.
+ */
+export function isRefundClaimKey(key: unknown): boolean {
+  return typeof key === 'string' && key.startsWith(KEY_PREFIX.refunded);
+}
+
 // ── Redis client ─────────────────────────────────────────────
 
 interface RedisLike {

@@ -35,7 +35,7 @@ has enough detail to start work without re-reading the source reports.
 
 ## Phase 1 — Foundations (5 items, ~unblocks everything else)
 
-### `[ ]` F1 (C) — `stampProgress` accumulator
+### `[x]` F1 (C) — `stampProgress` accumulator
 **Closes:** C-01, SM-02, U-05, partial C-03
 
 **Bug:** every `stampProgress` call rebuilds details from a stale
@@ -59,7 +59,7 @@ accumulator before writing.
 
 ---
 
-### `[ ]` F2 (C) — `claimKey` prefix assert
+### `[x]` F2 (C) — `claimKey` prefix assert
 **Closes:** I-07
 
 **Bug:** force-release `refund_uncertain` branch and verifier both
@@ -82,7 +82,7 @@ assert 400 + the session key still exists.
 
 ---
 
-### `[ ]` F3 (H) — Strict boolean for `acknowledgeDoubleSpendRisk`
+### `[x]` F3 (H) — Strict boolean for `acknowledgeDoubleSpendRisk`
 **Closes:** I-02
 
 **Bug:** check is `!body.acknowledgeDoubleSpendRisk`. String `"false"`
@@ -100,7 +100,7 @@ prevents the truthy-string bypass.
 
 ---
 
-### `[ ]` F4 (H) — Input validation at verifier boundary
+### `[x]` F4 (H) — Input validation at verifier boundary
 **Closes:** I-04, I-05, I-12, SM-08
 
 **Bug:** Several:
@@ -129,7 +129,7 @@ ordering; switch malformed counter to Redis `INCR`.
 
 ---
 
-### `[ ]` F5 (H/M) — External hardening bundle
+### `[x]` F5 (H/M) — External hardening bundle
 **Closes:** I-01, I-03, I-08, I-09, I-10, I-11, I-13, I-14
 
 **Bug:** several minor input/external trust issues:

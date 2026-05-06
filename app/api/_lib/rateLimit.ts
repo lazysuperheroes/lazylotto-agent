@@ -48,6 +48,16 @@ export interface RateLimitOptions {
   limit: number;
   /** Window duration in seconds. */
   windowSec: number;
+  /**
+   * Override the per-request identity. When the route has already
+   * verified an auth tier (via `requireTier`), pass `auth.accountId`
+   * here so the rate-limit budget binds to the operator/user account
+   * rather than the bearer-token prefix. F5 (2026-05-06 audit I-11):
+   * a buggy admin UI that rotates session tokens (or an attacker
+   * issuing fresh tokens) would otherwise reset the counter on each
+   * rotation, blowing past the documented per-account cap.
+   */
+  identity?: string;
 }
 
 /**
@@ -100,8 +110,8 @@ export function identityFor(request: Request): string {
  * Returns true if the request is within the limit, false if exceeded.
  */
 export async function checkRateLimit(options: RateLimitOptions): Promise<boolean> {
-  const { request, action, limit, windowSec } = options;
-  const identity = identityFor(request);
+  const { request, action, limit, windowSec, identity: identityOverride } = options;
+  const identity = identityOverride ?? identityFor(request);
   const redis = await getRedis();
   const key = `${KEY_PREFIX.rateLimit}${action}:${identity}`;
 

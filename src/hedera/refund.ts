@@ -29,7 +29,7 @@ import { withChecksum } from '../utils/checksum.js';
 import type { IStore, DeadLetterEntry } from '../custodial/IStore.js';
 import type { AccountingService } from '../custodial/AccountingService.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
-import { getRedis, KEY_PREFIX } from '../auth/redis.js';
+import { getRedis, KEY_PREFIX, isRefundClaimKey } from '../auth/redis.js';
 import { logger } from '../lib/logger.js';
 import { escalateUncertainDlFailure } from '../lib/escalation.js';
 import { classifyMirrorResult } from './responseCodes.js';
@@ -219,7 +219,8 @@ export async function processRefund(
   try {
     const mirrorUrl = `${getMirrorBaseUrl()}/transactions/${transactionId}`;
 
-    const txRes = await fetch(mirrorUrl);
+    // F5 (2026-05-06 audit I-09): 8s timeout on mirror lookup.
+    const txRes = await fetch(mirrorUrl, { signal: AbortSignal.timeout(8_000) });
     if (!txRes.ok) {
       throw new Error(`Transaction ${transactionId} not found on mirror node`);
     }
@@ -686,7 +687,9 @@ export async function verifyUncertainRefunds(
     let result: 'SUCCESS' | 'FAILED' | 'NOT_FOUND';
     try {
       const url = `${getMirrorBaseUrl()}/transactions/${refundTxId}`;
-      const res = await fetch(url);
+      // F5 (2026-05-06 audit I-09): 8s timeout so a slow mirror
+      // can't wedge the verifier past its per-txId lock TTL.
+      const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
       if (res.status === 404) {
         result = 'NOT_FOUND';
       } else if (!res.ok) {
@@ -738,7 +741,22 @@ export async function verifyUncertainRefunds(
 
     // ── Confirmed FAILED: release claim, mark resolved ───────
     if (result === 'FAILED') {
-      if (details.claimKey) {
+      // F2 (2026-05-06 audit I-07): refuse to DEL keys outside the
+      // refund-claim namespace. A tampered/migrated entry with
+      // `claimKey: 'lla:testnet:session:victim'` would otherwise let
+      // the verifier delete arbitrary lla: keys.
+      if (details.claimKey && !isRefundClaimKey(details.claimKey)) {
+        logger.error(
+          'refund_uncertain claimKey outside KEY_PREFIX.refunded — refusing to release',
+          {
+            component: 'Refund',
+            event: 'malicious_claim_key',
+            refundTxId,
+            originalTxId,
+            claimKeyPrefix: String(details.claimKey).slice(0, 24),
+          },
+        );
+      } else if (details.claimKey) {
         try {
           const redis = await getRedis();
           await redis.del(details.claimKey);
@@ -911,7 +929,8 @@ export async function verifyUncertainRefunds(
 
     // Overwrite the 'pending' claim marker with the real refundTxId
     // for nicer error messages on duplicate-attempt rejection.
-    if (details.claimKey) {
+    // F2: only overwrite keys actually under KEY_PREFIX.refunded.
+    if (details.claimKey && isRefundClaimKey(details.claimKey)) {
       try {
         const redis = await getRedis();
         await redis.set(details.claimKey, refundTxId, {

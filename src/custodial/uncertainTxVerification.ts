@@ -99,6 +99,58 @@ export interface PlayVerificationOutcome {
 // ── Shared helpers ────────────────────────────────────────────────
 
 /**
+ * F4 (2026-05-06 audit I-05): a `details.amount` value must be a
+ * finite, non-negative number before it's allowed into ledger
+ * mutations. Without this check, `Infinity` passes `typeof === 'number'`
+ * → `settleSpend(Infinity)` corrupts the ledger to `NaN` (which
+ * JSON-serializes as `null` and silently breaks every subsequent
+ * balance read), and a negative `-1` triggers an underflow path
+ * downstream. Use this everywhere a verifier reads `details.amount`.
+ */
+function isValidDetailAmount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+/**
+ * F4 (2026-05-06 audit I-04): each `tokenReservations[i]` entry must
+ * be a `{ token: string; amount: number }` before it's iterated.
+ * Without this check, malformed entries like `{ token: 42, amount: '1.5' }`
+ * coerce through `releaseReserve` and corrupt `entry.reserved` to
+ * `NaN`/`null`.
+ */
+function isValidTokenReservation(
+  r: unknown,
+): r is { token: string; amount: number } {
+  if (typeof r !== 'object' || r === null) return false;
+  const obj = r as Record<string, unknown>;
+  return typeof obj.token === 'string' && isValidDetailAmount(obj.amount);
+}
+
+/**
+ * F4 (2026-05-06 audit I-12): a verifier must NOT partial-execute
+ * when progress markers indicate impossible state (e.g.
+ * `totalWithdrawnAt` set without `settledAt`). Such an entry has
+ * been hand-tampered, hit a previously-buggy verifier version, or
+ * a write reordered. Returns `null` if markers are coherent;
+ * otherwise returns a reason string to escalate.
+ */
+function validateProgressOrdering(
+  entry: DeadLetterEntry,
+  order: string[],
+): string | null {
+  const details = (entry.details ?? {}) as Record<string, unknown>;
+  let sawUnset = false;
+  for (const marker of order) {
+    const set = typeof details[marker] === 'string';
+    if (set && sawUnset) {
+      return `inconsistent progress markers: ${marker} set without prior step`;
+    }
+    if (!set) sawUnset = true;
+  }
+  return null;
+}
+
+/**
  * Acquire the per-txId verifier lock. Returns true on success, false
  * if another reconcile pass already holds it.
  */
@@ -122,6 +174,13 @@ async function acquireVerifyLock(txId: string): Promise<boolean> {
 }
 
 /**
+ * Mirror-node fetch timeout. F5 (2026-05-06 audit I-09): without
+ * AbortSignal.timeout, a slow-body mirror response can wedge a
+ * verifier pass past the per-txId verifier-lock TTL.
+ */
+const MIRROR_FETCH_TIMEOUT_MS = 8_000;
+
+/**
  * Look up a tx on the mirror node and classify the result. Returns
  * `null` for a transient/network error (caller should treat as
  * still-uncertain and retry next pass).
@@ -131,7 +190,7 @@ async function lookupMirrorResult(
 ): Promise<{ result: MirrorResult } | { transientError: string }> {
   try {
     const url = `${getMirrorBaseUrl()}/transactions/${txId}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(MIRROR_FETCH_TIMEOUT_MS) });
     if (res.status === 404) return { result: 'NOT_FOUND' };
     if (!res.ok) {
       return { transientError: `Mirror returned ${res.status}; will retry next reconcile.` };
@@ -159,31 +218,76 @@ function applyNotFoundMaxAge(entry: DeadLetterEntry): MirrorResult {
 
 /**
  * Increment `verificationAttempts` on a malformed entry and page if
- * the threshold is hit. Persists the increment via upsertDeadLetter.
+ * the threshold is hit.
+ *
+ * F4 (2026-05-06 audit SM-08): the counter lives in Redis under
+ * `KEY_PREFIX.verifying<txId>:malformed-attempts` via atomic INCR,
+ * not in the dead-letter `details` blob. The old read-then-write
+ * pattern (`prior = details.verificationAttempts ?? 0; next = prior + 1`)
+ * could race between two concurrent reconcile passes — both reading
+ * the same `prior`, both writing the same `next` — silently missing
+ * the page condition `next === MAX_VERIFICATION_ATTEMPTS_BEFORE_PAGE`.
+ * INCR returns the new value atomically so the threshold fires
+ * exactly once across the cluster.
+ *
+ * The counter is also mirrored into `details.verificationAttempts`
+ * for backward compat with any UI that reads from the dead-letter
+ * row directly. Best-effort — a Redis blip on the mirror write is
+ * non-fatal because the INCR is the source of truth for paging.
  */
 async function bumpVerificationAttempts(
   store: IStore,
   entry: DeadLetterEntry,
 ): Promise<void> {
-  const prior = (entry.details?.verificationAttempts as number | undefined) ?? 0;
-  const next = prior + 1;
+  let next: number;
+  try {
+    const redis = await getRedis();
+    const counterKey = `${KEY_PREFIX.verifying}${entry.transactionId}:malformed-attempts`;
+    next = await redis.incr(counterKey);
+    // Set a TTL on first increment so abandoned counters don't
+    // accumulate forever. 7 days is generous — a malformed entry
+    // either gets fixed or escalates well before then.
+    if (next === 1) {
+      try {
+        await redis.expire(counterKey, 7 * 24 * 60 * 60);
+      } catch {
+        /* TTL is hygiene; counter still works without it */
+      }
+    }
+  } catch (e) {
+    // Redis unavailable — fall back to the local-cache counter so
+    // the page can still fire (best-effort, not cluster-atomic).
+    const prior = (entry.details?.verificationAttempts as number | undefined) ?? 0;
+    next = prior + 1;
+    logger.warn('bumpVerificationAttempts INCR failed; using local fallback', {
+      component: 'UncertainTx',
+      txId: entry.transactionId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+  // Mirror the count into the DL row for UI/operator visibility.
   try {
     await store.upsertDeadLetter({
       ...entry,
       details: { ...(entry.details ?? {}), verificationAttempts: next },
     });
   } catch {
-    // Already in a degraded state; logging would be noise.
+    /* logged below if the threshold fires */
   }
-  if (next === MAX_VERIFICATION_ATTEMPTS_BEFORE_PAGE) {
+  if (next >= MAX_VERIFICATION_ATTEMPTS_BEFORE_PAGE) {
+    // F4: the page check fires whenever we cross OR equal the
+    // threshold (was strict equality — a Redis blip that caused
+    // two passes to both observe `next === 5` would miss the page).
+    // Idempotent paging is fine; the escalation hook deduplicates.
     logger.error(
-      `dead-letter entry malformed for ${MAX_VERIFICATION_ATTEMPTS_BEFORE_PAGE} ` +
+      `dead-letter entry malformed for ${MAX_VERIFICATION_ATTEMPTS_BEFORE_PAGE}+ ` +
         `consecutive reconcile passes — manual triage required`,
       {
         component: 'UncertainTx',
         event: 'malformed_dl_threshold_reached',
         kind: entry.kind,
         txId: entry.transactionId,
+        attempts: next,
       },
     );
     await escalateUncertainDlFailure({
@@ -195,7 +299,7 @@ async function bumpVerificationAttempts(
       uncertainTxId: entry.transactionId,
       userId: entry.details?.userId as string | undefined,
       cause: new Error(
-        `Malformed dead-letter persisted across ${MAX_VERIFICATION_ATTEMPTS_BEFORE_PAGE} reconcile passes`,
+        `Malformed dead-letter persisted across ${next} reconcile passes`,
       ),
     });
   }
@@ -262,22 +366,33 @@ async function markResolved(
 }
 
 /**
- * Persist a progress marker mid-flight (between post-condition
- * steps) so a Lambda crash before `markResolved` is still recoverable
- * by the next reconcile pass without duplicating the completed steps.
- * Failures are logged but not surfaced — the worst case is a duplicate
- * post-condition on re-run, which is the very thing this guards
- * against, so we don't want a stamp failure to block subsequent steps.
+ * Persist the running progress accumulator mid-flight (between
+ * post-condition steps) so a Lambda crash before `markResolved` is
+ * recoverable by the next reconcile pass without duplicating the
+ * completed steps.
+ *
+ * F1 (2026-05-06 audit C-01 / SM-02 / U-05): callers MUST pass the
+ * full `progress` accumulator, not a single-key patch. Earlier
+ * versions accepted a per-step patch and merged it into a stale
+ * `entry.details` snapshot — each subsequent stamp overwrote prior
+ * stamps in Redis, so a Lambda crash between steps would lose every
+ * marker except the most recent one and the next pass would
+ * re-execute the already-completed steps (silent double-mutation).
+ *
+ * Failures are still logged-and-swallowed: the next stamp re-asserts
+ * the full accumulator, so a one-off stamp failure self-heals on the
+ * next step. This avoids a transient Redis blip aborting the
+ * remaining post-conditions.
  */
 async function stampProgress(
   store: IStore,
   entry: DeadLetterEntry,
-  patch: Record<string, unknown>,
+  progress: Record<string, unknown>,
 ): Promise<void> {
   try {
     await store.upsertDeadLetter({
       ...entry,
-      details: { ...(entry.details ?? {}), ...patch },
+      details: { ...(entry.details ?? {}), ...progress },
     });
   } catch (e) {
     logger.warn('uncertain dead-letter progress stamp failed', {
@@ -319,7 +434,7 @@ export async function verifyUncertainWithdrawals(
 
     if (
       typeof details.userId !== 'string' ||
-      typeof details.amount !== 'number' ||
+      !isValidDetailAmount(details.amount) ||
       typeof details.tokenKey !== 'string'
     ) {
       await bumpVerificationAttempts(store, entry);
@@ -327,7 +442,28 @@ export async function verifyUncertainWithdrawals(
         withdrawTxId,
         userId,
         status: 'still_uncertain',
-        note: 'Dead-letter entry malformed (missing userId / amount / tokenKey). Manual triage required.',
+        note: 'Dead-letter entry malformed (missing userId / non-finite amount / tokenKey). Manual triage required.',
+      });
+      continue;
+    }
+
+    // F4: progress markers must be in order. An entry with
+    // totalWithdrawnAt set without settledAt has been hand-tampered
+    // or hit a previously-buggy verifier; partial-execute would
+    // double-mutate or leak. Escalate as malformed.
+    const orderingErr = validateProgressOrdering(entry, [
+      'settledAt',
+      'totalWithdrawnAt',
+      'historyWrittenAt',
+      'auditWrittenAt',
+    ]);
+    if (orderingErr) {
+      await bumpVerificationAttempts(store, entry);
+      outcomes.push({
+        withdrawTxId,
+        userId,
+        status: 'still_uncertain',
+        note: `Dead-letter ${orderingErr}. Manual triage required.`,
       });
       continue;
     }
@@ -423,7 +559,7 @@ export async function verifyUncertainWithdrawals(
       try {
         ledger.settleSpend(details.userId, details.amount, details.tokenKey);
         progress.settledAt = new Date().toISOString();
-        await stampProgress(store, entry, { settledAt: progress.settledAt });
+        await stampProgress(store, entry, progress);
       } catch (e) {
         logger.warn('withdrawal_uncertain settleSpend failed', {
           component: 'UncertainTx',
@@ -442,9 +578,7 @@ export async function verifyUncertainWithdrawals(
           return b;
         });
         progress.totalWithdrawnAt = new Date().toISOString();
-        await stampProgress(store, entry, {
-          totalWithdrawnAt: progress.totalWithdrawnAt,
-        });
+        await stampProgress(store, entry, progress);
       } catch (e) {
         logger.warn('withdrawal_uncertain totalWithdrawn update failed', {
           component: 'UncertainTx',
@@ -465,9 +599,7 @@ export async function verifyUncertainWithdrawals(
           timestamp: new Date().toISOString(),
         });
         progress.historyWrittenAt = new Date().toISOString();
-        await stampProgress(store, entry, {
-          historyWrittenAt: progress.historyWrittenAt,
-        });
+        await stampProgress(store, entry, progress);
       } catch (e) {
         logger.warn('withdrawal_uncertain recordWithdrawal failed', {
           component: 'UncertainTx',
@@ -491,9 +623,7 @@ export async function verifyUncertainWithdrawals(
           details.tokenKey,
         );
         progress.auditWrittenAt = new Date().toISOString();
-        await stampProgress(store, entry, {
-          auditWrittenAt: progress.auditWrittenAt,
-        });
+        await stampProgress(store, entry, progress);
       } catch (auditErr) {
         // M16: audit failure → audit_trail_orphaned dead-letter so
         // the operator surfaces it the same way as in-band failures.
@@ -557,14 +687,29 @@ export async function verifyUncertainOperatorFeeWithdrawals(
     };
 
     if (
-      typeof details.amount !== 'number' ||
+      !isValidDetailAmount(details.amount) ||
       typeof details.tokenKey !== 'string'
     ) {
       await bumpVerificationAttempts(store, entry);
       outcomes.push({
         withdrawTxId,
         status: 'still_uncertain',
-        note: 'Dead-letter entry malformed (missing amount / tokenKey). Manual triage required.',
+        note: 'Dead-letter entry malformed (non-finite amount / tokenKey). Manual triage required.',
+      });
+      continue;
+    }
+
+    // F4: progress-marker ordering invariant.
+    const orderingErr = validateProgressOrdering(entry, [
+      'operatorDebitedAt',
+      'auditWrittenAt',
+    ]);
+    if (orderingErr) {
+      await bumpVerificationAttempts(store, entry);
+      outcomes.push({
+        withdrawTxId,
+        status: 'still_uncertain',
+        note: `Dead-letter ${orderingErr}. Manual triage required.`,
       });
       continue;
     }
@@ -645,9 +790,7 @@ export async function verifyUncertainOperatorFeeWithdrawals(
           },
         }));
         operatorProgress.operatorDebitedAt = new Date().toISOString();
-        await stampProgress(store, entry, {
-          operatorDebitedAt: operatorProgress.operatorDebitedAt,
-        });
+        await stampProgress(store, entry, operatorProgress);
       } catch (e) {
         logger.warn('operator_fee_withdraw_uncertain operator state update failed', {
           component: 'UncertainTx',
@@ -665,9 +808,7 @@ export async function verifyUncertainOperatorFeeWithdrawals(
           details.tokenKey,
         );
         operatorProgress.auditWrittenAt = new Date().toISOString();
-        await stampProgress(store, entry, {
-          auditWrittenAt: operatorProgress.auditWrittenAt,
-        });
+        await stampProgress(store, entry, operatorProgress);
       } catch (auditErr) {
         logger.warn(
           'operator_fee_withdraw_uncertain accounting.recordOperatorWithdrawal failed',
@@ -739,14 +880,15 @@ export async function verifyUncertainPlays(
 
     if (
       typeof details.userId !== 'string' ||
-      !Array.isArray(details.tokenReservations)
+      !Array.isArray(details.tokenReservations) ||
+      !details.tokenReservations.every(isValidTokenReservation)
     ) {
       await bumpVerificationAttempts(store, entry);
       outcomes.push({
         uncertainTxId,
         userId,
         status: 'still_uncertain',
-        note: 'Dead-letter entry malformed (missing userId / tokenReservations). Manual triage required.',
+        note: 'Dead-letter entry malformed (missing userId / tokenReservations or invalid entry shape). Manual triage required.',
       });
       continue;
     }

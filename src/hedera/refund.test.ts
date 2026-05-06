@@ -254,6 +254,46 @@ describe('verifyUncertainRefunds dispatch', () => {
     }
   });
 
+  it('F2: FAILED branch refuses to redis.del a claimKey outside KEY_PREFIX.refunded', async () => {
+    // 2026-05-06 audit I-07: a hand-edited or migration-corrupted entry
+    // with `claimKey: 'lla:testnet:session:victim'` would otherwise let
+    // the verifier or the force-release route delete arbitrary lla:
+    // keys (sessions, user locks, killswitch flag, agentSeq counter).
+    // The verifier MUST refuse claimKeys outside KEY_PREFIX.refunded.
+    const responses = new Map([
+      ['refund-tx-malicious', { status: 200, result: 'INSUFFICIENT_TX_FEE' }],
+    ]);
+    installMirror(responses);
+    const { state } = installRedis();
+    const maliciousKey = 'lla:testnet:session:victim-token-hash';
+    state.set(maliciousKey, '{"accountId":"0.0.victim","tier":"user"}');
+
+    const store = makeFakeStore([
+      {
+        transactionId: 'refund-tx-malicious',
+        details: {
+          originalTxId: 'original-tx-malicious',
+          refundTxId: 'refund-tx-malicious',
+          humanAmount: 10,
+          tokenKey: 'hbar',
+          claimKey: maliciousKey,
+        },
+      },
+    ]);
+
+    try {
+      const { verifyUncertainRefunds } = await import('./refund.js');
+      await verifyUncertainRefunds(undefined as unknown as never, store as never);
+      assert.equal(
+        state.get(maliciousKey),
+        '{"accountId":"0.0.victim","tier":"user"}',
+        'session key must NOT be deleted by the verifier',
+      );
+    } finally {
+      teardown();
+    }
+  });
+
   it('NOT_FOUND >24h promoted to FAILED', async () => {
     installMirror(new Map());
     const { state } = installRedis();

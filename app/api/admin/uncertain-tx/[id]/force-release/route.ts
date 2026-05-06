@@ -36,7 +36,7 @@ import { getAgentContext } from '../../../../_lib/mcp';
 import { withStore } from '../../../../_lib/withStore';
 import { checkRateLimit, rateLimitResponse } from '../../../../_lib/rateLimit';
 import { logger } from '~/lib/logger';
-import { getRedis, KEY_PREFIX } from '~/auth/redis';
+import { getRedis, KEY_PREFIX, isRefundClaimKey } from '~/auth/redis';
 import { getMirrorBaseUrl } from '~/hedera/mirror';
 import { classifyMirrorResult } from '~/hedera/responseCodes';
 
@@ -53,6 +53,34 @@ interface MirrorTxLookup {
   transactions?: Array<{ result: string }>;
 }
 
+export type MirrorOutcome = 'SUCCESS' | 'FAILED' | 'NOT_FOUND' | 'transient';
+
+/**
+ * Decides whether a force-release request must refuse with 409 because
+ * the mirror outcome is unsafe to release without an explicit ack.
+ *
+ * F3 (2026-05-06 audit I-02): the ack must be **strictly** `true`. The
+ * old check `!body.acknowledgeDoubleSpendRisk` accepted any truthy
+ * value — including the string `"false"` (which is truthy) — which
+ * meant a buggy admin UI sending form-text values could accidentally
+ * trigger the SUCCESS double-spend override. Reject every non-boolean.
+ *
+ * F12 (Phase 3) drops the flag entirely; this helper exists so the
+ * removal is mechanical (delete every `requiresAckOverride` callsite).
+ */
+export function requiresAckOverride(mirror: MirrorOutcome, ack: unknown): boolean {
+  const acked = ack === true;
+  return (mirror === 'SUCCESS' || mirror === 'transient') && !acked;
+}
+
+/**
+ * Mirror-node fetch timeout. F5 (2026-05-06 audit I-09): without
+ * AbortSignal.timeout, a slow-body mirror response wedges the route
+ * indefinitely (the verifier-lock TTL would expire mid-flight while
+ * we still hold the connection).
+ */
+const MIRROR_FETCH_TIMEOUT_MS = 8_000;
+
 /**
  * Look up the on-chain outcome via the mirror node. Returns the
  * classified result, or `transient` for 5xx/network errors (operator
@@ -60,10 +88,10 @@ interface MirrorTxLookup {
  */
 async function lookupMirrorOutcome(
   txId: string,
-): Promise<'SUCCESS' | 'FAILED' | 'NOT_FOUND' | 'transient'> {
+): Promise<MirrorOutcome> {
   try {
     const url = `${getMirrorBaseUrl()}/transactions/${txId}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(MIRROR_FETCH_TIMEOUT_MS) });
     if (res.status === 404) return 'NOT_FOUND';
     if (!res.ok) return 'transient';
     const body = (await res.json()) as MirrorTxLookup;
@@ -86,32 +114,66 @@ export async function OPTIONS() {
 }
 
 /**
+ * Maximum byte length of the operator-supplied `reason` field. F5
+ * (2026-05-06 audit I-01): without a cap, a multi-MB reason inflates
+ * the dead-letter row in Redis AND, more importantly, causes
+ * `accounting.recordControlEvent` to exceed the 1024-byte HCS-20
+ * payload limit — silently downgrading the audit anchor to an
+ * `audit_trail_orphaned` row. An operator could deliberately strip
+ * the on-chain audit trail of a force-release that way.
+ */
+const MAX_REASON_LENGTH = 256;
+
+/** Hedera transaction id pattern: `<shard>.<realm>.<num>@<seconds>.<nanos>`. */
+const HEDERA_TX_ID_RE = /^\d+\.\d+\.\d+@\d+\.\d+$/;
+
+/**
  * `withStore` only accepts a single-argument handler, so we extract
  * the [id] route segment from the URL pathname rather than from the
  * Next.js `params` context. The shape `/api/admin/uncertain-tx/<id>/force-release`
  * is stable; if the layout ever changes, the regex needs to follow.
+ *
+ * F5 (2026-05-06 audit I-03): wraps `decodeURIComponent` in a try
+ * so malformed UTF-8 (e.g. overlong NUL `%E0%80%80`) returns null
+ * instead of throwing `URIError`. Result is shape-validated against
+ * the Hedera txId regex so adversarial paths can't masquerade as
+ * unrelated dead-letter ids.
  */
 function extractId(request: Request): string | null {
   const { pathname } = new URL(request.url);
   const match = pathname.match(/\/api\/admin\/uncertain-tx\/([^/]+)\/force-release\/?$/);
-  return match ? decodeURIComponent(match[1]!) : null;
+  if (!match) return null;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(match[1]!);
+  } catch {
+    // URIError on malformed encoding — refuse rather than 500.
+    return null;
+  }
+  if (!HEDERA_TX_ID_RE.test(decoded)) return null;
+  return decoded;
 }
 
 export const POST = withStore(async (request: Request) => {
   try {
+    const auth = await requireTier(request, 'operator');
+    if (isErrorResponse(auth)) return auth;
+
+    // F5 (2026-05-06 audit I-11): bind the rate-limit budget to the
+    // operator account, not the bearer-token prefix. Otherwise a
+    // session-token rotation (legitimate or adversarial) resets the
+    // counter and the documented 10/min cap is effectively unbounded.
     if (
       !(await checkRateLimit({
         request,
         action: 'admin-force-release-uncertain',
         limit: 10,
         windowSec: 60,
+        identity: auth.accountId,
       }))
     ) {
       return rateLimitResponse(60);
     }
-
-    const auth = await requireTier(request, 'operator');
-    if (isErrorResponse(auth)) return auth;
 
     const id = extractId(request);
     if (!id) {
@@ -121,13 +183,28 @@ export const POST = withStore(async (request: Request) => {
       );
     }
 
-    const body = (await request.json().catch(() => ({}))) as {
-      reason?: string;
-      acknowledgeDoubleSpendRisk?: boolean;
-    };
-    if (!body.reason || typeof body.reason !== 'string' || body.reason.trim() === '') {
+    const rawBody = (await request.json().catch(() => null)) as unknown;
+    const body =
+      typeof rawBody === 'object' && rawBody !== null && !Array.isArray(rawBody)
+        ? (rawBody as { reason?: unknown; acknowledgeDoubleSpendRisk?: unknown })
+        : {};
+    if (
+      typeof body.reason !== 'string' ||
+      body.reason.trim() === '' ||
+      body.reason.length > MAX_REASON_LENGTH
+    ) {
       return NextResponse.json(
-        { error: '`reason` (string) is required in the request body.' },
+        {
+          error: `\`reason\` (string, 1–${MAX_REASON_LENGTH} chars) is required in the request body.`,
+        },
+        { status: 400, headers: CORS_HEADERS },
+      );
+    }
+    // F5 (2026-05-06 audit I-13 family): strip control characters from
+    // reason so it can't break log-line parsers downstream.
+    if (/[\x00-\x1f\x7f]/.test(body.reason)) {
+      return NextResponse.json(
+        { error: '`reason` contains disallowed control characters.' },
         { status: 400, headers: CORS_HEADERS },
       );
     }
@@ -144,6 +221,26 @@ export const POST = withStore(async (request: Request) => {
           hint: 'Either the id is wrong or the entry has already been resolved.',
         },
         { status: 404, headers: CORS_HEADERS },
+      );
+    }
+
+    // F5 (2026-05-06 audit I-14): reject unsupported `entry.kind`
+    // BEFORE acquiring the verifier lock. Otherwise an operator
+    // probing an `audit_trail_orphaned`/`prize_transfer_failed`
+    // entry would hold the 60s lock for nothing, blocking legitimate
+    // re-attempts during that window.
+    const SUPPORTED_KINDS = new Set([
+      'withdrawal_uncertain',
+      'operator_fee_withdraw_uncertain',
+      'play_uncertain',
+      'refund_uncertain',
+    ] as const);
+    if (!entry.kind || !SUPPORTED_KINDS.has(entry.kind as never)) {
+      return NextResponse.json(
+        {
+          error: `Force-release not supported for dead-letter kind '${entry.kind ?? 'unknown'}'.`,
+        },
+        { status: 400, headers: CORS_HEADERS },
       );
     }
 
@@ -203,7 +300,7 @@ export const POST = withStore(async (request: Request) => {
     // need to debit local state + write the audit anchor (mirror
     // what the verifier would have done).
     const mirrorResult = await lookupMirrorOutcome(id);
-    if (mirrorResult === 'SUCCESS' && !body.acknowledgeDoubleSpendRisk) {
+    if (mirrorResult === 'SUCCESS' && requiresAckOverride(mirrorResult, body.acknowledgeDoubleSpendRisk)) {
       return NextResponse.json(
         {
           error:
@@ -213,7 +310,7 @@ export const POST = withStore(async (request: Request) => {
           hint:
             'Either let the verifier resolve this entry on the next reconcile ' +
             'pass (it will detect SUCCESS and settle correctly), OR pass ' +
-            '`acknowledgeDoubleSpendRisk: true` in the body to override. ' +
+            '`acknowledgeDoubleSpendRisk: true` (strict boolean) in the body to override. ' +
             'Override is for cases where the operator has independently ' +
             'manually compensated the resulting drift.',
           mirrorResult,
@@ -221,7 +318,7 @@ export const POST = withStore(async (request: Request) => {
         { status: 409, headers: CORS_HEADERS },
       );
     }
-    if (mirrorResult === 'transient' && !body.acknowledgeDoubleSpendRisk) {
+    if (mirrorResult === 'transient' && requiresAckOverride(mirrorResult, body.acknowledgeDoubleSpendRisk)) {
       return NextResponse.json(
         {
           error:
@@ -428,6 +525,31 @@ export const POST = withStore(async (request: Request) => {
           return NextResponse.json(
             {
               error: 'Cannot force-release: dead-letter missing claimKey.',
+            },
+            { status: 400, headers: CORS_HEADERS },
+          );
+        }
+        // F2 (2026-05-06 audit I-07): refuse to DEL keys outside the
+        // refund-claim namespace. A tampered/migrated entry with a
+        // claimKey pointing at a session, user lock, killswitch flag,
+        // or agentSeq counter would otherwise let an operator-tier
+        // request delete arbitrary lla: keys.
+        if (!isRefundClaimKey(details.claimKey)) {
+          logger.error(
+            'force-release refund_uncertain claimKey outside KEY_PREFIX.refunded — refusing',
+            {
+              component: 'AdminForceRelease',
+              event: 'malicious_claim_key',
+              uncertainTxId: id,
+              operator: auth.accountId,
+              claimKeyPrefix: details.claimKey.slice(0, 24),
+            },
+          );
+          return NextResponse.json(
+            {
+              error:
+                'Dead-letter claimKey is not a refund-claim key. ' +
+                'Refusing to release — this entry is malformed and requires manual triage.',
             },
             { status: 400, headers: CORS_HEADERS },
           );

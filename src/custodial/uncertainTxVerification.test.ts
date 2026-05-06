@@ -133,6 +133,7 @@ function installRedisMock(): { calls: { setNxCount: number } } {
     async sadd() { return 0; },
     async sismember() { return 0; },
     async incr(k: string) { const n = Number(state.get(k) ?? 0) + 1; state.set(k, n); return n; },
+    async expire() { return 1; },
   };
   (globalThis as unknown as { __lazylottoRedisClient__?: unknown }).__lazylottoRedisClient__ = mock;
   return { calls };
@@ -366,6 +367,105 @@ describe('verifyUncertainWithdrawals', () => {
     assert.equal((dls2[0]?.details as { verificationAttempts?: number })?.verificationAttempts, 2);
   });
 
+  it('F4: Infinity amount escalates as malformed (does not call settleSpend)', async () => {
+    // 2026-05-06 audit I-05: typeof Infinity === 'number' so the old
+    // check passed; settleSpend(Infinity) corrupted ledger to NaN.
+    const malformed: DeadLetterEntry = {
+      transactionId: 'tx-infinity',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'withdrawal_uncertain',
+      details: {
+        userId: 'user-1',
+        amount: Number.POSITIVE_INFINITY,
+        tokenKey: 'hbar',
+        recipientAccountId: '0.0.1234',
+        isHbar: true,
+      },
+    };
+    await store.upsertDeadLetter(malformed);
+
+    const userBefore = store.getUser('user-1')!;
+    const reservedBefore = userBefore.balances.tokens.hbar!.reserved;
+
+    const outcomes = await verifyUncertainWithdrawals(store, ledger, noopAccounting());
+
+    assert.equal(outcomes[0]!.status, 'still_uncertain');
+    const userAfter = store.getUser('user-1')!;
+    assert.equal(
+      userAfter.balances.tokens.hbar!.reserved,
+      reservedBefore,
+      'reserve must be untouched on Infinity-amount entry',
+    );
+  });
+
+  it('F4: negative amount escalates as malformed', async () => {
+    const malformed: DeadLetterEntry = {
+      transactionId: 'tx-neg',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'withdrawal_uncertain',
+      details: {
+        userId: 'user-1',
+        amount: -1,
+        tokenKey: 'hbar',
+        recipientAccountId: '0.0.1234',
+        isHbar: true,
+      },
+    };
+    await store.upsertDeadLetter(malformed);
+
+    const outcomes = await verifyUncertainWithdrawals(store, ledger, noopAccounting());
+
+    assert.equal(outcomes[0]!.status, 'still_uncertain');
+    const dl = store.getDeadLetters()[0]!;
+    assert.equal(
+      (dl.details as { verificationAttempts?: number }).verificationAttempts,
+      1,
+      'malformed entry must increment verificationAttempts via Redis INCR',
+    );
+  });
+
+  it('F4: progress-marker ordering inconsistency escalates (totalWithdrawnAt without settledAt)', async () => {
+    // 2026-05-06 audit I-12: an entry where step-2 marker is set
+    // without step-1 marker is impossible state. Verifier must NOT
+    // partial-execute; it must escalate as malformed.
+    const tampered: DeadLetterEntry = {
+      transactionId: 'tx-tampered',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'withdrawal_uncertain',
+      details: {
+        userId: 'user-1',
+        amount: 50,
+        tokenKey: 'hbar',
+        recipientAccountId: '0.0.1234',
+        isHbar: true,
+        // settledAt deliberately UNSET; totalWithdrawnAt SET.
+        totalWithdrawnAt: '2026-05-06T00:00:00.000Z',
+      },
+    };
+    await store.upsertDeadLetter(tampered);
+    mirror.responses.set('tx-tampered', {
+      status: 200,
+      body: { transactions: [{ result: 'SUCCESS' }] },
+    });
+
+    const userBefore = store.getUser('user-1')!;
+    const totalWithdrawnBefore = userBefore.balances.tokens.hbar!.totalWithdrawn;
+
+    const outcomes = await verifyUncertainWithdrawals(store, ledger, noopAccounting());
+
+    assert.equal(outcomes[0]!.status, 'still_uncertain');
+    assert.match(outcomes[0]!.note, /inconsistent progress markers/);
+    const userAfter = store.getUser('user-1')!;
+    assert.equal(
+      userAfter.balances.tokens.hbar!.totalWithdrawn,
+      totalWithdrawnBefore,
+      'totalWithdrawn must NOT advance on tampered entry',
+    );
+  });
+
   it('Audit-write failure produces audit_trail_orphaned DL (M16)', async () => {
     await store.upsertDeadLetter(makeWithdrawalDl(TX_OK));
     mirror.responses.set(TX_OK, { status: 200, body: { transactions: [{ result: 'SUCCESS' }] } });
@@ -413,6 +513,62 @@ describe('verifyUncertainWithdrawals', () => {
       calls.recordWithdrawal.length,
       1,
       'auditWrittenAt marker must prevent a duplicate HCS-20 burn op',
+    );
+  });
+
+  it('F1: intermediate stampProgress writes preserve all prior markers (lost-update protection)', async () => {
+    // 2026-05-06 audit C-01 / SM-02 / U-05: stampProgress used to read
+    // entry.details (stale snapshot from when the entry was loaded) and write
+    // `{...entry.details, ...patch}`, so each step's stamp overwrote prior
+    // stamps in Redis. After step 2 the Redis row had only step 2's marker;
+    // a Lambda crash before markResolved would lose step 1's marker entirely.
+    // Next reconcile pass would then re-execute step 1 (settleSpend) — silent
+    // double-mutation. After the fix, every intermediate stamp carries the
+    // full progress accumulator, so any successful stamp persists every prior
+    // step's marker.
+    await store.upsertDeadLetter(makeWithdrawalDl(TX_OK));
+    mirror.responses.set(TX_OK, { status: 200, body: { transactions: [{ result: 'SUCCESS' }] } });
+
+    // Spy on store.upsertDeadLetter — capture each call's `details` snapshot.
+    const upserts: Array<DeadLetterEntry> = [];
+    const original = store.upsertDeadLetter.bind(store);
+    store.upsertDeadLetter = async (entry: DeadLetterEntry) => {
+      upserts.push(JSON.parse(JSON.stringify(entry)));
+      return original(entry);
+    };
+
+    await verifyUncertainWithdrawals(store, ledger, noopAccounting());
+
+    // Drop the initial setup-upsert (no progress markers). Keep only the
+    // verifier's intermediate stamps (those without resolvedAt).
+    const stamps = upserts.filter(
+      (u) =>
+        !u.resolvedAt &&
+        ((u.details as Record<string, unknown>).settledAt ||
+          (u.details as Record<string, unknown>).totalWithdrawnAt ||
+          (u.details as Record<string, unknown>).historyWrittenAt ||
+          (u.details as Record<string, unknown>).auditWrittenAt),
+    );
+
+    assert.ok(
+      stamps.length >= 4,
+      `expected ≥4 intermediate stamps (settle/totalWithdrawn/history/audit), got ${stamps.length}`,
+    );
+
+    // The LAST intermediate stamp must carry every prior step's marker.
+    const lastStamp = stamps[stamps.length - 1]!.details as Record<string, unknown>;
+    assert.ok(lastStamp.settledAt, 'final intermediate stamp must include settledAt from step 1');
+    assert.ok(
+      lastStamp.totalWithdrawnAt,
+      'final intermediate stamp must include totalWithdrawnAt from step 2',
+    );
+    assert.ok(
+      lastStamp.historyWrittenAt,
+      'final intermediate stamp must include historyWrittenAt from step 3',
+    );
+    assert.ok(
+      lastStamp.auditWrittenAt,
+      'final intermediate stamp must include auditWrittenAt from step 4',
     );
   });
 
@@ -515,6 +671,46 @@ describe('verifyUncertainOperatorFeeWithdrawals', () => {
     const op = store.getOperator();
     assert.equal(op.balances.hbar, 75, 'second pass must skip resolved entry');
   });
+
+  it('F1: intermediate stampProgress writes preserve all prior markers (lost-update protection)', async () => {
+    // Same lost-update class as the withdrawal verifier test — operator-fee
+    // verifier stamps operatorDebitedAt then auditWrittenAt; with the bug,
+    // the second stamp drops the first.
+    store.updateOperator((op) => ({ ...op, balances: { ...op.balances, hbar: 100 } }));
+    await store.upsertDeadLetter(makeOperatorFeeDl(TX_OK));
+    mirror.responses.set(TX_OK, { status: 200, body: { transactions: [{ result: 'SUCCESS' }] } });
+
+    const upserts: Array<DeadLetterEntry> = [];
+    const original = store.upsertDeadLetter.bind(store);
+    store.upsertDeadLetter = async (entry: DeadLetterEntry) => {
+      upserts.push(JSON.parse(JSON.stringify(entry)));
+      return original(entry);
+    };
+
+    await verifyUncertainOperatorFeeWithdrawals(store, '0.0.9999', noopAccounting());
+
+    const stamps = upserts.filter(
+      (u) =>
+        !u.resolvedAt &&
+        ((u.details as Record<string, unknown>).operatorDebitedAt ||
+          (u.details as Record<string, unknown>).auditWrittenAt),
+    );
+
+    assert.ok(
+      stamps.length >= 2,
+      `expected ≥2 intermediate stamps (debit/audit), got ${stamps.length}`,
+    );
+
+    const lastStamp = stamps[stamps.length - 1]!.details as Record<string, unknown>;
+    assert.ok(
+      lastStamp.operatorDebitedAt,
+      'final intermediate stamp must include operatorDebitedAt from step 1',
+    );
+    assert.ok(
+      lastStamp.auditWrittenAt,
+      'final intermediate stamp must include auditWrittenAt from step 2',
+    );
+  });
 });
 
 // ── verifyUncertainPlays tests ───────────────────────────────────
@@ -574,5 +770,64 @@ describe('verifyUncertainPlays', () => {
     assert.equal(outcomes[0]!.status, 'failed');
     const user = store.getUser('user-1')!;
     assert.equal(user.balances.tokens.hbar!.reserved, 70);
+  });
+
+  it('F4: tokenReservations entries with non-string token are escalated as malformed', async () => {
+    // 2026-05-06 audit I-04: per-entry shape validation. Without it,
+    // { token: 42, amount: '1.5' } would coerce through releaseReserve
+    // and corrupt entry.reserved to NaN.
+    const malformed: DeadLetterEntry = {
+      transactionId: 'tx-bad-reservations',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'play_uncertain',
+      details: {
+        userId: 'user-1',
+        tokenReservations: [
+          { token: 42 as unknown as string, amount: 1 },
+        ],
+      },
+    };
+    await store.upsertDeadLetter(malformed);
+    mirror.responses.set('tx-bad-reservations', {
+      status: 200,
+      body: { transactions: [{ result: 'CONTRACT_REVERT_EXECUTED' }] },
+    });
+
+    const userBefore = store.getUser('user-1')!;
+    const reservedBefore = userBefore.balances.tokens.hbar!.reserved;
+
+    const outcomes = await verifyUncertainPlays(store, ledger);
+
+    assert.equal(outcomes[0]!.status, 'still_uncertain');
+    const userAfter = store.getUser('user-1')!;
+    assert.equal(
+      userAfter.balances.tokens.hbar!.reserved,
+      reservedBefore,
+      'reserve must NOT be touched on malformed reservations',
+    );
+  });
+
+  it('F4: tokenReservations entries with non-finite amount are escalated as malformed', async () => {
+    const malformed: DeadLetterEntry = {
+      transactionId: 'tx-infinite-reservation',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'play_uncertain',
+      details: {
+        userId: 'user-1',
+        tokenReservations: [
+          { token: 'hbar', amount: Number.POSITIVE_INFINITY },
+        ],
+      },
+    };
+    await store.upsertDeadLetter(malformed);
+    mirror.responses.set('tx-infinite-reservation', {
+      status: 200,
+      body: { transactions: [{ result: 'CONTRACT_REVERT_EXECUTED' }] },
+    });
+
+    const outcomes = await verifyUncertainPlays(store, ledger);
+    assert.equal(outcomes[0]!.status, 'still_uncertain');
   });
 });

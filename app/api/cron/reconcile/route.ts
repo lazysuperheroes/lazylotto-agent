@@ -38,6 +38,7 @@ import { getStore } from '../../_lib/store';
 import { getAgentContext } from '../../_lib/mcp';
 import { acquireOperatorLock, releaseOperatorLock } from '../../_lib/locks';
 import { withStore } from '../../_lib/withStore';
+import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import type { ReconciliationResult } from '~/custodial/Reconciliation';
 import { isAuthorizedCron, escapeMrkdwn } from './helpers';
 
@@ -69,6 +70,25 @@ export const GET = withStore(async (request: Request) => {
       { error: 'Unauthorized: missing or invalid CRON_SECRET' },
       { status: 401, headers: CORS_HEADERS },
     );
+  }
+
+  // F5 (2026-05-06 audit I-10): rate limit even with a valid
+  // CRON_SECRET. Vercel Cron fires at most a few times per hour
+  // legitimately; capping at 10/min makes a leaked secret a much
+  // weaker amplification primitive (each call walks every dead
+  // letter and fans out mirror-node fetches). Identity is the
+  // cron secret prefix so all legitimate cron calls share one
+  // bucket.
+  if (
+    !(await checkRateLimit({
+      request,
+      action: 'cron-reconcile',
+      limit: 10,
+      windowSec: 60,
+      identity: 'cron',
+    }))
+  ) {
+    return rateLimitResponse(60);
   }
 
   // Operator lock so cron + manual operator click don't both walk
