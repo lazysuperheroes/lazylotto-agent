@@ -133,6 +133,18 @@ export class NegotiationHandler {
     // 7. Persist
     this.store.saveUser(user);
 
+    // R3-FG-30 (round-3 P2-009): flush BEFORE returning so a sibling
+    // Lambda's deposit-watcher pollOnce sees the new user immediately.
+    // Pre-fix: write-through cache only; the first deposit on a
+    // sibling Lambda hit a stale `getUserByMemo` and dead-lettered
+    // with `unmatched_memo`.
+    try {
+      await this.store.flush();
+    } catch {
+      // Flush failure here is non-fatal — saveUser landed in cache;
+      // worst case is the same stale-memo race we're trying to close.
+    }
+
     // 8. Return
     return user;
   }

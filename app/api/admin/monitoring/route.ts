@@ -100,7 +100,10 @@ export async function GET(request: Request) {
       const url = nextPath.startsWith('/api/v1')
         ? `${mirrorBase.replace(/\/api\/v1$/, '')}${nextPath}`
         : `${mirrorBase}${nextPath}`;
-      const res = await fetch(url);
+      // R3-FG-42 (round-3 P7-010): per-fetch timeout. Without this, a
+      // slowloris mirror response hangs the Lambda for the full 60s
+      // budget and ties up a slot.
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
       if (!res.ok) {
         if (res.status === 404) {
           return NextResponse.json(

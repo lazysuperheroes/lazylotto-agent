@@ -257,6 +257,45 @@ export function assertProductionRedis(): void {
         `Slack/Discord webhook URL or accept the boot failure.`,
       );
     }
+
+    // R3-FG-43 (round-3 P10-AUTH-002 / P10-PROD-001): validate
+    // AUTH_PAGE_ORIGIN. The default fallback in `getAudience()` is
+    // testnet's URL — a mainnet deploy missing this env silently
+    // accepts captured testnet signatures as valid against mainnet
+    // (cross-network signature replay). Plus R3-FG-80: validate
+    // LAZYLOTTO_MCP_URL boot-time.
+    const audience = process.env.AUTH_PAGE_ORIGIN;
+    if (!audience || audience.trim() === '') {
+      throw new Error(
+        `PRODUCTION_AUDIENCE_REQUIRED: AUTH_PAGE_ORIGIN must be set in ` +
+        `production. Without it, getAudience() falls back to testnet's URL ` +
+        `and a mainnet deploy accepts captured testnet signatures as valid.`,
+      );
+    }
+    if (!audience.startsWith('https://')) {
+      throw new Error(
+        `PRODUCTION_AUDIENCE_INSECURE: AUTH_PAGE_ORIGIN must start with https:// ` +
+        `(got "${audience}"). Plain-http audiences are rejected to prevent ` +
+        `MITM-rewriting of the signed-message audience.`,
+      );
+    }
+    const network = process.env.HEDERA_NETWORK;
+    if (network === 'mainnet' && /testnet/.test(audience)) {
+      throw new Error(
+        `PRODUCTION_AUDIENCE_NETWORK_MISMATCH: HEDERA_NETWORK=mainnet but ` +
+        `AUTH_PAGE_ORIGIN="${audience}" looks like a testnet origin. Update ` +
+        `the env to the mainnet origin or accept the boot failure.`,
+      );
+    }
+    const mcpUrl = process.env.LAZYLOTTO_MCP_URL;
+    if (!mcpUrl || mcpUrl.trim() === '') {
+      throw new Error(
+        `PRODUCTION_MCP_URL_REQUIRED: LAZYLOTTO_MCP_URL must be set in ` +
+        `production. Pre-fix this only failed at first tool call (not at ` +
+        `boot), so an operator deploying with a typo'd env saw a cryptic ` +
+        `error in function logs only after the first user request.`,
+      );
+    }
   }
 }
 

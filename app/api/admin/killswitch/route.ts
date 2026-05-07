@@ -26,6 +26,7 @@ import {
 } from '~/lib/killswitch';
 import { getAgentContext } from '../../_lib/mcp';
 import { withStore } from '../../_lib/withStore';
+import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -56,6 +57,20 @@ export const POST = withStore(async (request: Request) => {
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
 
+    // R3-FG-39 (round-3 P7-004): rate-limit the engage path. Pre-fix
+    // a compromised admin token (or buggy script) could flood the HCS
+    // topic with thousands of `killswitch_enabled` events, burning
+    // topic budget + bloating the agentSeq counter.
+    if (!(await checkRateLimit({
+      request,
+      action: 'admin-killswitch-engage',
+      limit: 5,
+      windowSec: 60,
+      identity: auth.accountId,
+    }))) {
+      return rateLimitResponse(60);
+    }
+
     const body = (await request.json().catch(() => ({}))) as {
       reason?: string;
     };
@@ -65,6 +80,14 @@ export const POST = withStore(async (request: Request) => {
         { error: 'Missing required field: reason' },
         { status: 400, headers: CORS_HEADERS },
       );
+    }
+
+    // R3-FG-39: skip the HCS write entirely if already enabled —
+    // idempotent flip. Pre-fix a re-enable would emit a duplicate
+    // anchor without changing observable state.
+    const existing = await getKillSwitchState();
+    if (existing.enabled) {
+      return NextResponse.json(existing, { headers: CORS_HEADERS });
     }
 
     // F22: anchor-first ordering (writes the HCS-20 control event
@@ -93,6 +116,21 @@ export const DELETE = withStore(async (request: Request) => {
   try {
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
+
+    // R3-FG-39: same rate limit + idempotent flip on disable.
+    if (!(await checkRateLimit({
+      request,
+      action: 'admin-killswitch-disengage',
+      limit: 5,
+      windowSec: 60,
+      identity: auth.accountId,
+    }))) {
+      return rateLimitResponse(60);
+    }
+    const existingState = await getKillSwitchState();
+    if (!existingState.enabled) {
+      return NextResponse.json({ enabled: false }, { headers: CORS_HEADERS });
+    }
 
     // F22: anchor-first ordering — see enable handler above.
     const { multiUser } = await getAgentContext();

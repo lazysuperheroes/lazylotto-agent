@@ -95,7 +95,15 @@ function makeContext(initialState: Partial<FakeStoreState> = {}) {
       recordGas: () => {},
       getOperator: () => state.operator,
       saveUser: () => {},
-      getUser: () => undefined,
+      // R3-FG-24: handleRefund SUCCESS now reads ctx.store.getUser to
+      // run an available-balance pre-check. The mock now returns a
+      // synthetic User with the seeded balances so the test exercises
+      // the real check.
+      getUser: (uid: string) => {
+        const b = state.balances.get(uid);
+        if (!b) return undefined;
+        return { userId: uid, balances: b };
+      },
       getUserByMemo: () => undefined,
       getUserByEvm: () => undefined,
       getAllUsers: () => [],
@@ -152,6 +160,18 @@ function makeContext(initialState: Partial<FakeStoreState> = {}) {
         let n = 0;
         for (const k of keys) if (redisStore.delete(k)) n++;
         return n;
+      },
+      // R3-FG-23: SADD shim backed by a Map<string, Set>.
+      async sadd(key: string, member: string): Promise<number> {
+        const cur = redisStore.get(key);
+        if (cur instanceof Set) {
+          if (cur.has(member)) return 0;
+          cur.add(member);
+          return 1;
+        }
+        const fresh = new Set<unknown>([member]);
+        redisStore.set(key, fresh);
+        return 1;
       },
       // R3-FG-2: lowercase RELEASE_SCRIPT compare-and-delete shim.
       async eval<T = unknown>(script: string, keys: string[], args: string[]): Promise<T> {

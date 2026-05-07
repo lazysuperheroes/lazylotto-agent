@@ -681,6 +681,24 @@ async function main() {
   // The MirrorTxCache batches fetches in groups of 10 with `Promise.all`
   // and dedups repeat txIds, so cross-check cost scales sub-linearly
   // on busy topics with many references to the same tx.
+  // R3-FG-50 (round-3 P9-008): without `--agent`, the phantom-mint /
+  // phantom-burn cross-check can only validate amount + direction —
+  // it cannot validate that the transfer landed on the agent's
+  // account. Operators that expect the cross-check to catch
+  // phantom-credit attacks must pass `--agent`. Surface this loudly
+  // when there's actual cross-check work to do.
+  if (
+    args.agentAccountId === null &&
+    (depositTxIds.length > 0 || burnTxIds.length > 0)
+  ) {
+    console.warn(
+      '\n  ⚠ --agent flag NOT provided.\n' +
+      '    Phantom-mint / phantom-burn cross-checks will validate amount + direction\n' +
+      '    only; recipient validation is SKIPPED. To get the full check, re-run with\n' +
+      '    --agent <agentAccountId>.\n',
+    );
+  }
+
   const txCache = new MirrorTxCache(realMirrorFetcher(mirrorBase));
   const decimalsCache = new TokenDecimalsCache(realDecimalsLookup(mirrorBase));
 

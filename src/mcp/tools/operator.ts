@@ -124,7 +124,7 @@ export function registerOperatorTools(
       // state could write conflicting outputs. 5 min TTL is enough
       // for the walk + mirror-node calls; lock auto-releases if the
       // Lambda dies mid-flight.
-      const lockToken = await acquireOperatorLock('reconcile', 300);
+      const lockToken = await acquireOperatorLock('reconcile', 900);
       if (!lockToken) {
         return errorResult(
           'Reconcile already in progress. Try again in a few minutes.',

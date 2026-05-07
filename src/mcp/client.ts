@@ -48,7 +48,12 @@ export async function callTool<T = unknown>(
     client = await getMcpClient();
   } catch (e) {
     if (!_retry) {
-      // Connection may be stale — reset and retry once
+      // R3-FG-47 (round-3 P10-MCP-001): close the broken client before
+      // re-nulling. Pre-fix orphaned the transport — its pending
+      // promises and connection handle leaked, accumulating across
+      // retries on a flaky upstream and pinning the warm Lambda slot
+      // to a broken transport.
+      try { await mcpClient?.close(); } catch { /* logged via close */ }
       mcpClient = null;
       return callTool(toolName, args, true);
     }
@@ -60,7 +65,7 @@ export async function callTool<T = unknown>(
     result = await client.callTool({ name: toolName, arguments: args });
   } catch (e) {
     if (!_retry) {
-      // Transport error — reset client and retry once
+      try { await mcpClient?.close(); } catch { /* logged via close */ }
       mcpClient = null;
       return callTool(toolName, args, true);
     }

@@ -43,7 +43,7 @@ export const POST = withStore(async (request: Request) => {
     // or two admin clicks landing on different Lambdas) don't both
     // walk the same state and write conflicting outputs. 5 min TTL is
     // enough for the full walk + mirror-node calls.
-    const lockToken = await acquireOperatorLock('reconcile', 300);
+    const lockToken = await acquireOperatorLock('reconcile', 900);
     if (!lockToken) {
       return NextResponse.json(
         { error: 'Reconcile already in progress. Try again in a few minutes.' },

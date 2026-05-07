@@ -144,11 +144,22 @@ export async function refreshSession(token: string): Promise<{
   const session = await getSession(token);
   if (!session) return null;
 
+  // R3-FG-44 (round-3 P10-AUTH-001): preserve `locked: true` on
+  // refresh. Pre-fix `createSession` always set 7-day TTL even when
+  // the source session was locked — silent demotion. Now: re-lock
+  // the new session if the source was locked.
+  const wasLocked = session.locked === true;
+
   // Destroy old session
   await destroySession(token);
 
   // Create new session with same tier
-  return createSession(session.accountId, session.tier);
+  const fresh = await createSession(session.accountId, session.tier);
+  if (wasLocked) {
+    await lockSession(fresh.token);
+    return { token: fresh.token, expiresAt: '' };
+  }
+  return fresh;
 }
 
 /**

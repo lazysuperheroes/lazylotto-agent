@@ -736,7 +736,7 @@ export class AccountingService {
     strategyMeta?: { ev?: number; budgetRemaining?: number };
   }): Promise<void> {
     const agentSeq = await this.nextAgentSeq(details.agent);
-    const message: PlayPoolResultMessage = {
+    let message: PlayPoolResultMessage = {
       p: 'hcs-20',
       op: 'play_pool_result',
       sessionId: details.sessionId,
@@ -752,6 +752,34 @@ export class AccountingService {
       ...(details.strategyMeta ? { strategyMeta: details.strategyMeta } : {}),
       ts: new Date().toISOString(),
     };
+
+    // R3-FG-46 (round-3 P10-HCS-001): pre-flight size check. Multi-NFT
+    // pools with UTF-8 multibyte symbols (Japanese title, accented
+    // chars) can blow past the 1024-byte HCS topic ceiling. Pre-fix
+    // the submit threw inside `enforceTopicMessageSizeLimit`, the play
+    // loop's catch aborted the session, and the reader marked it
+    // `corrupt`. Now: if oversized, emit a slimmed fallback that drops
+    // strategyMeta and truncates prize symbols. Always preserves the
+    // load-bearing fields (sessionId, agentSeq, poolId, spent, wins,
+    // prize amounts/types) so verify-audit can still reconstruct.
+    const fullSize = Buffer.byteLength(JSON.stringify(message), 'utf-8');
+    if (fullSize > 900) {
+      // Drop strategyMeta first (info-only).
+      const { strategyMeta: _strat, ...slim } = message;
+      message = slim as PlayPoolResultMessage;
+      // If still too big, truncate prize symbols.
+      if (Buffer.byteLength(JSON.stringify(message), 'utf-8') > 900) {
+        message = {
+          ...message,
+          prizes: message.prizes.map((p) => ({
+            ...p,
+            ...((p as { sym?: string }).sym
+              ? { sym: ((p as { sym?: string }).sym as string).slice(0, 8) }
+              : {}),
+          })),
+        };
+      }
+    }
     await this.submitV2Message(message);
   }
 

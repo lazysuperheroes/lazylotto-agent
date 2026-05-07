@@ -40,6 +40,20 @@ import type { UserLedger } from '~/custodial/UserLedger';
 import type { AccountingService } from '~/custodial/AccountingService';
 import type { MirrorOutcome } from './route';
 import { KEY_PREFIX, isRefundClaimKey } from '~/auth/redis';
+import { randomUUID } from 'node:crypto';
+
+/**
+ * R3-FG-26 (round-3 P2-005 / P4-009 / P5-AT-001): unique audit-orphan
+ * id for force-release. Pre-fix all six sites used the same id
+ * `audit-orphan:force-release:${txId}` — repeated audit failures
+ * within ONE force-release (or across retries) collided via REPLACE
+ * semantics, losing prior failure history. Each call gets a fresh
+ * random suffix; the `phase` field in `details` distinguishes phases
+ * for replay tooling.
+ */
+function uniqueForceReleaseOrphanId(txId: string): string {
+  return `audit-orphan:force-release:${txId}:${randomUUID().slice(0, 8)}`;
+}
 import { HBAR_TOKEN_KEY } from '~/config/strategy';
 import { RELEASE_SCRIPT, tryAcquireUserLockWithBackoff, releaseUserLock } from '~/lib/locks';
 
@@ -85,6 +99,8 @@ export interface ForceReleaseContext {
     del(...keys: string[]): Promise<number>;
     /** R3-FG-2: fenced compare-and-delete via lowercase RELEASE_SCRIPT. */
     eval<T = unknown>(script: string, keys: string[], args: string[]): Promise<T>;
+    /** R3-FG-23: SADD the original txId to the permanent refunded-originals set. */
+    sadd(key: string, member: string): Promise<number>;
   };
   log: {
     warn(msg: string, meta: Record<string, unknown>): void;
@@ -330,7 +346,7 @@ async function handleWithdrawal(
         await ctx.store.upsertDeadLetter({
           // R2-FG-17: salt synthetic id by writer phase so multiple
           // audit-orphan writes for the same source tx don't collide.
-          transactionId: `audit-orphan:force-release:${entry.transactionId}`,
+          transactionId: uniqueForceReleaseOrphanId(entry.transactionId),
           timestamp: new Date().toISOString(),
           error: `force-release audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
           kind: 'audit_trail_orphaned',
@@ -474,7 +490,7 @@ async function handleOperatorFee(
       try {
         await ctx.store.upsertDeadLetter({
           // R2-FG-17: salt synthetic id by writer phase.
-          transactionId: `audit-orphan:force-release:${entry.transactionId}`,
+          transactionId: uniqueForceReleaseOrphanId(entry.transactionId),
           timestamp: new Date().toISOString(),
           error: `force-release operator debit failed after stamp: ${e instanceof Error ? e.message : String(e)}`,
           kind: 'audit_trail_orphaned',
@@ -517,7 +533,7 @@ async function handleOperatorFee(
       try {
         await ctx.store.upsertDeadLetter({
           // R2-FG-17: salt synthetic id by writer phase.
-          transactionId: `audit-orphan:force-release:${entry.transactionId}`,
+          transactionId: uniqueForceReleaseOrphanId(entry.transactionId),
           timestamp: new Date().toISOString(),
           error: `force-release operator audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
           kind: 'audit_trail_orphaned',
@@ -669,7 +685,7 @@ async function handlePlay(
     // R2-FG-8: include `phase` for replay tooling.
     try {
       await ctx.store.upsertDeadLetter({
-        transactionId: `audit-orphan:force-release:${entry.transactionId}`,
+        transactionId: uniqueForceReleaseOrphanId(entry.transactionId),
         timestamp: new Date().toISOString(),
         error: `force-release play_uncertain SUCCESS triage anchor write failed: ${anchorErr instanceof Error ? anchorErr.message : String(anchorErr)}`,
         kind: 'audit_trail_orphaned',
@@ -870,6 +886,28 @@ async function handleRefund(
     const userToken = await tryAcquireUserLockWithBackoff(depositRecord.userId);
     if (!userToken) return USER_LOCK_CONTENTION;
     try {
+      // R3-FG-24 (round-3 P3-DS-001): mirror the F7+R2-FG-19 guard
+      // that processRefund applies upfront. Pre-fix used the silent
+      // `Math.max(0, ...)` clamp below; underflow scenarios (user
+      // re-deposited then re-played, available < humanAmount) silently
+      // capped to 0 → user kept the refund AND retained available
+      // balance from prior deposits. Now: refuse SUCCESS if available
+      // is insufficient.
+      const userView = ctx.store.getUser?.(depositRecord.userId);
+      const tokEntry = userView?.balances?.tokens?.[tokenKey];
+      const availableNow = tokEntry?.available ?? 0;
+      if (availableNow < humanAmount) {
+        // Release the lock before returning.
+        await releaseUserLock(depositRecord.userId, userToken);
+        return {
+          ok: false,
+          status: 409,
+          error:
+            `Cannot force-release: insufficient AVAILABLE balance for ` +
+            `${depositRecord.userId} on ${tokenKey} (have ${availableNow}, need ${humanAmount}). ` +
+            `Reserved funds are committed against in-flight plays and cannot be refunded.`,
+        };
+      }
       ctx.store.updateBalance(depositRecord.userId, (b) => {
         const tokEntry = b.tokens[tokenKey];
         if (!tokEntry) return b;
@@ -942,7 +980,7 @@ async function handleRefund(
       try {
         await ctx.store.upsertDeadLetter({
           // R2-FG-17: salt synthetic id by writer phase.
-          transactionId: `audit-orphan:force-release:${entry.transactionId}`,
+          transactionId: uniqueForceReleaseOrphanId(entry.transactionId),
           timestamp: new Date().toISOString(),
           error: `force-release refund audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
           kind: 'audit_trail_orphaned',
@@ -986,7 +1024,7 @@ async function handleRefund(
     );
     try {
       await ctx.store.upsertDeadLetter({
-        transactionId: `audit-orphan:force-release:${entry.transactionId}`,
+        transactionId: uniqueForceReleaseOrphanId(entry.transactionId),
         timestamp: new Date().toISOString(),
         error:
           `force-release refund SUCCESS refused to overwrite an existing failed: claim ` +
@@ -1023,6 +1061,24 @@ async function handleRefund(
     });
   } catch {
     /* claim overwrite is best-effort */
+  }
+
+  // R3-FG-23 (round-3 P3-DR-003): also write to the permanent
+  // refunded-originals SADD set so a 30-day claim TTL doesn't open a
+  // second-refund window. The processRefund + verifyUncertainRefunds
+  // SUCCESS paths both SADD; force-release SUCCESS was the asymmetric
+  // sibling that didn't.
+  if (details.originalTxId) {
+    try {
+      await ctx.redis.sadd(KEY_PREFIX.refundedOriginals, details.originalTxId);
+    } catch (e) {
+      ctx.log.warn('force-release refund SADD permanent-set failed', {
+        component: 'AdminForceRelease',
+        uncertainTxId: entry.transactionId,
+        originalTxId: details.originalTxId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
   }
 
   return {

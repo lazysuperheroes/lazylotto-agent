@@ -96,7 +96,7 @@ export const GET = withStore(async (request: Request) => {
   // skip this run silently — cron fires every hour, the next run
   // will pick up. NOT 503 because that would page the operator for a
   // benign concurrency event.
-  const lockToken = await acquireOperatorLock('reconcile', 300);
+  const lockToken = await acquireOperatorLock('reconcile', 900);
   if (!lockToken) {
     return NextResponse.json(
       { skipped: true, reason: 'reconcile already in progress' },

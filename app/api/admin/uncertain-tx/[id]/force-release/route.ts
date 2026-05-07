@@ -139,7 +139,12 @@ function extractId(request: Request): string | null {
 
 export const POST = withStore(async (request: Request) => {
   try {
-    const auth = await requireTier(request, 'operator');
+    // R3-FG-40 (round-3 P7-006): admin tier matches the killswitch
+    // precedent. WalletConnect users top out at 'admin' tier (when
+    // their accountId is in ADMIN_ACCOUNTS); requiring 'operator'
+    // made the dashboard "Force Release" button dead for the common
+    // testnet topology with only ADMIN_ACCOUNTS configured.
+    const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
 
     // F5 (2026-05-06 audit I-11): bind the rate-limit budget to the

@@ -211,47 +211,47 @@ Also acquire the verify-lock BEFORE the back-fill stamp.
 
 ## Phase R3-3 — Medium (refund / state-machine / API surface; ~14 items)
 
-### `[ ]` R3-FG-23 (M) — Force-release `handleRefund` SUCCESS missing SADD permanent set
+### `[x]` R3-FG-23 (M) — Force-release `handleRefund` SUCCESS missing SADD permanent set
 **Closes:** P3-DR-003. Refund SUCCESS writes claim overwrite at `handlers.ts:988` but doesn't SADD `refundedOriginals` (verifier + processRefund both SADD). After 30-day claim TTL, a fresh refund attempt for the same originalTxId passes sismember=0 and fires a second on-chain refund.
 **Fix:** Mirror the verifier's SADD line at `refund.ts:1370-1386` into the force-release SUCCESS branch.
 
-### `[ ]` R3-FG-24 (M) — Force-release `handleRefund` SUCCESS missing the F7+R2-FG-19 available-balance pre-check
+### `[x]` R3-FG-24 (M) — Force-release `handleRefund` SUCCESS missing the F7+R2-FG-19 available-balance pre-check
 **Closes:** P3-DS-001. Force-release SUCCESS uses `Math.max(0, available - humanAmount)` clamp at `handlers.ts:860` — silently swallows underflow. Should mirror processRefund's `available >= netAmount` refusal.
 **Fix:** Add the guard.
 
-### `[ ]` R3-FG-25 (M) — `processRefund` queue path drops rake reversal info
+### `[x]` R3-FG-25 (M) — `processRefund` queue path drops rake reversal info
 **Closes:** P3-DRR-001. `queuePendingLedgerAdjustment` queues only the user-balance debit; `drainPendingLedgerAdjustments` doesn't apply rake reversal. Operator silently retains rake.
 **Fix:** Persist `rakeReversal: { token, amount }` in queued payload; drain applies both legs.
 
-### `[ ]` R3-FG-26 (M) — Audit-orphan id collisions WITHIN force-release on retry
+### `[x]` R3-FG-26 (M) — Audit-orphan id collisions WITHIN force-release on retry
 **Closes:** P2-005 + P4-009 + P5-AT-001. Six force-release sites use `audit-orphan:force-release:${entry.transactionId}` — repeated audit failures clobber prior orphan history.
 **Fix:** Salt by phase + timestamp: `audit-orphan:force-release:${phase}:${entry.transactionId}:${Date.now()}-${rand}`.
 
-### `[ ]` R3-FG-27 (M) — Killswitch HCS timeout writes no DL row + no escalation
+### `[x]` R3-FG-27 (M) — Killswitch HCS timeout writes no DL row + no escalation
 **Closes:** P1-002 + P6-005 + P9-005 (3-persona). R2-FG-25 doc said write `audit_trail_orphaned` + flip Redis. Production only logs.
 **Fix:** Add `upsertDeadLetter('audit_trail_orphaned', ...)` + `escalateUncertainDlFailure` in the timeout branch.
 
-### `[ ]` R3-FG-28 (M) — Killswitch `Promise.race` doesn't `AbortSignal` the HCS submit
+### `[x]` R3-FG-28 (M) — Killswitch `Promise.race` doesn't `AbortSignal` the HCS submit
 **Closes:** P2-006 + P5-KS-001 + P5-KS-002. The HCS write keeps running in background after timeout fires; can emit anchor AFTER orphan is written → duplicate anchor + orphan for one engagement.
 **Fix:** Pass `AbortSignal` into `recordControlEvent`. Or SET-NX an idempotency claim before the race so duplicate emissions are no-ops.
 
-### `[ ]` R3-FG-29 (M) — Reconcile cron operator-lock TTL 300s shorter than worst-case mirror walk
+### `[x]` R3-FG-29 (M) — Reconcile cron operator-lock TTL 300s shorter than worst-case mirror walk
 **Closes:** P2-010. 50 DLs × 8s mirror timeout = 400s; lock TTLs out at 300s → concurrent reconcile.
 **Fix:** Heartbeat `PEXPIRE` every 30s, OR bound mirror walk via parallelism + per-batch budget.
 
-### `[ ]` R3-FG-30 (M) — `registerUser` doesn't flush before returning + sibling Lambda's `getUserByMemo` hits stale cache
+### `[x]` R3-FG-30 (M) — `registerUser` doesn't flush before returning + sibling Lambda's `getUserByMemo` hits stale cache
 **Closes:** P2-009. First deposit lands in `unmatched_memo` DL on a sibling Lambda.
 **Fix:** `await store.flush()` before return; force `refreshUserIndex` at top of pollOnce.
 
-### `[ ]` R3-FG-31 (M) — TxId regex inconsistency between modules
+### `[x]` R3-FG-31 (M) — TxId regex inconsistency between modules
 **Closes:** P4-006. `userOps.ts:101` accepts `0.0.X-T-N` and `0.0.X@T.N`; `force-release/route.ts:111` and `parseTxIdTimestamp` only accept `@`. Replay succeeds with dash, force-release rejects later.
 **Fix:** Normalize to canonical `@` form at userOps boundary, OR pick one form everywhere.
 
-### `[ ]` R3-FG-32 (M) — `replayDeposit` collapses 5+ skip reasons into "already_processed"
+### `[x]` R3-FG-32 (M) — `replayDeposit` collapses 5+ skip reasons into "already_processed"
 **Closes:** P4-004. Operator sees "already_processed" for tx-not-success, no-memo, no-user-match, validation-failed — false success signal.
 **Fix:** Discriminated union return from `processTransaction`; propagate specific reason through replayDeposit + route response.
 
-### `[ ]` R3-FG-33 (M) — User deregistration with open `play_uncertain` → permanent wedge
+### `[x]` R3-FG-33 (M) — User deregistration with open `play_uncertain` → permanent wedge
 **Closes:** P5-PU-002. Reservations gone with user, DL row stuck (F15 refuses force-release, manual reconstruction fails because user undefined).
 **Fix:** Block deregister if any unresolved `play_uncertain` for userId, OR have manual reconstruction tooling write `audit_trail_orphaned` when user gone.
 
@@ -259,15 +259,15 @@ Also acquire the verify-lock BEFORE the back-fill stamp.
 **Closes:** P5-RC-001 + P5-RU-002. R2-FG-11 refuses to overwrite, but no admin endpoint to legitimately advance from `failed:<txid>` back to clear. Mirror reclassification (rare) leaves the on-chain refund invisible to the audit trail.
 **Fix:** Add `POST /api/admin/refund-claim/:id/clear-failed` requiring operator tier + reason + HCS-20 `refund_claim_cleared` control event.
 
-### `[ ]` R3-FG-35 (M) — `recoverStuckPrizesForUser` snapshot of `affectedSessions` is stale
+### `[x]` R3-FG-35 (M) — `recoverStuckPrizesForUser` snapshot of `affectedSessions` is stale
 **Closes:** P5-PT-001. Concurrent play creates a NEW prize_transfer_failed DL between snapshot and contract tx; recovery resolves only the snapshot's DLs while `transferAllPrizes` empties ALL pending → phantom unresolved DLs.
 **Fix:** Re-read DL list AFTER contract tx; resolve all `prize_transfer_failed` for user with timestamp ≤ contractTxTimestamp. OR hold per-user lock through the entire recovery (verify it spans the contract call).
 
-### `[ ]` R3-FG-36 (M) — Aborted session pool count mismatch only WARNS, should be `corrupt`
+### `[x]` R3-FG-36 (M) — Aborted session pool count mismatch only WARNS, should be `corrupt`
 **Closes:** P5-SR-002. `closed_success` branch promotes pool-count mismatch to `corrupt`; `closed_aborted` branch only logs warning. Topic-only auditor sees clean abort despite count mismatch.
 **Fix:** Match the closed_success behavior — promote count/merkle mismatch in aborted to `corrupt`.
 
-### `[ ]` R3-FG-37 (M) — `migrate-schema` operator-lock leaks on early throw
+### `[x]` R3-FG-37 (M) — `migrate-schema` operator-lock leaks on early throw
 **Closes:** P7-002. `acquireOperatorLock(..., 600)` is followed by `await Promise.all([refreshUserIndex(), refreshOperator()])` — outside the inner try/finally. Refresh failure leaves lock held for 10 min.
 **Fix:** Wrap the entire post-acquire block in try/finally (or use a `withOperatorLock` helper).
 
@@ -275,11 +275,11 @@ Also acquire the verify-lock BEFORE the back-fill stamp.
 **Closes:** P7-003. Admin from a NAT'd corporate IP gets 429'd because an attacker on the same NAT exhausted the IP-keyed limit.
 **Fix:** Run `requireTier` first; rate-limit by `auth.accountId` for tiered routes.
 
-### `[ ]` R3-FG-39 (M) — Killswitch route has no rate limit + no idempotency
+### `[x]` R3-FG-39 (M) — Killswitch route has no rate limit + no idempotency
 **Closes:** P7-004. Compromised admin token (or buggy script) can flood HCS topic with thousands of enabled/disabled events.
 **Fix:** Add `checkRateLimit({action: 'admin-killswitch', limit: 5/60s, identity: auth.accountId})`. Skip HCS write if `enabled === current` (idempotent flip).
 
-### `[ ]` R3-FG-40 (M) — Force-release operator-tier unreachable from web admin UI
+### `[x]` R3-FG-40 (M) — Force-release operator-tier unreachable from web admin UI
 **Closes:** P7-006. If only `ADMIN_ACCOUNTS` is set (common testnet topology), the dashboard's "Force Release" button is dead (403). Killswitch precedent already downgraded to admin tier.
 **Fix:** Either downgrade to `admin` tier matching killswitch, OR document `OPERATOR_ACCOUNTS` requirement in mainnet checklist + hide the UI button for non-operator sessions.
 
@@ -287,19 +287,19 @@ Also acquire the verify-lock BEFORE the back-fill stamp.
 
 ## Phase R3-4 — Medium (deployment / availability / blind-spot; ~10 items)
 
-### `[ ]` R3-FG-41 (M) — `/api/admin/refund` missing Idempotency-Key header
+### `[x]` R3-FG-41 (M) — `/api/admin/refund` missing Idempotency-Key header
 **Closes:** P7-009. Asymmetric with `/api/admin/withdraw-fees` which mandates it.
 **Fix:** Match withdraw-fees: require `Idempotency-Key`, wrap `processRefund` in `withIdempotency`.
 
-### `[ ]` R3-FG-42 (M) — `/api/admin/monitoring` mirror walk has no fetch timeout
+### `[x]` R3-FG-42 (M) — `/api/admin/monitoring` mirror walk has no fetch timeout
 **Closes:** P7-010. Slowloris mirror response can hang Lambda for full 60s budget.
 **Fix:** `signal: AbortSignal.timeout(8000)` per-fetch + outer 20s race.
 
-### `[ ]` R3-FG-43 (M) — `AUTH_PAGE_ORIGIN` testnet fallback on misconfigured mainnet → cross-network signature replay
+### `[x]` R3-FG-43 (M) — `AUTH_PAGE_ORIGIN` testnet fallback on misconfigured mainnet → cross-network signature replay
 **Closes:** P10-AUTH-002 + P10-PROD-001. `getAudience()` defaults to testnet origin. Mainnet deploy without env set accepts captured testnet signatures.
 **Fix:** In production, require `AUTH_PAGE_ORIGIN` non-empty + starts-with-https + matches HEDERA_NETWORK; fail boot otherwise. Add to `assertProductionRedis`.
 
-### `[ ]` R3-FG-44 (M) — `/api/auth/refresh` silently demotes locked sessions to TTL'd
+### `[x]` R3-FG-44 (M) — `/api/auth/refresh` silently demotes locked sessions to TTL'd
 **Closes:** P10-AUTH-001. `refreshSession` calls `destroySession + createSession`; `createSession` always sets 7-day TTL even if source was `locked: true`.
 **Fix:** Detect `session.locked`, re-call `lockSession(newToken)` after creation; OR refuse refresh on locked sessions (409).
 
@@ -307,11 +307,11 @@ Also acquire the verify-lock BEFORE the back-fill stamp.
 **Closes:** P10-FE-001. Third-party CDN (Google Fonts) compromise reads every session token (including locked-permanent ones).
 **Fix:** Move to `httpOnly + secure + samesite=lax` cookie set by `/api/auth/verify`. Add strict CSP header.
 
-### `[ ]` R3-FG-46 (M) — HCS-20 v2 `play_pool_result` size cap throws on multi-byte symbols → session marked `corrupt`
+### `[x]` R3-FG-46 (M) — HCS-20 v2 `play_pool_result` size cap throws on multi-byte symbols → session marked `corrupt`
 **Closes:** P10-HCS-001. Successful on-chain play with NFT prize having Japanese / accented symbol blows past 1024-byte budget; submit throws → session aborted/corrupt by reader.
 **Fix:** Pre-flight size check; emit fallback minimal pool message (drop strategyMeta, truncate sym, page large `ser` lists across `play_pool_result_part_N` messages).
 
-### `[ ]` R3-FG-47 (M) — MCP client singleton + retry leaks transports
+### `[x]` R3-FG-47 (M) — MCP client singleton + retry leaks transports
 **Closes:** P10-MCP-001. Failed first call leaves a transport handle reference that may pin Lambda warm slot to broken transport.
 **Fix:** `try { await mcpClient?.close(); } catch {}` before re-nulling.
 
@@ -323,7 +323,7 @@ Also acquire the verify-lock BEFORE the back-fill stamp.
 **Closes:** P9-007. `hcs20-reader.ts::parseV1Burn` preserves withdrawTxId but doesn't dedup. Dashboard audit page double-counts duplicate burns.
 **Fix:** Move dedup logic from verify-audit into the reader's pass-2 reducer; expose deduped event stream + duplicates-detected stat.
 
-### `[ ]` R3-FG-50 (M) — Phantom-mint check toothless without `--agent`
+### `[x]` R3-FG-50 (M) — Phantom-mint check toothless without `--agent`
 **Closes:** P9-008. Agent flag is OPTIONAL; without it, the recipient check is skipped → cross-check passes for any incoming positive transfer of right amount to ANY account.
 **Fix:** Refuse to run cross-check unless `--agent` provided, OR auto-resolve agent from a topic-embedded operator metadata anchor.
 
@@ -335,11 +335,11 @@ Also acquire the verify-lock BEFORE the back-fill stamp.
 **Closes:** P5-OF-001. Subset of R3-FG-2 but specifically for the F24 path where the value sentinel is a fixed string.
 **Fix:** (Same as R3-FG-2) — use `withdrawTxId` as claim VALUE, compare-and-delete via `RELEASE_SCRIPT`.
 
-### `[ ]` R3-FG-53 (M) — R2-FG-25 disable path silently degrades on anchor timeout
+### `[x]` R3-FG-53 (M) — R2-FG-25 disable path silently degrades on anchor timeout
 **Closes:** P5-KS-002. Same shape as R3-FG-27 but for the disable side; no DL written.
 **Fix:** Same as R3-FG-27 — orphan + escalation on timeout.
 
-### `[ ]` R3-FG-54 (M) — `bumpUserLockContentionAttempts` local-only fallback misses cross-Lambda contention by design
+### `[x]` R3-FG-54 (M) — `bumpUserLockContentionAttempts` local-only fallback misses cross-Lambda contention by design
 **Closes:** P6-006. Redis INCR fallback to local entry counter — each Lambda only counts its own observations. Page threshold (6) never crossed; runaway play wedges verifier indefinitely.
 **Fix:** On INCR failure, escalate eagerly OR maintain per-Lambda counter that pages at MAX/2.
 

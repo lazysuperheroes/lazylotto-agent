@@ -331,11 +331,15 @@ describe('assertProductionRedis', () => {
     const original = env.NODE_ENV;
     const originalNet = env.HEDERA_NETWORK;
     const originalWebhook = env.RECONCILE_FAILURE_WEBHOOK_URL;
+    const originalAud = env.AUTH_PAGE_ORIGIN;
+    const originalMcp = env.LAZYLOTTO_MCP_URL;
     env.NODE_ENV = 'production';
     env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
     env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
     env.HEDERA_NETWORK = 'testnet'; // 0.3.4: also required in production
     env.RECONCILE_FAILURE_WEBHOOK_URL = 'https://hooks.example.com/test'; // F22
+    env.AUTH_PAGE_ORIGIN = 'https://testnet-agent.lazysuperheroes.com'; // R3-FG-43
+    env.LAZYLOTTO_MCP_URL = 'https://testnet-dapp.lazysuperheroes.com/api/mcp'; // R3-FG-80
     try {
       assertProductionRedis();
     } finally {
@@ -347,6 +351,10 @@ describe('assertProductionRedis', () => {
       else env.HEDERA_NETWORK = originalNet;
       if (originalWebhook === undefined) delete env.RECONCILE_FAILURE_WEBHOOK_URL;
       else env.RECONCILE_FAILURE_WEBHOOK_URL = originalWebhook;
+      if (originalAud === undefined) delete env.AUTH_PAGE_ORIGIN;
+      else env.AUTH_PAGE_ORIGIN = originalAud;
+      if (originalMcp === undefined) delete env.LAZYLOTTO_MCP_URL;
+      else env.LAZYLOTTO_MCP_URL = originalMcp;
     }
   });
 
@@ -623,14 +631,19 @@ describe('assertProductionRedis: HEDERA_NETWORK guard (security finding #7)', ()
     const origN = env.NODE_ENV;
     const origH = env.HEDERA_NETWORK;
     const origW = env.RECONCILE_FAILURE_WEBHOOK_URL;
+    const origAud = env.AUTH_PAGE_ORIGIN;
+    const origMcp = env.LAZYLOTTO_MCP_URL;
     env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
     env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
     env.RECONCILE_FAILURE_WEBHOOK_URL = 'https://hooks.example.com/test'; // F22
+    env.LAZYLOTTO_MCP_URL = 'https://dapp.example.com/api/mcp'; // R3-FG-80
     env.NODE_ENV = 'production';
     try {
       env.HEDERA_NETWORK = 'mainnet';
+      env.AUTH_PAGE_ORIGIN = 'https://dapp.lazysuperheroes.com'; // R3-FG-43
       assertProductionRedis();
       env.HEDERA_NETWORK = 'testnet';
+      env.AUTH_PAGE_ORIGIN = 'https://testnet-agent.lazysuperheroes.com';
       assertProductionRedis();
     } finally {
       delete env.UPSTASH_REDIS_REST_URL;
@@ -639,6 +652,8 @@ describe('assertProductionRedis: HEDERA_NETWORK guard (security finding #7)', ()
       if (origH === undefined) delete env.HEDERA_NETWORK; else env.HEDERA_NETWORK = origH;
       if (origW === undefined) delete env.RECONCILE_FAILURE_WEBHOOK_URL;
       else env.RECONCILE_FAILURE_WEBHOOK_URL = origW;
+      if (origAud === undefined) delete env.AUTH_PAGE_ORIGIN; else env.AUTH_PAGE_ORIGIN = origAud;
+      if (origMcp === undefined) delete env.LAZYLOTTO_MCP_URL; else env.LAZYLOTTO_MCP_URL = origMcp;
     }
   });
 });

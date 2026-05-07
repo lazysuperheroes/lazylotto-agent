@@ -66,6 +66,13 @@ export const POST = withStore(async (request: Request) => {
       );
     }
 
+    // R3-FG-37 (round-3 P7-002): wrap EVERYTHING after lock acquisition
+    // in try/finally so the lock releases on every exit path (including
+    // a thrown refresh). Pre-fix the inner try/finally only protected
+    // the post-loop section; a failure in `refreshUserIndex` /
+    // `refreshOperator` left the lock held for its full 10-min TTL,
+    // blocking legitimate retries.
+    try {
     const store = await getStore();
 
     // Pull the latest state — we want to re-stamp records that may have
@@ -113,24 +120,25 @@ export const POST = withStore(async (request: Request) => {
       console.warn('[migrate-schema] Failed to re-save operator:', err);
     }
 
-    try {
-      // Wait for any in-flight write-throughs to settle so the response
-      // reflects the actual persisted state.
-      await store.flush();
+    // Wait for any in-flight write-throughs to settle so the response
+    // reflects the actual persisted state.
+    await store.flush();
 
-      return NextResponse.json(
-        {
-          currentVersion: CURRENT_SCHEMA_VERSION,
-          usersTotal: usersBefore.length,
-          usersAtCurrentBefore,
-          usersBehindBefore,
-          usersMigrated,
-          operatorAtCurrentBefore,
-          operatorMigrated,
-        },
-        { headers: CORS_HEADERS },
-      );
+    return NextResponse.json(
+      {
+        currentVersion: CURRENT_SCHEMA_VERSION,
+        usersTotal: usersBefore.length,
+        usersAtCurrentBefore,
+        usersBehindBefore,
+        usersMigrated,
+        operatorAtCurrentBefore,
+        operatorMigrated,
+      },
+      { headers: CORS_HEADERS },
+    );
     } finally {
+      // R3-FG-37: outer finally — releases on EVERY exit path including
+      // a thrown refreshUserIndex/refreshOperator at line 73.
       await releaseOperatorLock('migrate-schema', lockToken);
     }
   } catch (err) {

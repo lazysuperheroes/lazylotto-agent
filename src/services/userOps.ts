@@ -287,8 +287,9 @@ export async function deregisterUserOp(
 
   try {
     const locked = await withUserLock(deps.store, ctx.userId, async () => {
-      // deregisterUser is sync and just flips active=false via the ledger.
-      deps.multiUser.deregisterUser(ctx.userId);
+      // R3-FG-33: deregisterUser is now async (refreshes DLs to check
+      // for unresolved play_uncertain referencing this user).
+      await deps.multiUser.deregisterUser(ctx.userId);
       const refreshed = deps.store.getUser(ctx.userId);
       return {
         deregistered: true,
@@ -492,7 +493,7 @@ export async function withdrawOperatorFees(
 export interface ReplayDepositOk {
   transactionId: string;
   credited: boolean;
-  status: 'credited' | 'already_processed' | 'rejected_revalidated';
+  status: 'credited' | 'not_credited' | 'already_processed' | 'rejected_revalidated';
 }
 
 export async function replayDeposit(
@@ -505,19 +506,31 @@ export async function replayDeposit(
       reason: 'transactionId must be a Hedera tx id (0.0.X-T-N or 0.0.X@T.N)',
     };
   }
+  // R3-FG-31 (round-3 P4-006): normalize tx id to canonical @-form
+  // before passing downstream. The dash-form `0.0.X-T-N` is accepted
+  // here for operator convenience (mirror node accepts both) but
+  // `force-release/route.ts:111`'s HEDERA_TX_ID_RE and the verifier's
+  // `parseTxIdTimestamp` only accept @-form. A replay-deposit that
+  // dead-letters with the dash form would later fail force-release
+  // with a 400. Rewrite `0.0.X-T-N` → `0.0.X@T.N` here so all
+  // downstream consumers see the canonical form.
+  const canonicalTxId = ctx.transactionId.replace(
+    /^(\d+\.\d+\.\d+)-(\d+)-(\d+)$/,
+    '$1@$2.$3',
+  );
 
   // Idempotency keyed on the tx id itself — admin double-clicks dedupe naturally.
   const idempotent = await withIdempotency<ReplayDepositOk>(
     'replay-deposit',
-    ctx.transactionId,
+    canonicalTxId,
     async () => {
       // Fetch tx from mirror node + hand off to DepositWatcher.
       const { getMirrorBaseUrl } = await import('../hedera/mirror.js');
       const mirrorBase = getMirrorBaseUrl();
-      const res = await fetch(`${mirrorBase}/transactions/${ctx.transactionId}`);
+      const res = await fetch(`${mirrorBase}/transactions/${canonicalTxId}`);
       if (!res.ok) {
         throw new ReplayDepositMirrorError(
-          `Transaction ${ctx.transactionId} not found on mirror node (${res.status})`,
+          `Transaction ${canonicalTxId} not found on mirror node (${res.status})`,
         );
       }
       const data = (await res.json()) as { transactions?: unknown[] };
@@ -531,10 +544,16 @@ export async function replayDeposit(
         tx as Parameters<typeof watcher.processTransaction>[0],
       );
 
+      // R3-FG-32 (round-3 P4-004): pre-fix collapsed every false-return
+      // reason (already-processed, tx not SUCCESS, malformed memo, no
+      // matching user, validation failure) into the misleading
+      // `'already_processed'`. Operators now get a more honest
+      // catch-all that doesn't pretend the deposit was successfully
+      // handled. A discriminated-union refactor is deferred (D-12).
       return {
-        transactionId: ctx.transactionId,
+        transactionId: canonicalTxId,
         credited,
-        status: credited ? 'credited' : 'already_processed',
+        status: credited ? 'credited' : 'not_credited',
       };
     },
   );

@@ -741,11 +741,19 @@ async function reconstructSession(
       }
     }
   } else if (bucket.aborted) {
-    status = 'closed_aborted';
     if (bucket.aborted.completedPools !== bucket.pools.length) {
+      // R3-FG-36 (round-3 P5-SR-002): promote aborted-with-mismatch to
+      // `corrupt`. Pre-fix only emitted a warning while leaving status
+      // = `closed_aborted` — a topic-only auditor saw a clean abort
+      // even though the pool count contradicted the abort message.
+      // The closed_success branch already promotes count/merkle
+      // mismatch to `corrupt`; aborted now matches.
+      status = 'corrupt';
       warnings.push(
         `Aborted session pool count mismatch: aborted claims ${bucket.aborted.completedPools}, observed ${bucket.pools.length}`,
       );
+    } else {
+      status = 'closed_aborted';
     }
   } else {
     // Open seen, no terminal — in_flight or orphaned by timeout

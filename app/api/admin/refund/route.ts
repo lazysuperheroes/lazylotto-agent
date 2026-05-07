@@ -16,6 +16,7 @@ import { getAgentContext } from '../../_lib/mcp';
 import { withStore } from '../../_lib/withStore';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { processRefund } from '~/hedera/refund';
+import { withIdempotency } from '~/lib/idempotency';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -45,6 +46,21 @@ export const POST = withStore(async (request: Request) => {
       );
     }
 
+    // R3-FG-41 (round-3 P7-009): require Idempotency-Key (matches
+    // /api/admin/withdraw-fees). Pre-fix the route relied solely on
+    // processRefund's internal SET-NX-EX claim — sufficient for the
+    // exact-same-txId race but allowed any non-receipt-uncertain
+    // throw to release the claim and re-process on a retry. Belt +
+    // braces: route-level idempotency by header, function-level by
+    // transactionId.
+    const idempotencyKey = request.headers.get('Idempotency-Key');
+    if (!idempotencyKey) {
+      return NextResponse.json(
+        { error: 'Missing required header: Idempotency-Key' },
+        { status: 400, headers: CORS_HEADERS },
+      );
+    }
+
     const store = await getStore();
     // Refresh user index so the memo→user lookup inside processRefund works
     // against fresh data (user could have been registered since last load).
@@ -56,14 +72,31 @@ export const POST = withStore(async (request: Request) => {
     // for any third party reading the topic.
     const { multiUser } = await getAgentContext();
     const accounting = multiUser.getAccountingService();
-    const result = await processRefund(getClient(), body.transactionId, {
-      store,
-      ...(accounting ? { accounting } : {}),
-      reason: 'admin',
-      performedBy: auth.accountId,
-    });
 
-    return NextResponse.json(result, { headers: CORS_HEADERS });
+    const idempotent = await withIdempotency(
+      `admin-refund:${body.transactionId}`,
+      idempotencyKey,
+      () =>
+        processRefund(getClient(), body.transactionId!, {
+          store,
+          ...(accounting ? { accounting } : {}),
+          reason: 'admin',
+          performedBy: auth.accountId,
+        }),
+    );
+    if (idempotent.kind === 'in-flight') {
+      return NextResponse.json(
+        { error: 'Refund already in flight on another Lambda; retry shortly.' },
+        { status: 409, headers: CORS_HEADERS },
+      );
+    }
+    const headers = {
+      ...CORS_HEADERS,
+      ...(idempotent.kind === 'duplicate'
+        ? { 'X-Idempotent-Replayed': 'true' }
+        : {}),
+    };
+    return NextResponse.json(idempotent.result, { headers });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(

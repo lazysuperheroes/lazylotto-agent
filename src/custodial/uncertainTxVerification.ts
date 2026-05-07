@@ -445,14 +445,35 @@ async function bumpUserLockContentionAttempts(
       }
     }
   } catch (e) {
+    // R3-FG-54 (round-3 P6-006): pre-fix used a per-process local
+    // fallback. Each Lambda counted only its own observations across
+    // a Redis outage; the page threshold (6) was never crossed because
+    // each Lambda saw only 1-2. Now: eagerly escalate on Redis
+    // failure — better duplicate pages than a silently stuck
+    // verifier. The dedup at R3-FG-48 (escalation idempotency) bounds
+    // page volume.
     const prior =
       (entry.details?.userLockContentionAttempts as number | undefined) ?? 0;
     next = prior + 1;
-    logger.warn('bumpUserLockContentionAttempts INCR failed; using local fallback', {
+    logger.error('bumpUserLockContentionAttempts INCR failed — escalating eagerly', {
       component: 'UncertainTx',
       txId: entry.transactionId,
       error: e instanceof Error ? e.message : String(e),
     });
+    try {
+      await escalateUncertainDlFailure({
+        kind: (entry.kind ?? 'withdrawal_uncertain') as
+          | 'withdrawal_uncertain'
+          | 'operator_fee_withdraw_uncertain'
+          | 'play_uncertain'
+          | 'refund_uncertain',
+        uncertainTxId: entry.transactionId,
+        userId: entry.details?.userId as string | undefined,
+        cause: e,
+      });
+    } catch {
+      /* logged above */
+    }
   }
   try {
     await store.upsertDeadLetter({

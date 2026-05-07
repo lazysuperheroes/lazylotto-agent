@@ -171,7 +171,15 @@ describe('hcs20-reader: aborted session', () => {
     assert.equal(result.stats.sessionsByStatus.closed_aborted, 1);
   });
 
-  it('emits a warning when aborted completedPools disagrees with observed', async () => {
+  it('R3-FG-36: aborted with pool-count mismatch promotes to corrupt (was closed_aborted+warning)', async () => {
+    // R3-FG-36 (round-3 P5-SR-002): aborted-with-mismatch now matches
+    // closed-success-with-mismatch behavior — both promote to `corrupt`.
+    // Pre-fix the closed_success branch promoted while the closed_aborted
+    // branch only logged a warning; topic-only auditor saw a clean
+    // abort despite the count contradiction.
+    //
+    // revert-proof: status assertion fails if status reverts to
+    // 'closed_aborted'.
     const sessionId = 'sess-3';
     const messages: RawTopicMessage[] = [
       open(1, sessionId, 5),
@@ -182,7 +190,7 @@ describe('hcs20-reader: aborted session', () => {
 
     const result = await parseAuditTopic(messages, NOW);
     const session = result.sessions[0]!;
-    assert.equal(session.status, 'closed_aborted');
+    assert.equal(session.status, 'corrupt');
     assert.ok(
       session.warnings.some((w) => w.includes('pool count mismatch')),
       'expected pool count mismatch warning',

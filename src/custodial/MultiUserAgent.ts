@@ -367,7 +367,27 @@ export class MultiUserAgent {
    * Deactivate a user. After deregistration the user can only withdraw
    * their remaining balance.
    */
-  deregisterUser(userId: string): void {
+  async deregisterUser(userId: string): Promise<void> {
+    // R3-FG-33 (round-3 P5-PU-002): block deregister if any unresolved
+    // play_uncertain entry references this userId. Pre-fix the user
+    // could deregister with held reservations; manual reconstruction
+    // tooling later threw `UserNotFoundError` on `releaseReserve` and
+    // the DL row wedged permanently with F15's `successTriagedAt`
+    // gate refusing force-release.
+    await this.store.refreshDeadLetters().catch(() => undefined);
+    const openPlays = this.store.getDeadLetters().filter(
+      (e) =>
+        e.kind === 'play_uncertain' &&
+        !e.resolvedAt &&
+        (e.details as { userId?: string })?.userId === userId,
+    );
+    if (openPlays.length > 0) {
+      throw new Error(
+        `Cannot deregister ${userId}: ${openPlays.length} unresolved play_uncertain ` +
+          `entr${openPlays.length === 1 ? 'y' : 'ies'} reference this user. Resolve via ` +
+          `reconcile / admin force-release before deregistering.`,
+      );
+    }
     this.ledger.deregisterUser(userId);
   }
 
@@ -2149,8 +2169,27 @@ export class MultiUserAgent {
     //    operators running recovery simultaneously — is closed by the
     //    per-user lock around `recoverStuckPrizesForUser` at the MCP
     //    tool layer (operator.ts).
+    // R3-FG-35 (round-3 P5-PT-001): re-read the dead-letter list AFTER
+    // the contract tx. Pre-fix: `affectedEntries` was captured at
+    // recovery start. Concurrent play that emitted a NEW
+    // prize_transfer_failed DL between snapshot and contract tx had
+    // its prizes ALSO transferred (transferAllPrizes empties the
+    // user's pending state wholesale), but its DL was NOT in the
+    // resolve loop → phantom unresolved row referencing prizes that
+    // no longer exist on-chain. Now: refresh + scan for any
+    // prize_transfer_failed for this user with timestamp ≤ contract
+    // tx and resolve those too.
+    await this.store.refreshDeadLetters().catch(() => undefined);
+    const recoveryTs = new Date().toISOString();
+    const allAffectedNow = this.store.getDeadLetters().filter(
+      (e) =>
+        e.kind === 'prize_transfer_failed' &&
+        !e.resolvedAt &&
+        (e.details as { userId?: string })?.userId === userId &&
+        e.timestamp <= recoveryTs,
+    );
     let resolvedDeadLetters = 0;
-    for (const entry of affectedEntries) {
+    for (const entry of allAffectedNow) {
       try {
         await this.store.upsertDeadLetter({
           ...entry,

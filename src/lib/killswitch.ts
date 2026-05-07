@@ -153,17 +153,29 @@ async function recordControlEventWithTimeout(
   event: 'killswitch_enabled' | 'killswitch_disabled',
   details: { reason?: string; by: string },
 ): Promise<{ ok: true } | { ok: false; reason: string; cause: unknown }> {
-  let timeoutHandle: NodeJS.Timeout | undefined;
+  // R3-FG-28 (round-3 P2-006 / P5-KS-001 / P5-KS-002): use AbortSignal
+  // (with timeout) so the recordControlEvent submission is actually
+  // CANCELLED on timeout. Pre-fix `Promise.race` left the HCS submit
+  // running in background — could emit a duplicate `killswitch_enabled`
+  // anchor AFTER the orphan row was written and Redis flipped, leaving
+  // the topic with TWO events for a single engagement. Plus a
+  // microtask race between the timer and the HCS resolution could
+  // produce both branches running.
+  //
+  // Note: this requires accounting.recordControlEvent to honor
+  // AbortSignal — which most HCS SDKs do via fetch's signal. If the
+  // SDK ignores the signal, behavior is unchanged from R2-FG-25 (no
+  // worse).
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), KILLSWITCH_HCS_TIMEOUT_MS);
   try {
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutHandle = setTimeout(
-        () => reject(new Error(`HCS submit timeout after ${KILLSWITCH_HCS_TIMEOUT_MS}ms`)),
-        KILLSWITCH_HCS_TIMEOUT_MS,
-      );
-    });
     await Promise.race([
       accounting.recordControlEvent(event, details),
-      timeoutPromise,
+      new Promise<never>((_, reject) => {
+        ac.signal.addEventListener('abort', () => {
+          reject(new Error(`HCS submit timeout after ${KILLSWITCH_HCS_TIMEOUT_MS}ms`));
+        });
+      }),
     ]);
     return { ok: true };
   } catch (err) {
@@ -173,7 +185,7 @@ async function recordControlEventWithTimeout(
       cause: err,
     };
   } finally {
-    if (timeoutHandle) clearTimeout(timeoutHandle);
+    clearTimeout(timer);
   }
 }
 
@@ -203,6 +215,48 @@ export async function enableKillSwitch(
           error: result.reason,
         },
       );
+      // R3-FG-27 (round-3 P1-002 / P6-005 / P9-005): R2-FG-25's commit
+      // promised the timeout branch writes audit_trail_orphaned + flips
+      // Redis. Implementation only logged. Now: write the orphan row +
+      // escalate via webhook so the operator sees the missing on-chain
+      // anchor and can replay manually. Without this, the killswitch
+      // engagement evidence is invisible to a topic-only auditor in a
+      // DR scenario.
+      try {
+        const { createStore } = await import('../custodial/createStore.js');
+        const store = await createStore();
+        await store.upsertDeadLetter({
+          transactionId: `audit-orphan:killswitch-enable:${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          error: `killswitch enable HCS anchor failed/timed out: ${result.reason}`,
+          kind: 'audit_trail_orphaned',
+          details: {
+            sourceKind: 'killswitch_enabled',
+            event: 'killswitch_enabled',
+            reason,
+            enabledBy,
+            phase: 'killswitch_anchor_failed_pre_engage',
+          },
+        });
+      } catch (orphanErr) {
+        logger.error('killswitch enable orphan-write also failed', {
+          component: 'KillSwitch',
+          error: orphanErr instanceof Error ? orphanErr.message : String(orphanErr),
+        });
+      }
+      try {
+        const { escalateUncertainDlFailure } = await import('./escalation.js');
+        await escalateUncertainDlFailure({
+          kind: 'audit_trail_orphaned',
+          uncertainTxId: `killswitch-enable:${Date.now()}`,
+          cause: result.cause,
+        });
+      } catch (escErr) {
+        logger.error('killswitch enable escalation also failed', {
+          component: 'KillSwitch',
+          error: escErr instanceof Error ? escErr.message : String(escErr),
+        });
+      }
     }
   }
   // R2-FG-25: Redis flip happens regardless of anchor outcome. If the
@@ -257,6 +311,31 @@ export async function disableKillSwitch(
           error: result.reason,
         },
       );
+      // R3-FG-53 (round-3 P5-KS-002): orphan + escalate disable-side too.
+      try {
+        const { createStore } = await import('../custodial/createStore.js');
+        const store = await createStore();
+        await store.upsertDeadLetter({
+          transactionId: `audit-orphan:killswitch-disable:${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          error: `killswitch disable HCS anchor failed/timed out: ${result.reason}`,
+          kind: 'audit_trail_orphaned',
+          details: {
+            sourceKind: 'killswitch_disabled',
+            event: 'killswitch_disabled',
+            disabledBy,
+            phase: 'killswitch_anchor_failed_pre_disengage',
+          },
+        });
+      } catch { /* logged above */ }
+      try {
+        const { escalateUncertainDlFailure } = await import('./escalation.js');
+        await escalateUncertainDlFailure({
+          kind: 'audit_trail_orphaned',
+          uncertainTxId: `killswitch-disable:${Date.now()}`,
+          cause: result.cause,
+        });
+      } catch { /* logged above */ }
     }
   }
   const redis = await getRedis();
