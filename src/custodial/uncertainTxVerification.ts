@@ -44,6 +44,8 @@ import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 import { logger } from '../lib/logger.js';
 import { escalateUncertainDlFailure } from '../lib/escalation.js';
 import {
+  acquireOperatorLock,
+  releaseOperatorLock,
   releaseUserLock,
   RELEASE_SCRIPT,
   tryAcquireUserLockWithBackoff,
@@ -578,28 +580,33 @@ async function stampProgress(
   progress: Record<string, unknown>,
 ): Promise<void> {
   try {
-    // R2-FG-12 (round-2 X-05): refresh-before-merge. The `entry.details`
-    // we receive is a snapshot from the verifier's loop entry. A
-    // concurrent writer (e.g., F4's `bumpVerificationAttempts`) writes
-    // to the SAME row; their fields are silently lost on the next stamp
-    // when we merge over the stale snapshot. Re-read the latest entry
-    // (best-effort — if `getDeadLetters` fails we fall back to the
-    // caller's snapshot rather than skipping the stamp entirely).
-    let baseDetails: Record<string, unknown> = entry.details ?? {};
+    // R2-FG-12 + R3-FG-10 (round-3 P2-001): refresh-before-merge AND
+    // spread the FRESH entry's top-level fields, not the caller's
+    // pre-refresh snapshot. Pre-R3 the upsert spread `...entry`
+    // (top-level frozen at loop entry) — a concurrent writer that
+    // set `resolvedAt` between Lambda A's refresh and Lambda A's
+    // upsert had it REVERTED to undefined → next pass re-ran the
+    // entry from scratch.
+    //
+    // If `fresh.resolvedAt` is set, ABORT — someone else already
+    // resolved the entry. Stamping over it would re-open it.
+    let fresh: DeadLetterEntry | undefined;
     try {
       await store.refreshDeadLetters();
-      const fresh = store
+      fresh = store
         .getDeadLetters()
         .find((e) => e.transactionId === entry.transactionId);
-      if (fresh) {
-        baseDetails = (fresh.details ?? {}) as Record<string, unknown>;
-      }
     } catch {
-      /* fall back to the caller-supplied snapshot */
+      /* fall through with the caller-supplied snapshot */
+    }
+    const base = fresh ?? entry;
+    if (base.resolvedAt) {
+      // Sibling writer resolved the entry; do not re-stamp.
+      return;
     }
     await store.upsertDeadLetter({
-      ...entry,
-      details: { ...baseDetails, ...progress },
+      ...base,
+      details: { ...(base.details ?? {}), ...progress },
     });
   } catch (e) {
     logger.warn('uncertain dead-letter progress stamp failed', {
@@ -842,6 +849,16 @@ export async function verifyUncertainWithdrawals(
         continue;
       }
     }
+    // R3-FG-8 (round-3 P5-WU-001): track whether any mutation step
+    // threw. Pre-fix each step was `try/catch/log` and control fell
+    // through to the audit step + markResolved. If `recordWithdrawal`
+    // threw after settle+totalWithdrawn succeeded, the entry was
+    // marked resolved with `historyWrittenAt` UNSET — but the topic
+    // showed the burn. Subsequent passes never re-walked the entry
+    // (resolvedAt set). Now: track failures, write audit_trail_orphaned
+    // with the failed phase, and SKIP markResolved so the next pass
+    // can retry.
+    let mutationError: { phase: string; cause: unknown } | null = null;
     try {
       if (!progress.settledAt) {
         try {
@@ -849,6 +866,7 @@ export async function verifyUncertainWithdrawals(
           progress.settledAt = new Date().toISOString();
           await stampProgress(store, entry, progress);
         } catch (e) {
+          mutationError = { phase: 'settle_spend', cause: e };
           logger.warn('withdrawal_uncertain settleSpend failed', {
             component: 'UncertainTx',
             withdrawTxId,
@@ -858,7 +876,7 @@ export async function verifyUncertainWithdrawals(
         }
       }
 
-      if (!progress.totalWithdrawnAt) {
+      if (!progress.totalWithdrawnAt && !mutationError) {
         try {
           store.updateBalance(details.userId, (b) => {
             const tokEntry = b.tokens[details.tokenKey!];
@@ -868,6 +886,7 @@ export async function verifyUncertainWithdrawals(
           progress.totalWithdrawnAt = new Date().toISOString();
           await stampProgress(store, entry, progress);
         } catch (e) {
+          mutationError = { phase: 'total_withdrawn', cause: e };
           logger.warn('withdrawal_uncertain totalWithdrawn update failed', {
             component: 'UncertainTx',
             withdrawTxId,
@@ -876,7 +895,7 @@ export async function verifyUncertainWithdrawals(
         }
       }
 
-      if (!progress.historyWrittenAt) {
+      if (!progress.historyWrittenAt && !mutationError) {
         try {
           store.recordWithdrawal({
             userId: details.userId,
@@ -889,6 +908,7 @@ export async function verifyUncertainWithdrawals(
           progress.historyWrittenAt = new Date().toISOString();
           await stampProgress(store, entry, progress);
         } catch (e) {
+          mutationError = { phase: 'history_written', cause: e };
           logger.warn('withdrawal_uncertain recordWithdrawal failed', {
             component: 'UncertainTx',
             withdrawTxId,
@@ -954,6 +974,35 @@ export async function verifyUncertainWithdrawals(
       await store.flush();
     } catch {
       /* flush failure is logged inside the store */
+    }
+    // R3-FG-8 (round-3 P5-WU-001): if any mutation step failed, write
+    // an audit_trail_orphaned row and SKIP markResolved so the next
+    // pass retries. Pre-fix marked resolved unconditionally even when
+    // a step had thrown, leaving the entry with missing markers and
+    // no path back to retry.
+    if (mutationError) {
+      await recordAuditOrphan(
+        store,
+        'withdrawal_uncertain',
+        withdrawTxId,
+        {
+          userId: details.userId,
+          amount: details.amount,
+          tokenKey: details.tokenKey,
+          recipientAccountId: details.recipientAccountId ?? '',
+          withdrawTxId,
+          phase: `${mutationError.phase}_failed`,
+        },
+        mutationError.cause,
+      );
+      await releaseVerifyLock(withdrawTxId, lockFence);
+      outcomes.push({
+        withdrawTxId,
+        userId,
+        status: 'still_uncertain',
+        note: `Mutation step '${mutationError.phase}' failed; entry left unresolved for retry on next pass.`,
+      });
+      continue;
     }
     await markResolved(store, entry, withdrawTxId, progress);
     // F26: release lock after successful resolve.
@@ -1122,6 +1171,14 @@ export async function verifyUncertainOperatorFeeWithdrawals(
       // detects as wallet < ledger insolvency, plus we write an
       // `audit_trail_orphaned` row on mutation failure so an operator
       // can manually replay.
+      //
+      // R3-FG-12 (round-3 P4-005): acquire `withdraw-fees` operator-lock
+      // around the debit so a concurrent in-band operatorWithdrawFees
+      // call on a DIFFERENT token can't race the read-modify-write on
+      // `operator.balances`. The in-band path holds this same lock
+      // around its debit; the verifier was bypassing it → last-write-
+      // wins on the in-process operator cache → one debit lost.
+      const opLockToken = await acquireOperatorLock('withdraw-fees', 60);
       operatorProgress.operatorDebitedAt = new Date().toISOString();
       await stampProgress(store, entry, operatorProgress);
       try {
@@ -1158,6 +1215,11 @@ export async function verifyUncertainOperatorFeeWithdrawals(
           },
           e,
         );
+      } finally {
+        // R3-FG-12: release the withdraw-fees operator-lock.
+        if (opLockToken) {
+          await releaseOperatorLock('withdraw-fees', opLockToken);
+        }
       }
     }
 
@@ -1414,11 +1476,20 @@ export async function verifyUncertainPlays(
     // `successTriagedAt` marker depends on the resolve write below.
     if (accounting) {
       try {
+        // R3-FG-14 (round-3 P4-003): the verifier is the actor here,
+        // not the user. Pre-fix `by: details.userId` made it look on
+        // the topic as if the user themselves triaged their own
+        // play_uncertain reservations — misleading auditor attribution.
+        // R3-FG-22 (round-3 P5-PU-001): deterministic idempotencyKey
+        // so retry passes don't double-emit the anchor. Both verifier
+        // and force-release sibling produce the SAME key for the same
+        // uncertainTxId; readers can dedup.
         await accounting.recordControlEvent('play_uncertain_success_pending_triage', {
-          by: details.userId,
+          by: 'reconcile',
           uncertainTxId,
           userId: details.userId,
           tokenReservations: details.tokenReservations,
+          idempotencyKey: `play-triage:${uncertainTxId}`,
         });
       } catch (anchorErr) {
         logger.warn('play_uncertain SUCCESS triage anchor write failed', {

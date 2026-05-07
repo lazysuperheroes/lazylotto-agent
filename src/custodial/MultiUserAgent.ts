@@ -446,6 +446,18 @@ export class MultiUserAgent {
       } catch {
         /* logged above */
       }
+      // R3-FG-17: escalate strategy_change audit failure too.
+      try {
+        const { escalateUncertainDlFailure } = await import('../lib/escalation.js');
+        await escalateUncertainDlFailure({
+          kind: 'audit_trail_orphaned',
+          uncertainTxId: `strategy:${userId}:${Date.now()}`,
+          userId,
+          cause: auditErr,
+        });
+      } catch (escErr) {
+        console.error('strategy_change audit-failure escalation also failed:', escErr);
+      }
     }
 
     return updated;
@@ -1411,6 +1423,23 @@ export class MultiUserAgent {
         } catch {
           /* logged above */
         }
+        // R3-FG-17 (round-3 P9-001): page the operator. Pre-fix only
+        // wrote a DL row + log; the escalation kind union didn't even
+        // accept `audit_trail_orphaned`. Now extended in escalation.ts.
+        try {
+          const { escalateUncertainDlFailure } = await import('../lib/escalation.js');
+          await escalateUncertainDlFailure({
+            kind: 'audit_trail_orphaned',
+            uncertainTxId: transactionId,
+            userId,
+            cause: auditErr,
+          });
+        } catch (escErr) {
+          logger.error('in-band withdrawal audit-failure escalation also failed', {
+            component: 'MultiUserAgent',
+            error: escErr instanceof Error ? escErr.message : String(escErr),
+          });
+        }
       }
 
       const record: WithdrawalRecord = {
@@ -1783,6 +1812,20 @@ export class MultiUserAgent {
         });
       } catch {
         /* logged above */
+      }
+      // R3-FG-17: escalate in-band operator-fee audit failure too.
+      try {
+        const { escalateUncertainDlFailure } = await import('../lib/escalation.js');
+        await escalateUncertainDlFailure({
+          kind: 'audit_trail_orphaned',
+          uncertainTxId: transactionId,
+          cause: auditErr,
+        });
+      } catch (escErr) {
+        logger.error('in-band operator-fee audit-failure escalation also failed', {
+          component: 'MultiUserAgent',
+          error: escErr instanceof Error ? escErr.message : String(escErr),
+        });
       }
     }
 

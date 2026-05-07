@@ -191,8 +191,17 @@ export async function createMcpServer(): Promise<McpServer> {
     authToken: process.env.MCP_AUTH_TOKEN || null,
     requireAuth: (providedToken?: string) => requireAuthCheck(providedToken),
     resolveUserId: (accountId: string) => {
-      const user = store.getUserByAccountId(accountId);
-      return user?.userId ?? null;
+      // R3-FG-13 (round-3 P4-007): match the eoaAddress fallback that
+      // HTTP routes use (e.g. app/api/user/play/route.ts:60). Without
+      // this, a user who registered with eoaAddress differing from
+      // their auth-resolved accountId (EVM-form vs Hedera-form) gets
+      // "Not registered" via MCP but succeeds via HTTP — asymmetric
+      // per-user enforcement.
+      const direct = store.getUserByAccountId(accountId);
+      if (direct) return direct.userId;
+      const lower = accountId.toLowerCase();
+      const byEoa = store.getAllUsers().find((u) => u.eoaAddress.toLowerCase() === lower);
+      return byEoa?.userId ?? null;
     },
     checkDeposits: () => mu.pollDepositsOnce(),
     acquireUserLock: (userId: string) => acquireUserLock(userId),

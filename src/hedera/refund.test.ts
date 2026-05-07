@@ -617,8 +617,13 @@ describe('verifyUncertainRefunds dispatch', () => {
     }) as typeof fetch;
   }
 
-  function installRedis(): { state: Map<string, unknown> } {
+  function installRedis(): { state: Map<string, unknown>; sets: Map<string, Set<unknown>> } {
     const state = new Map<string, unknown>();
+    // R3-FG-21 (round-3 P8-007): back sadd/sismember with a real Map so
+    // any future code that consults the permanent SADD set hits a real
+    // round-trip. Pre-fix `() => 0` no-ops masked R2-FG-2's behavior in
+    // the dispatch suite.
+    const sets = new Map<string, Set<unknown>>();
     const mock = {
       async set(key: string, value: string | number, options?: { nx?: boolean; ex?: number }) {
         if (options?.nx) {
@@ -631,8 +636,20 @@ describe('verifyUncertainRefunds dispatch', () => {
       },
       async get(key: string) { return state.get(key) ?? null; },
       async del(key: string) { return state.delete(key) ? 1 : 0; },
-      async sadd() { return 0; },
-      async sismember() { return 0; },
+      async sadd(key: string, member: string) {
+        let s = sets.get(key);
+        if (!s) { s = new Set(); sets.set(key, s); }
+        if (s.has(member)) return 0;
+        s.add(member);
+        return 1;
+      },
+      async sismember(key: string, member: string) {
+        return sets.get(key)?.has(member) ? 1 : 0;
+      },
+      async srem(key: string, member: string) {
+        const s = sets.get(key);
+        return s?.delete(member) ? 1 : 0;
+      },
       async incr(k: string) { const n = Number(state.get(k) ?? 0) + 1; state.set(k, n); return n; },
       async expire() { return 1; },
       async rpush() { return 1; },
@@ -650,7 +667,7 @@ describe('verifyUncertainRefunds dispatch', () => {
       },
     };
     (globalThis as unknown as { __lazylottoRedisClient__?: unknown }).__lazylottoRedisClient__ = mock;
-    return { state };
+    return { state, sets };
   }
 
   function uninstallRedis(): void {

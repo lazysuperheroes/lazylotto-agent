@@ -656,6 +656,9 @@ async function handlePlay(
       uncertainTxId: entry.transactionId,
       userId: details.userId,
       tokenReservations: details.tokenReservations,
+      // R3-FG-22: same deterministic key as the verifier sibling so
+      // a retry-after-partial-failure doesn't double-emit the anchor.
+      idempotencyKey: `play-triage:${entry.transactionId}`,
     });
   } catch (anchorErr) {
     ctx.log.warn('force-release play_uncertain SUCCESS triage anchor write failed', {
@@ -899,10 +902,27 @@ async function handleRefund(
 
   if (!progress.auditWrittenAt && details.agentAccountId) {
     try {
+      // R3-FG-15 (round-3 P4-002): record `to: entry.sender` (the
+      // original deposit sender — the canonical recipient) not the
+      // agent. Pre-fix self-loop (`from === to === agent`) produced
+      // meaningless audit anchors that broke third-party balance
+      // reconstruction. Verifier path already does this correctly;
+      // force-release sibling now matches. Fallback to depositRecord
+      // if entry.sender is missing; refuse if both are absent.
+      const refundTo = entry.sender ?? depositRecord?.userId;
+      if (!refundTo) {
+        return {
+          ok: false,
+          status: 400,
+          error:
+            `Cannot force-release: refund SUCCESS branch needs entry.sender or a depositRecord ` +
+            `to attribute the refund recipient. Both are missing for ${entry.transactionId}.`,
+        };
+      }
       await ctx.accounting.recordRefund({
         amount: details.humanAmount,
         from: details.agentAccountId,
-        to: details.agentAccountId, // sender unknown at force-release time; agent attests
+        to: refundTo,
         originalDepositTxId: details.originalTxId,
         refundTxId: details.refundTxId,
         reason: details.reason ?? 'operator_initiated',

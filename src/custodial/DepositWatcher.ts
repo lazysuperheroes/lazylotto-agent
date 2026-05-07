@@ -563,8 +563,13 @@ export class DepositWatcher {
           // Check if token is registered (not just decimals value)
           const meta = getTokenMetaSync(tt.token_id);
           if (!meta) {
-            // Unknown token — trigger async lookup for future poll cycles
-            void getTokenMeta(tt.token_id);
+            // Unknown token — trigger async lookup for future poll cycles.
+            // R3-FG-20: getTokenMeta now THROWS on mirror failure (was
+            // silently caching `{decimals: 0}`), so silence the rejection
+            // here — the dead-letter we throw below carries the deposit
+            // forward; the next pollOnce after registry warm-up retries
+            // the lookup organically.
+            void getTokenMeta(tt.token_id).catch(() => undefined);
             // R2-FG-26: throw a typed sentinel so pollOnce can detect
             // unknown-token deposits specifically and HOLD the
             // watermark, giving the registry warm-up a chance to

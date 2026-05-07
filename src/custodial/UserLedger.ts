@@ -186,40 +186,62 @@ export class UserLedger {
       // 7. Flush BEFORE releasing the lock so the next acquirer reads
       //    a fully-consistent Redis state.
       //
-      // R2-FG-30 (round-2 G-17): flush failure here is the worst
-      // possible state — local state mutated, Redis stale, lock about
-      // to release → next acquirer reads un-credited balance and a
-      // user appears short on funds. If flush throws we MUST escalate
-      // (page) so an operator can manually reconcile + force-flush.
+      // R2-FG-30 + R3-FG-6 (round-3 P1-003 / P6-004 / P9-006): R2-FG-30's
+      // commit message promised "retry once + escalate via
+      // escalateUncertainDlFailure (extend the union to accept
+      // 'deposit_credit_flush_failed')". Production code did NEITHER.
+      // Now: one-shot retry with 250ms backoff, then escalate. Re-throw
+      // so callers see the failure too.
       try {
         await this.store.flush();
-      } catch (flushErr) {
-        console.error(
-          `[UserLedger] CRITICAL: flush failed after credit ${txId} for user ${userId}. ` +
-            `Local state mutated, Redis NOT persisted. Releasing lock with ` +
-            `inconsistent state — operator must reconcile.`,
-          flushErr,
-        );
+      } catch (firstErr) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
         try {
-          await this.store.upsertDeadLetter({
-            transactionId: `audit-orphan:in-band:credit-flush:${txId}`,
-            timestamp: new Date().toISOString(),
-            error: `creditDeposit flush failed after recording: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-            kind: 'audit_trail_orphaned',
-            details: {
-              sourceKind: 'in_band_credit_flush',
-              sourceTxId: txId,
+          await this.store.flush();
+        } catch (flushErr) {
+          console.error(
+            `[UserLedger] CRITICAL: flush failed (twice) after credit ${txId} for user ${userId}. ` +
+              `Local state mutated, Redis NOT persisted. Releasing lock with ` +
+              `inconsistent state — operator must reconcile.`,
+            flushErr,
+          );
+          try {
+            await this.store.upsertDeadLetter({
+              transactionId: `audit-orphan:in-band:credit-flush:${txId}`,
+              timestamp: new Date().toISOString(),
+              error: `creditDeposit flush failed after recording: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+              kind: 'audit_trail_orphaned',
+              details: {
+                sourceKind: 'in_band_credit_flush',
+                sourceTxId: txId,
+                userId,
+                grossAmount,
+                token,
+                phase: 'flush_failed_post_record',
+              },
+            });
+          } catch {
+            /* if even this fails, the console.error above is the trail */
+          }
+          // R3-FG-6: page the operator. Redis-deficient state needs
+          // human intervention; the audit-orphan row alone wasn't paging
+          // anything before this fix.
+          try {
+            const { escalateUncertainDlFailure } = await import('../lib/escalation.js');
+            await escalateUncertainDlFailure({
+              kind: 'deposit_credit_flush_failed',
+              uncertainTxId: txId,
               userId,
-              grossAmount,
-              token,
-              phase: 'flush_failed_post_record',
-            },
-          });
-        } catch {
-          /* if even this fails, the console.error above is the trail */
+              cause: flushErr,
+            });
+          } catch (escalateErr) {
+            console.error(
+              '[UserLedger] CRITICAL: even the escalation webhook failed:',
+              escalateErr,
+            );
+          }
+          throw flushErr;
         }
-        // Re-throw so callers see the failure and can retry / page.
-        throw flushErr;
       }
 
       return newBalances;

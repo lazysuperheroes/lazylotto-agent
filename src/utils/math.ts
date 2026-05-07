@@ -38,21 +38,30 @@ export async function getTokenMeta(tokenId: string): Promise<TokenMeta> {
     return { decimals: 8, symbol: 'HBAR' };
   }
 
-  try {
-    const info = await getTokenInfo(tokenId);
-    const meta: TokenMeta = {
-      decimals: Number(info.decimals),
-      symbol: info.symbol || tokenId,
-    };
-    TOKEN_REGISTRY.set(tokenId, meta);
-    return meta;
-  } catch {
-    // If mirror node fails, default to 0 decimals with token ID as symbol
-    console.warn(`[TokenRegistry] Could not look up token ${tokenId}, using 0 decimals`);
-    const fallback: TokenMeta = { decimals: 0, symbol: tokenId };
-    TOKEN_REGISTRY.set(tokenId, fallback);
-    return fallback;
+  // R3-FG-20 (round-3 P10-TOK-001): NEVER cache a failed lookup as
+  // `{decimals: 0}`. Pre-fix code did exactly that — a single mirror
+  // blip on first lookup of a new token cemented 0 decimals
+  // permanently in the warm Lambda's process. Every subsequent
+  // transfer/withdrawal of that token computed
+  // `Math.round(amount * 10^0)` → user got whole-token amounts (or
+  // base-unit shifts, depending on direction). Now: rethrow on
+  // failure so callers fail loudly and the next call retries the
+  // lookup against a recovered mirror. Also R3-FG-67 — validate
+  // decimals is a non-negative finite integer before caching.
+  const info = await getTokenInfo(tokenId);
+  const decimals = Number(info.decimals);
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
+    throw new Error(
+      `Token ${tokenId} returned malformed decimals=${info.decimals} from mirror node — ` +
+      `refusing to cache. Investigate the mirror response.`,
+    );
   }
+  const meta: TokenMeta = {
+    decimals,
+    symbol: info.symbol || tokenId,
+  };
+  TOKEN_REGISTRY.set(tokenId, meta);
+  return meta;
 }
 
 /** Get cached token metadata (sync). Returns undefined if not registered. */

@@ -13,13 +13,20 @@
  */
 
 import { logger } from './logger.js';
+import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 
 export interface EscalateUncertainDlInput {
   kind:
     | 'refund_uncertain'
     | 'withdrawal_uncertain'
     | 'operator_fee_withdraw_uncertain'
-    | 'play_uncertain';
+    | 'play_uncertain'
+    /** R3-FG-6: creditDeposit's flush failure after recordDeposit landed. */
+    | 'deposit_credit_flush_failed'
+    /** R3-FG-7: refundedOriginals SADD failed after on-chain refund + claim overwrite. */
+    | 'refunded_originals_sadd_failed'
+    /** R3-FG-17: in-band audit-write failure — withdrawal, operator-fee, strategy. */
+    | 'audit_trail_orphaned';
   /** The submitted on-chain tx whose status is unknown. */
   uncertainTxId: string;
   /** Affected userId (omit for operator-fee). */
@@ -28,11 +35,40 @@ export interface EscalateUncertainDlInput {
   cause: unknown;
 }
 
+/** R3-FG-48: skip the page if we've already escalated this txId in the last 6h. */
+const ESCALATION_DEDUP_TTL_SEC = 6 * 60 * 60;
+
 export async function escalateUncertainDlFailure(
   input: EscalateUncertainDlInput,
 ): Promise<void> {
   const url = process.env.RECONCILE_FAILURE_WEBHOOK_URL;
   if (!url) return;
+
+  // R3-FG-48 (round-3 P10-ESC-001): dedup escalations by txId+kind so
+  // a stuck dead-letter doesn't re-page every reconcile pass (24+
+  // identical pages per day → operator alert fatigue → real pages
+  // get ignored). SET-NX-EX with 6h TTL — first caller wins; sibling
+  // callers within the window are no-ops.
+  try {
+    const redis = await getRedis();
+    const dedupKey = `${KEY_PREFIX.escalated}${input.kind}:${input.uncertainTxId}`;
+    const claimed = await redis.set(dedupKey, '1', {
+      nx: true,
+      ex: ESCALATION_DEDUP_TTL_SEC,
+    });
+    if (claimed === null) {
+      // Already escalated within the window.
+      return;
+    }
+  } catch (e) {
+    // Redis unavailable — fail open and page anyway. Better duplicate
+    // pages than silent loss when the alerting backbone is the only
+    // way the operator sees the issue.
+    logger.warn('escalateUncertainDlFailure: dedup check failed; paging anyway', {
+      component: 'Escalation',
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
 
   const rawCauseMsg =
     input.cause instanceof Error

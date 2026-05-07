@@ -21,7 +21,7 @@
  * operation; a UUID per submit click is fine.
  */
 
-import { getRedis } from '../auth/redis.js';
+import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 import { PreserveClaimError } from '../hedera/transfers.js';
 
 export type IdempotencyResult<T> =
@@ -85,7 +85,12 @@ export async function withIdempotency<T>(
 
   const ttlSec = options?.ttlSec ?? 24 * 60 * 60; // 24h default
   const redis = await getRedis();
-  const fullKey = `idem:${scope}:${key}`;
+  // R3-FG-18 (round-3 P7-001): network-scoped via KEY_PREFIX so
+  // testnet+mainnet sharing one Upstash don't collide on the same
+  // idempotency key. Pre-fix: `idem:${scope}:${key}` with no
+  // network prefix; an operator's `Idempotency-Key=fee-withdraw-2026-w19`
+  // would return testnet's response on a mainnet call.
+  const fullKey = `${KEY_PREFIX.idempotency}${scope}:${key}`;
 
   // Atomic claim — first caller wins.
   const claim = await redis.set(fullKey, 'pending', { nx: true, ex: ttlSec });

@@ -539,6 +539,25 @@ export async function processRefund(
     }
     amountDisplay = `${humanRefundAmount} ${symbolForDisplay}`;
 
+    // R3-FG-11 (round-3 P3-DR-001): SADD `refundedOriginals` BEFORE
+    // the on-chain submit so a Lambda freeze post-HCS-pre-SADD cannot
+    // open a 30-day double-refund window. Pre-fix order: submit →
+    // ledger debit → HCS audit → SADD. Lambda freeze between HCS and
+    // SADD left the per-tx claim 'pending' for 30 days, after which
+    // sismember=0 → SET-NX succeeds → second on-chain refund. Now
+    // SADD lands FIRST; if SADD fails before submit, refuse the
+    // refund entirely (no on-chain action). The post-success SADD
+    // call below becomes idempotent (set already contains the txId).
+    try {
+      const redis = await getRedis();
+      await redis.sadd(KEY_PREFIX.refundedOriginals, transactionId);
+    } catch (e) {
+      throw new Error(
+        `Refund blocked: pre-submit refundedOriginals SADD failed (${e instanceof Error ? e.message : String(e)}). ` +
+          `Cannot proceed without the permanent duplicate-prevention gate landed.`,
+      );
+    }
+
     // Submit the refund tx, then await the receipt with an explicit
     // 8s ceiling. Splitting submit from awaitReceipt is what makes
     // the receipt-uncertain regime distinguishable from
@@ -752,9 +771,47 @@ export async function processRefund(
         });
       }
     } catch (e) {
-      // Ledger adjustment is best-effort — the on-chain refund already succeeded.
-      // Log but don't fail the refund.
+      // R3-FG-9 (round-3 P5-RU-001): the five post-conditions
+      // (ledger debit / audit anchor / claim overwrite / rake reversal /
+      // SADD) were not atomic — failure of (d) silently dropped the
+      // operator-balance reversal AND blocked future retry via the
+      // SADD permanent set. Now: write audit_trail_orphaned + page
+      // operator. The on-chain refund already succeeded; we cannot
+      // rollback. Operator MUST manually reconstruct the missing
+      // ledger debit / rake reversal before mainnet exposure widens.
       console.error('[Refund] Ledger adjustment failed (on-chain refund succeeded):', e);
+      if (options?.store) {
+        try {
+          await options.store.upsertDeadLetter({
+            transactionId: `audit-orphan:refund-ledger:${transactionId}`,
+            timestamp: new Date().toISOString(),
+            error: `refund ledger adjustment failed after on-chain success: ${e instanceof Error ? e.message : String(e)}`,
+            kind: 'audit_trail_orphaned',
+            details: {
+              sourceKind: 'refund_post_success_orphan',
+              sourceTxId: transactionId,
+              refundTxId,
+              userId: depositRecord?.userId,
+              humanAmount: humanRefundAmount,
+              tokenKey: depositRecord?.tokenId ?? HBAR_TOKEN_KEY,
+              rakeAmount: depositRecord?.rakeAmount,
+              phase: 'ledger_adjust_failed',
+            },
+          });
+        } catch {
+          /* logged above */
+        }
+      }
+      try {
+        await escalateUncertainDlFailure({
+          kind: 'audit_trail_orphaned',
+          uncertainTxId: transactionId,
+          userId: depositRecord?.userId,
+          cause: e,
+        });
+      } catch (escErr) {
+        console.error('[Refund] ledger-adjust escalation also failed:', escErr);
+      }
     }
   }
 
@@ -821,10 +878,13 @@ export async function processRefund(
     const redis = await getRedis();
     await redis.sadd(KEY_PREFIX.refundedOriginals, transactionId);
   } catch (e) {
-    // The SADD is the load-bearing duplicate-prevention beyond the
-    // 30d claim TTL. Log loudly if it fails — operator must
-    // manually SADD the txId before the claim TTLs out, or accept
-    // that a TTL'd claim could allow a duplicate refund.
+    // R2-FG-2 + R3-FG-7 (round-3 P1-006): the SADD is the load-bearing
+    // duplicate-prevention beyond the 30d claim TTL. Pre-fix this was
+    // a silent log + continue, leaving a 30-day double-refund window
+    // open. Now: write an audit_trail_orphaned row AND page the
+    // operator via escalateUncertainDlFailure. The on-chain refund
+    // already succeeded; we cannot rollback. The SADD MUST land or
+    // the operator must clear the claim before TTL.
     logger.error(
       'CRITICAL: refunded-originals SADD failed; duplicate-refund window opens after claim TTL',
       {
@@ -835,6 +895,37 @@ export async function processRefund(
         error: e instanceof Error ? e.message : String(e),
       },
     );
+    if (options?.store) {
+      try {
+        await options.store.upsertDeadLetter({
+          transactionId: `audit-orphan:refund-sadd:${transactionId}`,
+          timestamp: new Date().toISOString(),
+          error: `refundedOriginals SADD failed after on-chain refund: ${e instanceof Error ? e.message : String(e)}`,
+          kind: 'audit_trail_orphaned',
+          details: {
+            sourceKind: 'refund_post_success_orphan',
+            sourceTxId: transactionId,
+            refundTxId: confirmedRefundTxId,
+            phase: 'refunded_originals_sadd_failed',
+          },
+        });
+      } catch {
+        /* logged above */
+      }
+    }
+    try {
+      await escalateUncertainDlFailure({
+        kind: 'refunded_originals_sadd_failed',
+        uncertainTxId: transactionId,
+        userId: depositRecord?.userId,
+        cause: e,
+      });
+    } catch (escErr) {
+      logger.error('refunded-originals SADD escalation also failed', {
+        component: 'Refund',
+        error: escErr instanceof Error ? escErr.message : String(escErr),
+      });
+    }
   }
 
   return {
@@ -1168,7 +1259,18 @@ export async function verifyUncertainRefunds(
     if (!ledgerAdjusted && depositRecordForVerifier) {
       try {
         const user = store.getUser?.(depositRecordForVerifier.userId);
-        if (user && details.tokenKey && typeof details.humanAmount === 'number') {
+        // R3-FG-16 (round-3 P9-004): require Number.isFinite + >= 0,
+        // not just `typeof === 'number'`. Pre-fix Infinity passed the
+        // typeof check; `available - Infinity = -Infinity`;
+        // `Math.max(0, -Infinity) = 0` silently zeroed the user's
+        // available balance.
+        if (
+          user &&
+          details.tokenKey &&
+          typeof details.humanAmount === 'number' &&
+          Number.isFinite(details.humanAmount) &&
+          details.humanAmount >= 0
+        ) {
           const tokenKey = details.tokenKey;
           const humanAmount = details.humanAmount;
           let lockToken: string | null = null;
@@ -1271,7 +1373,10 @@ export async function verifyUncertainRefunds(
       accounting &&
       details.agentAccountId &&
       entry.sender &&
+      // R3-FG-16: require finite + non-negative.
       typeof details.humanAmount === 'number' &&
+      Number.isFinite(details.humanAmount) &&
+      details.humanAmount >= 0 &&
       details.originalTxId &&
       !auditAlreadyWritten
     ) {

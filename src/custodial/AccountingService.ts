@@ -353,6 +353,18 @@ export class AccountingService {
        */
       userId?: string;
       tokenReservations?: Array<{ token: string; amount: number }>;
+      /**
+       * R3-FG-22 (round-3 P5-PU-001): body-level dedup nonce. When a
+       * control event has a logical "this should fire at most once
+       * per (event, uncertainTxId)" semantic — e.g. play_uncertain
+       * SUCCESS triage — the writer passes the dedup key here.
+       * Sibling writers (verifier + force-release on the same DL)
+       * read the same value and produce a deterministic nonce so the
+       * reader can dedup. Pre-fix `recordControlEvent` had no body
+       * nonce at all, so a partial-failure that replayed the anchor
+       * write produced duplicate topic anchors.
+       */
+      idempotencyKey?: string;
     },
   ): Promise<void> {
     await this.submitMessage({
@@ -369,6 +381,7 @@ export class AccountingService {
       ...(details.tokenReservations
         ? { tokenReservations: details.tokenReservations }
         : {}),
+      ...(details.idempotencyKey ? { idempotencyKey: details.idempotencyKey } : {}),
       timestamp: new Date().toISOString(),
     });
   }
@@ -583,6 +596,22 @@ export class AccountingService {
             `Last error: ${lastError instanceof Error ? lastError.message : lastError}`,
         );
         this.agentSeqSeedFailed.add(agentAccountId);
+        // R3-FG-19: ALSO flag cluster-wide via Redis with 10-min TTL
+        // so sibling Lambdas refuse too. Without this, Lambda A
+        // refuses while Lambda B (warm, seeded earlier) keeps
+        // INCRing — inconsistent UX, no escalation.
+        try {
+          const { getRedis } = await import('../auth/redis.js');
+          const redis = await getRedis();
+          const network = process.env.HEDERA_NETWORK ?? 'testnet';
+          const seedFailKey = `lla:${network}:agentseq-seed-failed:${agentAccountId}`;
+          await redis.set(seedFailKey, '1', { ex: 600 });
+        } catch (redisErr) {
+          console.error(
+            `[AccountingService] could not flag seed-failed cluster-wide for ${agentAccountId}:`,
+            redisErr,
+          );
+        }
       }
     })();
     this.agentSeqInitPromises.set(agentAccountId, p);
@@ -598,16 +627,36 @@ export class AccountingService {
     if (!this.agentSeqInitPromises.has(agentAccountId)) {
       await this.initializeAgentSeq(agentAccountId);
     }
-    // 0.3.4: refuse v2 writes for any agent whose seed scan failed
-    // after retries. Caller (`playForUser`'s v2 sequence) catches
-    // this and dead-letters the session via `audit_trail_orphaned`
-    // instead of emitting a duplicate sequence number.
+    // 0.3.4 + R3-FG-19 (round-3 P5-AS-001): refuse v2 writes for any
+    // agent whose seed scan failed. Pre-fix the seed-failed flag was
+    // an in-process Set — Lambda A could mark seed failed while
+    // Lambda B (warm, seeded earlier) keeps INCRing successfully →
+    // inconsistent UX, no escalation, no cluster-wide visibility.
+    // Now: also check Redis-backed `seed-failed:<agentId>` flag set
+    // by `initializeAgentSeq` on its catch path, with 10-min TTL so
+    // all Lambdas recover when mirror heals.
     if (this.agentSeqSeedFailed.has(agentAccountId)) {
       throw new Error(
         `AGENT_SEQ_SEED_FAILED: cannot emit v2 message for ${agentAccountId} — ` +
         `mirror-node seed scan failed after retries. Investigate mirror-node ` +
         `health; restart agent process to retry the scan.`,
       );
+    }
+    try {
+      const { getRedis } = await import('../auth/redis.js');
+      const redis = await getRedis();
+      const network = process.env.HEDERA_NETWORK ?? 'testnet';
+      const seedFailKey = `lla:${network}:agentseq-seed-failed:${agentAccountId}`;
+      const flagged = await redis.get<string>(seedFailKey);
+      if (flagged) {
+        throw new Error(
+          `AGENT_SEQ_SEED_FAILED (cluster-wide): cannot emit v2 message for ${agentAccountId} — ` +
+          `another Lambda flagged seed failure. Mirror-node still degraded; flag will TTL out in ~10min.`,
+        );
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith('AGENT_SEQ_SEED_FAILED')) throw e;
+      // Redis unavailable — fall through to local-only check (already passed).
     }
     if (this.store) {
       return await this.store.nextAgentSeq(agentAccountId);

@@ -45,6 +45,18 @@ export const KEY_PREFIX = {
   // concurrent reconcile passes from double-mutating ledger / operator
   // state for the same uncertain entry. SET NX EX with 60s TTL.
   verifying: `lla:${NET}:verifying:`,
+  // R3-FG-18: idempotency-key namespace, network-scoped. Pre-fix
+  // `withIdempotency` keyed by `idem:${scope}:${key}` with NO network
+  // prefix — testnet+mainnet sharing one Upstash collided.
+  idempotency: `lla:${NET}:idem:`,
+  // R3-FG-48: per-tx escalation dedup. Reconcile retries on a stuck
+  // dead-letter would otherwise re-page every hour for the same
+  // incident → operator alert fatigue. 6h TTL.
+  escalated: `lla:${NET}:escalated:`,
+  // R3-FG-28 (round-2 G-16): per-user dead-letter rate cap counter.
+  // Hoisted out of DepositWatcher.ts:57 where the env was read at
+  // runtime, splitting counters across env mutations.
+  dlRate: `lla:${NET}:dl-rate:`,
 } as const;
 
 // ── Token hashing ────────────────────────────────────────────

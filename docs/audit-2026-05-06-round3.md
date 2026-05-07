@@ -83,112 +83,112 @@ Also acquire the verify-lock BEFORE the back-fill stamp.
 **Fix:** Wrap the post-lock block in try/finally; DEL `lockKey` on every exit.
 **Test:** `'force-release route DELs the verifying-lock on every exit (ok / not-ok / throw)'`.
 
-### `[ ]` R3-FG-6 (H) — `creditDeposit` flush failure has no retry + no escalation
+### `[x]` R3-FG-6 (H) — `creditDeposit` flush failure has no retry + no escalation
 **Closes:** P1-003 + P6-004 + P9-006 (three-persona corroboration). Regresses R2-FG-30.
 **Bug:** R2-FG-30 commit said "retry once + escalate via `escalateUncertainDlFailure` (extend the union to accept `'deposit_credit_flush_failed'`)". Production: no retry, no `escalateUncertainDlFailure`, union not extended. The local cache stays mutated, the lock releases with stale Redis, subsequent `replay-deposit` finds the SADD'd claim and returns early without crediting → user under-credited forever.
 **Files:** `src/custodial/UserLedger.ts:194-244`; `src/lib/escalation.ts:18-22`.
 **Fix:** (a) one-shot retry with ~250ms delay; (b) extend escalation kind union; (c) call `escalateUncertainDlFailure` in the catch; (d) invalidate local cache so the warm Lambda doesn't return stale balance to subsequent reads.
 **Test:** `'creditDeposit flush failure retries once then pages via escalateUncertainDlFailure; subsequent replay-deposit succeeds'`.
 
-### `[ ]` R3-FG-7 (H) — R2-FG-2 SADD permanent set fails open on Redis error
+### `[x]` R3-FG-7 (H) — R2-FG-2 SADD permanent set fails open on Redis error
 **Closes:** P1-006.
 **Bug:** The `KEY_PREFIX.refundedOriginals` SADD call at `src/hedera/refund.ts:838-856` (in-flight) and `1370-1386` (verifier) is wrapped in `try/catch` that ONLY logs CRITICAL and continues. If Redis is briefly unavailable on the SADD (after the on-chain refund + claim overwrite have already succeeded), the permanent gate doesn't land. After 30 days the per-tx claim TTLs out → second `processRefund` passes `sismember`+SET-NX → fires a SECOND on-chain refund. The "permanent gate" doc claim is aspirational.
 **Files:** `src/hedera/refund.ts:838-856, 1370-1386`.
 **Fix:** On SADD failure, write `audit_trail_orphaned` DL with `phase: 'refunded_originals_sadd_failed'` AND fire `escalateUncertainDlFailure`. Refuse to return success from the route until SADD lands (retry once, then page).
 **Test:** `'processRefund SADD failure writes audit_trail_orphaned + escalates — silent fail-open is forbidden'`.
 
-### `[ ]` R3-FG-8 (H) — Verifier SUCCESS falls through after mutation throw → entry resolves with no history row
+### `[x]` R3-FG-8 (H) — Verifier SUCCESS falls through after mutation throw → entry resolves with no history row
 **Closes:** P5-WU-001.
 **Bug:** Each step in the verifier SUCCESS branch is `try/catch/log`. Errors are swallowed; control falls through to the audit step + `markResolved`. If `recordWithdrawal` throws after `settleSpend + totalWithdrawn` succeeded, the entry is marked resolved with `historyWrittenAt` UNSET — but the topic shows the burn. Validator self-heal would back-fill on the next pass, except the entry is `resolvedAt` and never re-walked.
 **Files:** `src/custodial/uncertainTxVerification.ts` SUCCESS branches (withdrawal + operator-fee + play).
 **Fix:** Track a local `mutationError` flag in each SUCCESS block. If any mutation step threw, write `audit_trail_orphaned` with `phase: '<step>_failed'` and SKIP `markResolved` so the next pass retries.
 **Test:** `'verifier SUCCESS does NOT mark resolved when any mutation step threw'`.
 
-### `[ ]` R3-FG-9 (H) — Refund's 5 SUCCESS post-conditions are not atomic; rake reversal failure permanently locked-out
+### `[x]` R3-FG-9 (H) — Refund's 5 SUCCESS post-conditions are not atomic; rake reversal failure permanently locked-out
 **Closes:** P5-RU-001.
 **Bug:** In-flight `processRefund` SUCCESS path runs (a) ledger debit (b) audit anchor (c) claim overwrite (d) operator rake reversal (e) permanent SADD — sequentially with logged-and-swallowed errors. If (d) throws (operator entry null, etc.) but (a/b/c/e) succeed, the operator retains the rake forever AND the SADD permanent set blocks any future retry. Cross-machine inconsistency: ledger says debit, operator says credit, topic says refund without rake reversal.
 **Files:** `src/hedera/refund.ts:689-840` (in-flight SUCCESS); same pattern in `verifyUncertainRefunds`.
 **Fix:** Track each post-condition with a progress accumulator (like F1's). On failure of any step, write `audit_trail_orphaned` with the exact phase, DON'T SADD until all 5 succeed. Force-release symmetry too (R3-FG-23).
 **Test:** `'refund SUCCESS is all-or-none: rake-reversal failure does NOT SADD the permanent set'`.
 
-### `[ ]` R3-FG-10 (H) — `stampProgress` refresh-before-merge spreads stale top-level entry fields
+### `[x]` R3-FG-10 (H) — `stampProgress` refresh-before-merge spreads stale top-level entry fields
 **Closes:** P2-001.
 **Bug:** R2-FG-12 closes the `details` overwrite race but `stampProgress` at `uncertainTxVerification.ts:608-611` still spreads `...entry` (the verifier-loop's pre-refresh snapshot) for top-level fields like `resolvedAt`, `resolvedBy`, `kind`. If a concurrent writer (force-release sibling, prior verifier pass) set `resolvedAt` between Lambda A's refresh and Lambda A's upsert, A's upsert REVERTS `resolvedAt` to undefined → next pass re-runs the entry from scratch.
 **Files:** `src/custodial/uncertainTxVerification.ts:583-621`; same pattern in `handlers.ts` stamp helpers (lines 231, 421, 809).
 **Fix:** Spread `...fresh` (the refreshed entry) instead of `...entry`. If `fresh.resolvedAt` is set, ABORT the stamp (someone else resolved).
 **Test:** `'stampProgress preserves concurrent resolvedAt writes from a sibling writer'`.
 
-### `[ ]` R3-FG-11 (H) — Refund Lambda freeze between HCS-20 audit and SADD → second refund fires after 30-day TTL
+### `[x]` R3-FG-11 (H) — Refund Lambda freeze between HCS-20 audit and SADD → second refund fires after 30-day TTL
 **Closes:** P3-DR-001.
 **Bug:** processRefund's order: claim 'pending' → on-chain refund → ledger debit → rake reversal → HCS-20 audit → SADD permanent set → claim overwrite. Lambda freeze between `recordRefund` (line 791) and `redis.sadd` (line 840) leaves claim 'pending' for 30 days. After TTL: sismember=0, SET-NX succeeds, second processRefund proceeds with a SECOND on-chain refund. F7+R2-FG-19 may pass if user re-deposited.
 **Files:** `src/hedera/refund.ts:790-840`.
 **Fix:** SADD `refundedOriginals` BEFORE the on-chain submit (right after the 'pending' claim), so any post-submit freeze still has the permanent gate set. Alternative: write a `refund_post_success_orphan` DL on SADD failure so verifier ensures SADD next pass.
 **Test:** `'processRefund Lambda freeze post-HCS-pre-SADD does not allow second refund after claim TTL'`.
 
-### `[ ]` R3-FG-12 (H) — Verifier operator-fee debit bypasses `withdraw-fees` operator-lock
+### `[x]` R3-FG-12 (H) — Verifier operator-fee debit bypasses `withdraw-fees` operator-lock
 **Closes:** P4-005.
 **Bug:** In-band `MultiUserAgent.operatorWithdrawFees` acquires `acquireOperatorLock('withdraw-fees', 120)` around the entire balance-check → transfer → state-update. The verifier's `verifyUncertainOperatorFeeWithdrawals` does the operator state debit at `uncertainTxVerification.ts:1129-1139` WITHOUT this lock — only the per-txId verifying lock. `updateOperator` is read-modify-write at the JS layer; concurrent in-band debit of a DIFFERENT token + verifier debit on the uncertain entry race on `operator.balances`. Last-write-wins → one debit lost.
 **Files:** `src/custodial/uncertainTxVerification.ts:1129-1139` and force-release `handleOperatorFee` SUCCESS at `handlers.ts:413-425`.
 **Fix:** Acquire `acquireOperatorLock('withdraw-fees', 60)` before `updateOperator`, release in finally. Same primitive as in-band.
 **Test:** `'verifier + in-band debit on different tokens both reflected in operator balance'`.
 
-### `[ ]` R3-FG-13 (H) — MCP `resolveUserId` doesn't do eoaAddress fallback
+### `[x]` R3-FG-13 (H) — MCP `resolveUserId` doesn't do eoaAddress fallback
 **Closes:** P4-007.
 **Bug:** HTTP routes resolve user via `getUserByAccountId(accountId)` AND fall back to `getAllUsers().find(u => u.eoaAddress.toLowerCase() === accountId.toLowerCase())`. MCP's `app/api/_lib/mcp.ts:193::resolveUserId` only does the first lookup. A user who registered with `eoaAddress` differing from auth `accountId` (EVM-form vs Hedera-form) can play via HTTP but gets "Not registered" via MCP → asymmetric per-user enforcement.
 **Files:** `app/api/_lib/mcp.ts:193`; HTTP routes for comparison: `app/api/user/play/route.ts:60`, `withdraw/route.ts:88`, `strategy/route.ts:69`, `audit/route.ts:326`.
 **Fix:** Extract `resolveUserByAuth(store, accountId)` shared helper; use from both sites.
 **Test:** `'MCP multi_user_play resolves a user whose authenticated accountId matches their eoaAddress'`.
 
-### `[ ]` R3-FG-14 (H) — Verifier triage anchor `by: details.userId` instead of system actor
+### `[x]` R3-FG-14 (H) — Verifier triage anchor `by: details.userId` instead of system actor
 **Closes:** P4-003.
 **Bug:** Both verifier and force-release write `recordControlEvent('play_uncertain_success_pending_triage', { by, ... })`. Force-release correctly passes `by: ctx.by` (operator's accountId). Verifier passes `by: details.userId` — the lottery user, who is NOT the actor. Topic-only auditors reading "who triaged this play" get a misleading attribution.
 **Files:** `src/custodial/uncertainTxVerification.ts:1410`.
 **Fix:** Change to `by: 'reconcile'` (or `'system:verifier'`).
 **Test:** `'verifier triage anchor uses by: reconcile, not the user'`.
 
-### `[ ]` R3-FG-15 (H) — `handleRefund` records `to: agentAccountId` self-loop instead of `entry.sender`
+### `[x]` R3-FG-15 (H) — `handleRefund` records `to: agentAccountId` self-loop instead of `entry.sender`
 **Closes:** P4-002.
 **Bug:** Verifier's refund anchor records `from: agentAccountId, to: entry.sender` (the original deposit sender — meaningful). Force-release sibling at `handlers.ts:892` records `to: details.agentAccountId` (self-loop with comment "sender unknown at force-release time"). But `entry.sender` IS available on the dead-letter row. Asymmetric; force-release anchors are meaningless tautologies.
 **Files:** `app/api/admin/uncertain-tx/[id]/force-release/handlers.ts:892`.
 **Fix:** Use `entry.sender` (when present); refuse SUCCESS if both `agentAccountId` and `sender` are missing.
 **Test:** `'force-release refund SUCCESS records to: entry.sender, not the agent'`.
 
-### `[ ]` R3-FG-16 (H) — F4 Infinity-check missing in refund verifier (settleSpend(Infinity) zeros user balance)
+### `[x]` R3-FG-16 (H) — F4 Infinity-check missing in refund verifier (settleSpend(Infinity) zeros user balance)
 **Closes:** P9-004.
 **Bug:** R1's F4 added `isValidDetailAmount` (`Number.isFinite && >= 0`) at every read site of withdrawal / operator-fee / play verifier. Refund verifier (`refund.ts::verifyUncertainRefunds`) at lines 1182 and 1285 still uses only `typeof === 'number'`. Infinity is a number → `available - Infinity = -Infinity` → `Math.max(0, -Infinity) = 0` → silently zeros the user's available balance.
 **Files:** `src/hedera/refund.ts:1182, 1285`.
 **Fix:** Import / duplicate `isValidDetailAmount`; replace both checks.
 **Test:** `'verifyUncertainRefunds rejects Infinity humanAmount as malformed'`.
 
-### `[ ]` R3-FG-17 (H) — F17 in-band audit-failure paths missing escalation
+### `[x]` R3-FG-17 (H) — F17 in-band audit-failure paths missing escalation
 **Closes:** P9-001.
 **Bug:** `MultiUserAgent.ts:1392-1413` (in-band withdrawal audit), `1754-1772` (in-band operator-fee audit), `430-449` (strategy change audit) write `audit_trail_orphaned` DLs but DON'T call `escalateUncertainDlFailure`. The escalation kind union only accepts the four `*_uncertain` kinds — couldn't page even if they wanted to.
 **Files:** `src/custodial/MultiUserAgent.ts` (3 sites); `src/lib/escalation.ts:18-22` (kind union).
 **Fix:** Extend the kind union to accept `'audit_trail_orphaned'` (or a generic `'cause'` sentinel), call escalation in all 3 catch blocks.
 **Test:** `'in-band withdrawal audit-write failure escalates via webhook'`.
 
-### `[ ]` R3-FG-18 (H) — Idempotency keys not network-scoped (testnet/mainnet collide)
+### `[x]` R3-FG-18 (H) — Idempotency keys not network-scoped (testnet/mainnet collide)
 **Closes:** P7-001.
 **Bug:** `src/lib/idempotency.ts:88` builds `fullKey = \`idem:${scope}:${key}\`` with NO `KEY_PREFIX` (lla:${NET}:...). Every other Redis primitive in the codebase uses `KEY_PREFIX.*`. Testnet+mainnet sharing one Upstash (the documented topology) collide on the same idempotency key. An operator who reuses an Idempotency-Key on both networks would get the OTHER network's cached response.
 **Files:** `src/lib/idempotency.ts:88`; `src/auth/redis.ts` (KEY_PREFIX block).
 **Fix:** Add `idempotency: \`lla:${NET}:idem:\`` to `KEY_PREFIX`; use it.
 **Test:** `'idempotency key under testnet does NOT serve cached result for the same key under mainnet'`.
 
-### `[ ]` R3-FG-19 (H) — `agentSeqSeedFailed` is per-process, not per-cluster
+### `[x]` R3-FG-19 (H) — `agentSeqSeedFailed` is per-process, not per-cluster
 **Closes:** P5-AS-001.
 **Bug:** In-process `Set` flag. Lambda A marks seed failed (mirror hiccup); Lambda B (warm, seeded earlier) keeps INCRing successfully. Inconsistent UX, no escalation. Cross-Lambda visibility doesn't exist.
 **Files:** `src/custodial/AccountingService.ts` (the `agentSeqSeedFailed` set).
 **Fix:** Move to Redis with TTL (10 min) so all Lambdas see the same failure state and recover together. Or drop the seed-failed gate entirely after the seed step (Redis INCR is monotonic post-seed).
 **Test:** `'agentSeq seed failure state is visible across Lambdas via Redis'`.
 
-### `[ ]` R3-FG-20 (H) — Token registry cache poisoning from one mirror failure → silent decimals corruption forever
+### `[x]` R3-FG-20 (H) — Token registry cache poisoning from one mirror failure → silent decimals corruption forever
 **Closes:** P10-TOK-001.
 **Bug:** `src/utils/math.ts:42-55` `getTokenMeta` catches mirror failure and writes `{decimals: 0, symbol: tokenId}` PERMANENTLY into cache. Every subsequent op on that token computes `Math.round(amount * 10^0)` → user receives whole-token amounts (or integer base units with no decimals scaling). Process restart required to clear. Vercel warm Lambdas carry the poison across many user requests.
 **Files:** `src/utils/math.ts:42-55`.
 **Fix:** Don't cache the failure. Either rethrow so callers fail loudly, or cache with `{value, cachedAt}` + 60s TTL.
 **Test:** `'token registry survives a transient mirror failure on first lookup; second lookup re-resolves correctly'`.
 
-### `[ ]` R3-FG-21 (H) — Test-quality regression class (R2-FG-0 archetype repeating)
+### `[x]` R3-FG-21 (H) — Test-quality regression class (R2-FG-0 archetype repeating)
 **Closes:** P8-001 (R2-FG-12 test decorative) + P8-002 (F1 lost-update test decorative) + P8-007 (refund.test sismember mock no-op) + P8-013 (R2-FG-24 cross-check test only fail-closed).
 **Bug:** Four R2 tests would survive a full revert of the production fix:
 - `R2-FG-12 test` (uncertainTxVerification.test.ts:812) plants `verificationAttempts: 7` BEFORE verifier runs; loop's `entry` already contains it.
@@ -200,7 +200,7 @@ Also acquire the verify-lock BEFORE the back-fill stamp.
 **Fix:** For each: inject the actual race / planted state the production code is supposed to defend against; assert that reverting the fix would produce the wrong observable outcome.
 **Test:** the tightened versions.
 
-### `[ ]` R3-FG-22 (H) — Triage anchor + `successTriagedAt` stamp + route resolveAt split across writes; `recordControlEvent` not body-idempotent
+### `[x]` R3-FG-22 (H) — Triage anchor + `successTriagedAt` stamp + route resolveAt split across writes; `recordControlEvent` not body-idempotent
 **Closes:** P5-PU-001.
 **Bug:** Verifier path: `recordControlEvent` succeeds → escalation → final `upsertDeadLetter` with `resolvedAt + successTriagedAt`. If only the final write throws, the anchor IS on the topic AND the entry stays unresolved → next pass re-emits the anchor → DUPLICATE topic anchor for the same tx. Force-release path: anchor + stamp + route's resolvedAt are 3 separate writes; partial failures leave inconsistent terminal shapes between paths.
 **Files:** `src/custodial/uncertainTxVerification.ts:1452`; `app/api/admin/uncertain-tx/[id]/force-release/handlers.ts handlePlay`.
@@ -315,7 +315,7 @@ Also acquire the verify-lock BEFORE the back-fill stamp.
 **Closes:** P10-MCP-001. Failed first call leaves a transport handle reference that may pin Lambda warm slot to broken transport.
 **Fix:** `try { await mcpClient?.close(); } catch {}` before re-nulling.
 
-### `[ ]` R3-FG-48 (M) — Escalation not idempotent → operator alert fatigue
+### `[x]` R3-FG-48 (M) — Escalation not idempotent → operator alert fatigue
 **Closes:** P10-ESC-001. Every reconcile pass on a stuck DL re-fires the page (no dedup key). 24+ identical pages per day for the same incident.
 **Fix:** Track "last escalated for this uncertainTxId" in Redis with 6h TTL; skip if key exists.
 

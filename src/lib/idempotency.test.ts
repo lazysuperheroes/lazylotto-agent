@@ -137,7 +137,7 @@ describe('withIdempotency: PreserveClaim retention', () => {
       );
       // The pending claim must remain — pre-fix, the catch DEL'd it.
       assert.equal(
-        mock.store.get('idem:withdraw:userX:idem-uncertain'),
+        mock.store.get('lla:testnet:idem:withdraw:userX:idem-uncertain'),
         'pending',
         'claim must persist as "pending" so retries are bounced as in-flight',
       );
@@ -166,7 +166,7 @@ describe('withIdempotency: PreserveClaim retention', () => {
         CustomPreserveError,
       );
       assert.equal(
-        mock.store.get('idem:withdraw:userY:idem-custom'),
+        mock.store.get('lla:testnet:idem:withdraw:userY:idem-custom'),
         'pending',
         'PreserveClaimError subclass must retain the claim',
       );
@@ -192,7 +192,7 @@ describe('withIdempotency: PreserveClaim retention', () => {
         (err: unknown) => err === fakeUncertain,
       );
       assert.equal(
-        mock.store.get('idem:withdraw:userZ:idem-fake'),
+        mock.store.get('lla:testnet:idem:withdraw:userZ:idem-fake'),
         'pending',
         'name-based fallback must retain claim for cross-module ReceiptUncertainError',
       );
@@ -212,7 +212,7 @@ describe('withIdempotency: PreserveClaim retention', () => {
         () => withIdempotency('withdraw:userW', 'idem-fail', body),
       );
       assert.equal(
-        mock.store.get('idem:withdraw:userW:idem-fail') ?? null,
+        mock.store.get('lla:testnet:idem:withdraw:userW:idem-fail') ?? null,
         null,
         'confirmed-failure error must release the claim so a retry can run',
       );
