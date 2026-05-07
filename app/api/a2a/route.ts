@@ -82,10 +82,16 @@ export const POST = withStore(async (request: Request) => {
       toolName: string,
       params: Record<string, unknown>,
     ): Promise<ToolResult> => {
-      // Inject auth_token into params if the caller provided a Bearer token
+      // R3-FG-60 (round-3 P7-007): strip any caller-supplied
+      // `auth_token` from params before merging the Bearer-derived
+      // value. Pre-fix order let a phishing payload smuggle a victim's
+      // token via DataPart when no Authorization header was supplied.
+      const sanitizedParams = Object.fromEntries(
+        Object.entries(params).filter(([k]) => k !== 'auth_token'),
+      );
       const paramsWithAuth = authToken
-        ? { ...params, auth_token: authToken }
-        : params;
+        ? { ...sanitizedParams, auth_token: authToken }
+        : sanitizedParams;
 
       const mcpRequest = {
         jsonrpc: '2.0',

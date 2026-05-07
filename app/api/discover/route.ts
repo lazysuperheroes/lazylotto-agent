@@ -20,7 +20,12 @@ export async function GET() {
   return NextResponse.json(discovery, {
     headers: {
       ...CORS_HEADERS,
-      'Cache-Control': 'public, max-age=300, s-maxage=600',
+      // R3-FG-66 (round-3 P10-HOL-002): shorter TTL so operator
+       // tunables (fee tiers, maxBalance) update within ~30s rather
+       // than 10 minutes. Pre-fix during an incident an operator
+       // dropping the rake had attackers exploiting the old tier for
+       // up to 10 min.
+      'Cache-Control': 'public, max-age=30, s-maxage=30',
     },
   });
 }

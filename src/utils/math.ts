@@ -26,6 +26,21 @@ export function registerToken(
   decimals: number,
   symbol: string
 ): void {
+  // R3-FG-68 (round-3 P10-TOK-003): validate token-id format. Pre-fix
+  // a misconfigured `LAZY_TOKEN_ID="0.0.X, 0.0.other"` (comma-list)
+  // got stored as-is; the resulting key never matched a real token id
+  // and every later LAZY rake reversal silently used 0 decimals.
+  // Allow `'hbar'` as the canonical native sentinel.
+  if (tokenId !== 'hbar' && !/^0\.0\.\d+$/.test(tokenId)) {
+    throw new Error(
+      `registerToken: tokenId must be 'hbar' or a Hedera token id (0.0.X). Got '${tokenId}'.`,
+    );
+  }
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
+    throw new Error(
+      `registerToken: decimals must be an integer in [0, 18]. Got ${decimals}.`,
+    );
+  }
   TOKEN_REGISTRY.set(tokenId, { decimals, symbol });
 }
 

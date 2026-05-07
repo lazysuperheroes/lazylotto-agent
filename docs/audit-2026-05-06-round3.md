@@ -357,37 +357,37 @@ P8-003/004/005/008/009/010/011/012/014/015 — assertion gaps that don't catch t
 ### `[ ]` R3-FG-57 (L) — `processWithdrawal` default `'hbar'` masks missing token data
 **Closes:** P4-008. Drop the default; require explicit token.
 
-### `[ ]` R3-FG-58 (L) — `bumpVerificationAttempts` spreads stale entry top-level
+### `[x]` R3-FG-58 (L) — `bumpVerificationAttempts` spreads stale entry top-level
 **Closes:** P2-011. Same shape as R3-FG-10; concurrent force-release-resolve gets reverted by malformed-attempt bump.
 
-### `[ ]` R3-FG-59 (L) — Deposit-spam rate cap key reads env at runtime, splits across env mutations
+### `[x]` R3-FG-59 (L) — Deposit-spam rate cap key reads env at runtime, splits across env mutations
 **Closes:** P2-008. Use `KEY_PREFIX.dlRate` const instead.
 
-### `[ ]` R3-FG-60 (L) — A2A allows `auth_token` in params bypassing Bearer header
+### `[x]` R3-FG-60 (L) — A2A allows `auth_token` in params bypassing Bearer header
 **Closes:** P7-007. Strip `auth_token` from params before merging.
 
-### `[ ]` R3-FG-61 (L) — `/api/auth/lock` accepts `sessionToken` body without Bearer proof
+### `[x]` R3-FG-61 (L) — `/api/auth/lock` accepts `sessionToken` body without Bearer proof
 **Closes:** P7-008. Require Bearer matching the body's session.
 
 ### `[ ]` R3-FG-62 (L) — User EOA fallback can leak across users in misconfig
 **Closes:** P7-011. Skip EOA fallback when accountId matches Hedera ID format.
 
-### `[ ]` R3-FG-63 (L) — Cron rate-limit identity 'cron' shared with admin reconcile route
+### `[x]` R3-FG-63 (L) — Cron rate-limit identity 'cron' shared with admin reconcile route
 **Closes:** P7-012. Bucket by source IP; admin reconcile has its own bucket.
 
-### `[ ]` R3-FG-64 (L) — Unknown-token DL spam path bypasses R2-FG-28 rate cap
+### `[x]` R3-FG-64 (L) — Unknown-token DL spam path bypasses R2-FG-28 rate cap
 **Closes:** P9-010. Apply `shouldRateLimitDlForUser` when memo resolves to a known user on the unknown-token path too.
 
 ### `[ ]` R3-FG-65 (L) — HOL registers MCP only — A2A clients invisible
 **Closes:** P10-HOL-001. Send `communicationProtocol: 'BOTH'` or two registrations.
 
-### `[ ]` R3-FG-66 (L) — Discovery cache 600s for fee tiers — slow to update on incident
+### `[x]` R3-FG-66 (L) — Discovery cache 600s for fee tiers — slow to update on incident
 **Closes:** P10-HOL-002. Drop to 30s for fee/limit fields.
 
-### `[ ]` R3-FG-67 (L) — Token registry NaN propagation from string decimals
+### `[x]` R3-FG-67 (L) — Token registry NaN propagation from string decimals
 **Closes:** P10-TOK-002. Validate `Number.isInteger(parsed) && >= 0` before caching.
 
-### `[ ]` R3-FG-68 (L) — `registerToken` doesn't validate token-id format
+### `[x]` R3-FG-68 (L) — `registerToken` doesn't validate token-id format
 **Closes:** P10-TOK-003. Validate `^0\.0\.\d+$`; refuse boot if invalid.
 
 ### `[ ]` R3-FG-69 (L) — MCP API key has no rotation path
@@ -405,7 +405,7 @@ P8-003/004/005/008/009/010/011/012/014/015 — assertion gaps that don't catch t
 ### `[ ]` R3-FG-73 (L) — Force-release transient-mirror-error visibility gap
 **Closes:** P4-010. Add `bumpForceReleaseTransientAttempts` counter or document explicitly.
 
-### `[ ]` R3-FG-74 (L) — `processWithdrawal` 1e9 cap bypassable via direct domain call
+### `[x]` R3-FG-74 (L) — `processWithdrawal` 1e9 cap bypassable via direct domain call
 **Closes:** P4-011. Move validation into `MultiUserAgent.processWithdrawal`'s entry guard.
 
 ### `[ ]` R3-FG-75 (L) — In_flight session boundary flap
@@ -414,22 +414,22 @@ P8-003/004/005/008/009/010/011/012/014/015 — assertion gaps that don't catch t
 ### `[ ]` R3-FG-76 (L) — Replay tooling can't tell which writer's params to honor for orphans
 **Closes:** P5-AT-002. Document "prefer most recent by timestamp".
 
-### `[ ]` R3-FG-77 (L) — `validateProgressOrdering` doesn't validate ISO-8601 timestamp format
+### `[x]` R3-FG-77 (L) — `validateProgressOrdering` doesn't validate ISO-8601 timestamp format
 **Closes:** P6-007. Reject (return `{}` + escalate) if marker value isn't a plausible timestamp.
 
-### `[ ]` R3-FG-78 (L) — Concurrent self-heal back-fills DIFFERENT timestamps from race
+### `[x]` R3-FG-78 (L) — Concurrent self-heal back-fills DIFFERENT timestamps from race
 **Closes:** P6-008. Acquire verify-lock BEFORE back-fill stamp.
 
-### `[ ]` R3-FG-79 (L) — Cron webhook fire-and-forget no AbortSignal
+### `[x]` R3-FG-79 (L) — Cron webhook fire-and-forget no AbortSignal
 **Closes:** P10-CRON-002. Add 5s timeout for parity with escalation.
 
-### `[ ]` R3-FG-80 (L) — `LAZYLOTTO_MCP_URL` not validated at boot
+### `[x]` R3-FG-80 (L) — `LAZYLOTTO_MCP_URL` not validated at boot
 **Closes:** P10-PROD-002. Add to boot-fail asserts.
 
 ### `[ ]` R3-FG-81 (L) — `mcpUrl` not cleared on disconnect (frontend)
 **Closes:** P10-FE-002. Add to `clearSession` cleared-keys list.
 
-### `[ ]` R3-FG-82 (L) — `.agent-config.json` written without restrictive permissions
+### `[x]` R3-FG-82 (L) — `.agent-config.json` written without restrictive permissions
 **Closes:** P10-HOL-003. `mode: 0o600`.
 
 ---

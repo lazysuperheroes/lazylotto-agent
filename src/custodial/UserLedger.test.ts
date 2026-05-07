@@ -13,8 +13,9 @@ import {
 } from './types.js';
 import { registerToken, roundForToken } from '../utils/math.js';
 
-// Register a test LAZY token with 1 decimal place for rounding tests
-registerToken('test-lazy', 1, 'LAZY');
+// Register a test LAZY token with 1 decimal place for rounding tests.
+// R3-FG-68: token ids must match Hedera format `0.0.<number>`.
+registerToken('0.0.4567', 1, 'LAZY');
 
 // -- Mock helpers -----------------------------------------------------------
 
@@ -369,7 +370,7 @@ describe('UserLedger', () => {
 
 describe('Rake rounding with LAZY (1 decimal)', () => {
   const AGENT_ACCOUNT = '0.0.9999';
-  const TOKEN = 'test-lazy'; // registered above with 1 decimal
+  const TOKEN = '0.0.4567'; // registered above with 1 decimal
   let store: PersistentStore;
   let accounting: ReturnType<typeof createMockAccounting>;
   let ledger: UserLedger;

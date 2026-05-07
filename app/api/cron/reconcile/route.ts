@@ -83,9 +83,14 @@ export const GET = withStore(async (request: Request) => {
     !(await checkRateLimit({
       request,
       action: 'cron-reconcile',
-      limit: 10,
+      limit: 30,
       windowSec: 60,
-      identity: 'cron',
+      // R3-FG-63 (round-3 P7-012): omit identity so checkRateLimit
+      // buckets by source IP. Pre-fix `identity: 'cron'` lumped
+      // legitimate Vercel Cron + manual curl + admin reconcile into
+      // one global bucket — a single misbehaving caller blocked the
+      // legitimate cron firing. Limit raised 10→30 since each call
+      // is auth'd against CRON_SECRET (no unauthenticated amplification).
     }))
   ) {
     return rateLimitResponse(60);
@@ -182,9 +187,13 @@ async function fireFailureWebhook(result: ReconciliationResult): Promise<void> {
     `\n\n*Warnings:*\n${warningsList}\n` +
     `\n_Run \`/admin\` reconcile or check function logs for details._`;
 
+  // R3-FG-79 (round-3 P10-CRON-002): 5s timeout matches the
+  // escalation webhook. Pre-fix could hang the Lambda for the full
+  // function ceiling (10s default, 60s for cron) on a bad/slow URL.
   await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text }),
+    signal: AbortSignal.timeout(5_000),
   });
 }

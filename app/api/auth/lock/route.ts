@@ -37,6 +37,20 @@ export const POST = withStore(async (request: Request) => {
       );
     }
 
+    // R3-FG-61 (round-3 P7-008): require the Bearer header to match
+    // the body's sessionToken. Pre-fix the route accepted any
+    // sessionToken in the body with no proof of ownership — a leaked
+    // token (clipboard, log) could be locked permanently by anyone
+    // who saw it.
+    const authHeader = request.headers.get('authorization') ?? '';
+    const bearer = authHeader.replace(/^Bearer\s+/i, '').trim();
+    if (!bearer || bearer !== sessionToken) {
+      return NextResponse.json(
+        { error: 'Lock requires the Bearer token to match the body sessionToken (proof of ownership).' },
+        { status: 401, headers: CORS_HEADERS },
+      );
+    }
+
     const locked = await lockSession(sessionToken);
 
     if (!locked) {

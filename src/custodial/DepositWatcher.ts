@@ -52,9 +52,12 @@ async function shouldRateLimitDlForUser(
   userId: string,
 ): Promise<{ rateLimited: boolean; count: number }> {
   try {
-    const { getRedis } = await import('../auth/redis.js');
+    const { getRedis, KEY_PREFIX } = await import('../auth/redis.js');
     const redis = await getRedis();
-    const key = `lla:${process.env.HEDERA_NETWORK ?? 'testnet'}:dl-rate:${userId}`;
+    // R3-FG-59 (round-3 P2-008): use module-load NET capture via
+    // KEY_PREFIX.dlRate. Pre-fix read process.env at runtime; tests
+    // (or any env mutation) split counters across prefixes.
+    const key = `${KEY_PREFIX.dlRate}${userId}`;
     const count = await redis.incr(key);
     if (count === 1) {
       try {

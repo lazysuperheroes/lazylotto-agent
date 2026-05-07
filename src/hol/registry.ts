@@ -55,7 +55,13 @@ export function loadAgentConfig(): AgentConfig | null {
 }
 
 function saveAgentConfig(config: AgentConfig): void {
-  writeFileSync(configPath(), JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  // R3-FG-82 (round-3 P10-HOL-003): owner-only mode. Pre-fix used
+  // default umask (often 0644) — on shared hosts other local users
+  // could read the UAID + topic ids.
+  writeFileSync(configPath(), JSON.stringify(config, null, 2) + '\n', {
+    encoding: 'utf-8',
+    mode: 0o600,
+  });
 }
 
 // ── Profile builder ───────────────────────────────────────────

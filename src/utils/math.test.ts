@@ -65,8 +65,9 @@ describe('Token Registry', () => {
   });
 
   it('roundForToken uses registered decimals', () => {
-    registerToken('0.0.test', 3, 'TEST');
-    assert.equal(roundForToken(1.23456, '0.0.test'), 1.235);
+    // R3-FG-68: token ids must match Hedera format `0.0.<number>`.
+    registerToken('0.0.4567', 3, 'TEST');
+    assert.equal(roundForToken(1.23456, '0.0.4567'), 1.235);
   });
 
   it('roundForToken returns raw for unknown token', () => {

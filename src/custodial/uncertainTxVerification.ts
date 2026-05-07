@@ -371,11 +371,28 @@ async function bumpVerificationAttempts(
       error: e instanceof Error ? e.message : String(e),
     });
   }
-  // Mirror the count into the DL row for UI/operator visibility.
+  // R3-FG-58 (round-3 P2-011): mirror the count via the same
+  // refresh-then-spread pattern stampProgress uses (R3-FG-10) so a
+  // concurrent force-release-resolve isn't reverted by the bump's
+  // stale entry spread.
   try {
+    let baseEntry: DeadLetterEntry = entry;
+    try {
+      await store.refreshDeadLetters();
+      const fresh = store
+        .getDeadLetters()
+        .find((e) => e.transactionId === entry.transactionId);
+      if (fresh) baseEntry = fresh;
+    } catch {
+      /* fall through */
+    }
+    if (baseEntry.resolvedAt) {
+      // Already resolved; don't re-open by stamping.
+      return;
+    }
     await store.upsertDeadLetter({
-      ...entry,
-      details: { ...(entry.details ?? {}), verificationAttempts: next },
+      ...baseEntry,
+      details: { ...(baseEntry.details ?? {}), verificationAttempts: next },
     });
   } catch {
     /* logged below if the threshold fires */
