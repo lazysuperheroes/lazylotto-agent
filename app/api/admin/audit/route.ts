@@ -138,6 +138,26 @@ function decodeMessage(msg: TopicMessage): { seq: number; timestamp: string; pay
   return { seq: msg.sequence_number, timestamp: iso, payload };
 }
 
+/**
+ * R5-FG-34 (P7-006): word-boundary regex match for memo so
+ * `userFilter='0.0.123'` does not match `memo: '0.0.1234567'`.
+ * Pre-fix `memo.includes(accountId)` leaked an arbitrary user's
+ * full audit history to the admin's filtered view whenever the
+ * filter accountId was a string-prefix of any other accountId.
+ * `/api/user/audit` was hardened earlier; admin sibling stayed
+ * buggy. Account IDs match `0.0.<digits>` shape; surrounding
+ * context must be a non-digit/non-dot to avoid the prefix overlap.
+ */
+function memoMentionsAccount(memo: string, accountId: string): boolean {
+  if (!memo) return false;
+  // Escape '.' for regex; account IDs only contain digits and dots
+  // so no other special chars need escaping.
+  const escaped = accountId.replace(/\./g, '\\.');
+  // Boundary: start-of-string or non-account-char on either side.
+  const re = new RegExp(`(^|[^0-9.])${escaped}($|[^0-9.])`);
+  return re.test(memo);
+}
+
 /** Check whether a payload (or sub-operation) involves a given account ID. */
 function involvesAccount(payload: Record<string, unknown>, accountId: string): boolean {
   const to = String(payload.to ?? '');
@@ -154,7 +174,7 @@ function involvesAccount(payload: Record<string, unknown>, accountId: string): b
     from === accountId ||
     user === accountId ||
     agent === accountId ||
-    memo.includes(accountId)
+    memoMentionsAccount(memo, accountId)
   ) {
     return true;
   }
@@ -358,7 +378,12 @@ export async function GET(request: Request) {
 
     // Parse optional user filter from query params
     const url = new URL(request.url);
-    const userFilter = url.searchParams.get('user') ?? null;
+    const rawUserFilter = url.searchParams.get('user');
+    // R5-FG-34 (P7-006): validate user filter shape. Pre-fix any
+    // value (empty string, regex specials, partial accountId) flowed
+    // through to involvesAccount → silent over-match or empty match.
+    const userFilter =
+      rawUserFilter && /^0\.0\.\d{1,12}$/.test(rawUserFilter) ? rawUserFilter : null;
 
     const network = getNetwork();
     const mirrorBase = getMirrorBase();
@@ -454,11 +479,35 @@ export async function GET(request: Request) {
           }
         }
       } else {
-        for (const u of store.getAllUsers()) {
-          await store.refreshPlaysForUser(u.userId);
-          for (const s of store.getPlaySessionsForUser(u.userId)) {
-            sessionMap.set(s.sessionId, s);
+        // R5-FG-40 (P11-002): bound + parallelize. Pre-fix the loop
+        // sequentially `await`ed `refreshPlaysForUser` per user — at
+        // 10K users × ~1 Redis hop each that's 10K sequential RTT
+        // (≈5–10 minutes), well past Vercel's 60s function ceiling.
+        // Operator could never load unfiltered admin audit. Now:
+        // hard-cap at MAX_BULK_USERS and run in chunks of CONCURRENCY.
+        // A full SCAN+pipeline-based bulk loader is the long-term fix
+        // (D-29 family); this is the bridge.
+        const MAX_BULK_USERS = 1000;
+        const CONCURRENCY = 16;
+        const allUsers = store.getAllUsers().slice(0, MAX_BULK_USERS);
+        for (let i = 0; i < allUsers.length; i += CONCURRENCY) {
+          const chunk = allUsers.slice(i, i + CONCURRENCY);
+          await Promise.all(
+            chunk.map((u) =>
+              store.refreshPlaysForUser(u.userId).catch(() => undefined),
+            ),
+          );
+          for (const u of chunk) {
+            for (const s of store.getPlaySessionsForUser(u.userId)) {
+              sessionMap.set(s.sessionId, s);
+            }
           }
+        }
+        if (store.getAllUsers().length > MAX_BULK_USERS) {
+          console.warn(
+            `[admin/audit] truncated session enrichment to ${MAX_BULK_USERS} users; ` +
+              `pass ?user=<accountId> for a complete view of one user.`,
+          );
         }
       }
     } catch (err) {

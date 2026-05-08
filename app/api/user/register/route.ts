@@ -35,12 +35,22 @@ export async function OPTIONS() {
 
 export const POST = withStore(async (request: Request) => {
   try {
-    if (!(await checkRateLimit({ request, action: 'user-register', limit: 5, windowSec: 300 }))) {
-      return rateLimitResponse(300);
-    }
-
+    // R5-FG-31 (P7-002): authenticate first, then rate-limit by
+    // accountId so token rotation can't defeat the cap.
     const auth = await requireTier(request, 'user');
     if (isErrorResponse(auth)) return auth;
+
+    if (
+      !(await checkRateLimit({
+        request,
+        action: 'user-register',
+        limit: 5,
+        windowSec: 300,
+        identity: auth.accountId,
+      }))
+    ) {
+      return rateLimitResponse(300);
+    }
 
     const body = (await request.json().catch(() => ({}))) as {
       eoaAddress?: string;
@@ -90,8 +100,9 @@ export const POST = withStore(async (request: Request) => {
     // Kill switch translates to 503 + reason so the frontend can show
     // the "Agent temporarily closed" banner cleanly instead of a 500.
     if (err instanceof KillSwitchError) {
+      // R5-FG-33: sanitize 503 — drop operator reason. See user/play.
       return NextResponse.json(
-        { error: err.message, reason: (err as KillSwitchError).reason ?? null },
+        { error: 'Agent operations temporarily paused by operator.', reason: null },
         { status: 503, headers: CORS_HEADERS },
       );
     }

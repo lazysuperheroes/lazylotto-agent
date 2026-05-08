@@ -426,9 +426,17 @@ export async function GET(request: Request) {
       return t.startsWith('0.0.') ? t : t.toUpperCase();
     };
 
+    // R5-FG-39 (P11-001): decode each message ONCE into a shared
+    // array. Pre-fix this loop and the v2-reader loop both decoded
+    // every message, double-counting memory in MAX_PAGES=1000 ×
+    // 100msg × ~500B = 50MB into ~100MB before parseAuditTopic
+    // adds another ~50MB. Vercel's 1GB Lambda OOMed at 4 concurrent.
+    const decodedAll: { seq: number; timestamp: string; payload: Record<string, unknown> }[] = [];
     for (const msg of allMessages) {
-      const { seq, timestamp, payload } = decodeMessage(msg);
+      decodedAll.push(decodeMessage(msg));
+    }
 
+    for (const { seq, timestamp, payload } of decodedAll) {
       if (!involvesAccount(payload, hederaAccountId)) continue;
 
       const entry = toAuditEntry(seq, timestamp, payload, hederaAccountId);
@@ -493,9 +501,9 @@ export async function GET(request: Request) {
     // render as session cards. Filter to messages that involve
     // this user so the reader's per-session math reflects only
     // their activity.
+    // R5-FG-39: reuse the already-decoded array instead of decoding again.
     const userTopicMessages: RawTopicMessage[] = [];
-    for (const msg of allMessages) {
-      const { seq, timestamp, payload } = decodeMessage(msg);
+    for (const { seq, timestamp, payload } of decodedAll) {
       if (!involvesAccount(payload, hederaAccountId)) continue;
       userTopicMessages.push({ sequence: seq, timestamp, payload });
     }

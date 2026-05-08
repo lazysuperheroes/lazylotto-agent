@@ -212,13 +212,29 @@ export class DepositWatcher {
       // race that R3-FG-30 closed on the writer side. Best-effort —
       // a refresh failure shouldn't block the poll; subsequent passes
       // will retry.
-      try {
-        await (this.store as { refreshUserIndex?: () => Promise<void> }).refreshUserIndex?.();
-      } catch (refreshErr) {
-        logger.warn('refreshUserIndex failed at pollOnce start', {
-          component: 'DepositWatcher',
-          error: refreshErr instanceof Error ? refreshErr.message : String(refreshErr),
-        });
+      //
+      // R5-FG-41 (P11-005): refresh every Nth poll, not every poll.
+      // Pre-fix R4-FG-67 ran SMEMBERS + pipelined GET-per-user on
+      // every 60s tick. At 10K users × N warm Lambdas, that's ~167
+      // GETs/sec × N just for the watcher, hitting Upstash REST
+      // payload caps. Now: refresh on cold-start (pollCount===1) and
+      // every REFRESH_USERS_EVERY_N_POLLS ticks afterwards. The
+      // unmatched-memo path (later in pollOnce) does an on-demand
+      // refresh anyway when it can't find a user, which preserves
+      // R3-FG-30's first-deposit guarantee.
+      const REFRESH_USERS_EVERY_N_POLLS = 10;
+      const shouldRefresh =
+        this.stats.pollCount === 1 ||
+        this.stats.pollCount % REFRESH_USERS_EVERY_N_POLLS === 0;
+      if (shouldRefresh) {
+        try {
+          await (this.store as { refreshUserIndex?: () => Promise<void> }).refreshUserIndex?.();
+        } catch (refreshErr) {
+          logger.warn('refreshUserIndex failed at pollOnce start', {
+            component: 'DepositWatcher',
+            error: refreshErr instanceof Error ? refreshErr.message : String(refreshErr),
+          });
+        }
       }
       let watermark = this.store.getWatermark();
 

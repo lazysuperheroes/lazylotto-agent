@@ -271,24 +271,103 @@ export function startOperatorLockHeartbeat(
   ttlSec: number,
 ): { cancel: () => void } {
   const key = `${OPERATOR_LOCK_PREFIX}${scope}`;
+  return startLockHeartbeat(key, token, intervalMs, ttlSec);
+}
+
+/**
+ * R5-FG-26 (P4-007): heartbeat for the per-txId verifier-lock used
+ * by force-release. The route's work after acquire (handler + mirror
+ * cross-check + ledger mutation + HCS submit + R4-FG-29 fallback +
+ * resolve upsert + flush) can exceed `VERIFY_LOCK_TTL_SEC=60` on HCS
+ * congestion. R4-FG-9 fixed the same TTL exhaustion concern for
+ * refunds; reconcile got R4-FG-66's heartbeat. Force-release was the
+ * sibling miss. R4-FG-8 fenced the release so a TTL-out doesn't nuke
+ * a sibling — but the bug we fenced AGAINST (handler exceeds TTL on
+ * HCS congestion → sibling acquires → torn state) is still reachable.
+ */
+export function startVerifyLockHeartbeat(
+  /** Just the txId (or refund-prefixed txId) — full key is built here. */
+  txIdOrSubKey: string,
+  token: string,
+  ttlSec: number,
+  intervalMs: number = Math.max(15_000, Math.floor((ttlSec * 1000) / 3)),
+): { cancel: () => void } {
+  const key = `${KEY_PREFIX.verifying}${txIdOrSubKey}`;
+  return startLockHeartbeat(key, token, intervalMs, ttlSec);
+}
+
+/**
+ * R5-FG-28 (P6-003): heartbeat for per-user locks. Generalization of
+ * `startOperatorLockHeartbeat` so the recover-stuck-prizes script
+ * (which holds a user lock for transferAllPrizesWithRetry + 5s
+ * mirror wait + audit anchor + verification) doesn't outrun its
+ * 600s TTL on slow-mainnet days. Same Lua-fenced compare-and-extend
+ * as the operator path so a sibling acquisition cannot be silently
+ * extended by stale callbacks.
+ */
+export function startUserLockHeartbeat(
+  userId: string,
+  token: string,
+  /** TTL to set on each heartbeat, seconds. */
+  ttlSec: number,
+  /** Re-extend interval, ms. Defaults to ttlSec/3 in ms (3 ticks per TTL). */
+  intervalMs: number = Math.max(15_000, Math.floor((ttlSec * 1000) / 3)),
+): { cancel: () => void } {
+  const key = `${USER_LOCK_PREFIX}${userId}`;
+  return startLockHeartbeat(key, token, intervalMs, ttlSec);
+}
+
+/**
+ * R5-FG-28: shared heartbeat primitive for any lock-keyed Redis
+ * fenced extend. Both operator and user variants delegate here.
+ *
+ * R5-FG-49 (P6-008 + P2-002 + P4-009 + P7-014): self-rescheduling
+ * setTimeout (instead of setInterval) so that a hung Redis can't
+ * stack callbacks. Pre-fix `setInterval(60s)` would queue a fresh
+ * tick every 60s even when the previous tick hadn't resolved
+ * because Redis was wedged. When the wedge cleared, dozens of
+ * stacked callbacks fired, one of them landing a successful
+ * compare-and-extend AFTER a sibling had acquired with a different
+ * token — but the cancelled flag was checked in JS-only, so the
+ * Lua script saw the original (still-matching) token and silently
+ * extended out from under the sibling. Self-rescheduling caps the
+ * outstanding queue at 1 and the cancelled-flag check before
+ * scheduling the next tick prevents stacking.
+ */
+function startLockHeartbeat(
+  key: string,
+  token: string,
+  intervalMs: number,
+  ttlSec: number,
+): { cancel: () => void } {
   let cancelled = false;
+  let timerHandle: ReturnType<typeof setTimeout> | undefined;
+  const schedule = (): void => {
+    if (cancelled) return;
+    timerHandle = setTimeout(() => void tick(), intervalMs);
+  };
   const tick = async (): Promise<void> => {
     if (cancelled) return;
     try {
       const redis = await getRedis();
       await redis.eval(HEARTBEAT_RELEASE_OR_EXTEND_SCRIPT, [key], [token, String(ttlSec)]);
     } catch {
-      // Best-effort. If heartbeat fails, the lock will TTL out at the
-      // last successful extension; the work continues until done.
+      // Best-effort. If heartbeat fails, the lock will TTL out at
+      // the last successful extension; the work continues until done.
     }
+    // R5-FG-49: re-check cancelled BEFORE scheduling the next tick
+    // so a cancellation during this tick's await doesn't leak a
+    // queued callback that fires after the sibling has acquired.
+    if (!cancelled) schedule();
   };
-  const handle = setInterval(() => {
-    void tick();
-  }, intervalMs);
+  schedule();
   return {
     cancel(): void {
       cancelled = true;
-      clearInterval(handle);
+      if (timerHandle !== undefined) {
+        clearTimeout(timerHandle);
+        timerHandle = undefined;
+      }
     },
   };
 }

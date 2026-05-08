@@ -213,10 +213,32 @@ export class RedisStore implements IStore {
     }
 
     // 9. Dead letters
-    const rawDL = await this.redis.lrange(k('deadletters'), 0, -1);
-    this.deadLetters = rawDL.map((raw) =>
-      (typeof raw === 'string' ? JSON.parse(raw) : raw) as DeadLetterEntry,
-    );
+    // R5-FG-42 (P11-006): paginate to avoid Upstash 4MB body cap
+    // when the topic has accumulated tens of thousands of orphan
+    // rows. Pre-fix `lrange(0, -1)` returned the entire list in one
+    // call → 413 cold-start failure at 5K × 800B. Read only the
+    // most recent MAX_RECORDS entries (LIST is RPUSH-ordered so the
+    // tail is newest); paginate in pages of 1000 to stay under the
+    // 4MB cap. Older rows beyond the cap remain in Redis but are
+    // not held in memory; verify-audit's `--store-snapshot` mode
+    // (R5-FG-44) reads orphan history from a separate path.
+    const PAGE_SIZE = 1000;
+    const totalLen = await this.redis.llen(k('deadletters')).catch(() => 0);
+    const startIdx = Math.max(0, totalLen - MAX_RECORDS);
+    this.deadLetters = [];
+    for (let pageStart = startIdx; pageStart < totalLen; pageStart += PAGE_SIZE) {
+      const pageEnd = Math.min(pageStart + PAGE_SIZE - 1, totalLen - 1);
+      const rawDL = await this.redis.lrange(k('deadletters'), pageStart, pageEnd);
+      for (const raw of rawDL) {
+        try {
+          this.deadLetters.push(
+            (typeof raw === 'string' ? JSON.parse(raw) : raw) as DeadLetterEntry,
+          );
+        } catch {
+          /* skip malformed row */
+        }
+      }
+    }
 
     // 10. Watermark
     const wm = await this.redis.get<string>(k('watermark'));
@@ -366,10 +388,26 @@ export class RedisStore implements IStore {
   }
 
   async refreshDeadLetters(): Promise<void> {
-    const rawDL = await this.redis.lrange(k('deadletters'), 0, -1);
-    this.deadLetters = rawDL.map((raw) =>
-      (typeof raw === 'string' ? JSON.parse(raw) : raw) as DeadLetterEntry,
-    );
+    // R5-FG-42 (P11-006): paginate so a 50K-row deadletters list
+    // doesn't exceed the Upstash 4MB body cap. See `load()` for the
+    // same pattern.
+    const PAGE_SIZE = 1000;
+    const totalLen = await this.redis.llen(k('deadletters')).catch(() => 0);
+    const startIdx = Math.max(0, totalLen - MAX_RECORDS);
+    this.deadLetters = [];
+    for (let pageStart = startIdx; pageStart < totalLen; pageStart += PAGE_SIZE) {
+      const pageEnd = Math.min(pageStart + PAGE_SIZE - 1, totalLen - 1);
+      const rawDL = await this.redis.lrange(k('deadletters'), pageStart, pageEnd);
+      for (const raw of rawDL) {
+        try {
+          this.deadLetters.push(
+            (typeof raw === 'string' ? JSON.parse(raw) : raw) as DeadLetterEntry,
+          );
+        } catch {
+          /* skip malformed row */
+        }
+      }
+    }
   }
 
   async refreshUserIndex(): Promise<void> {
@@ -678,6 +716,15 @@ export class RedisStore implements IStore {
       this.deadLetters[idx] = entry;
     } else {
       this.deadLetters.push(entry);
+    }
+    // R5-FG-42 (P11-006): trim past MAX_RECORDS so audit-orphan +
+    // uncertainTx + prize-transfer DLs can't accumulate unbounded.
+    // Pre-fix worst-case cold-start LRANGE 0 -1 against 50K × 800B
+    // exceeded the Upstash 4MB body cap → 413 cold-start failure.
+    // The other record types already trimmed in-memory; deadLetters
+    // was the asymmetric miss.
+    if (this.deadLetters.length > MAX_RECORDS) {
+      this.deadLetters.splice(0, this.deadLetters.length - MAX_RECORDS);
     }
 
     const newJson = JSON.stringify(entry);

@@ -1482,12 +1482,17 @@ describe('verifyUncertainRefunds dispatch', () => {
       assert.equal(outcomes[0]!.status, 'confirmed');
 
       // The acid test: there must be an `audit_trail_orphaned` entry
-      // keyed `audit-orphan:refund-verifier-sadd:<originalTxId>` so
-      // an operator can see that the permanent fence is missing on
+      // keyed `audit-orphan:refund-verifier-sadd:<originalTxId>:...`
+      // so an operator can see that the permanent fence is missing on
       // this txId before the 30-day claim TTL expires.
+      // R5-FG-25: ID is now mintAuditOrphanId-salted; assert prefix
+      // match instead of the literal pre-salt form.
       const orphan = upsertCalls.find(
         (c) =>
-          c.transactionId === 'audit-orphan:refund-verifier-sadd:original-tx-sadd-fail' &&
+          typeof c.transactionId === 'string' &&
+          c.transactionId.startsWith(
+            'audit-orphan:refund-verifier-sadd:original-tx-sadd-fail:',
+          ) &&
           c.kind === 'audit_trail_orphaned',
       );
       assert.ok(

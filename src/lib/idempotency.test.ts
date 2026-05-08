@@ -244,6 +244,38 @@ describe('withIdempotency: PreserveClaim retention', () => {
       );
     });
   });
+
+  // revert-proof: if R5-FG-48's eval-failure fallback DEL is removed
+  // (catch reverted to bare swallow), this test fails — when the
+  // RELEASE_SCRIPT eval throws, no fallback DEL runs, and the claim
+  // sticks at `pending:<uuid>` for 24h. Sibling retries get
+  // `kind:'in-flight'` for 24h with no recoverable signal.
+  it('R5-FG-48: falls back to plain DEL when RELEASE_SCRIPT eval throws', async () => {
+    const mock = makeMockRedis();
+    // Force eval to throw so the fallback path engages.
+    mock.eval = async () => {
+      throw new Error('synthetic Redis cluster failover');
+    };
+    await withMockRedis(mock, async () => {
+      const { withIdempotency } = await import('./idempotency.js');
+
+      const body = async () => {
+        throw new Error('non-PreserveClaim post-pre-submit failure');
+      };
+
+      await assert.rejects(
+        () => withIdempotency('withdraw:userE', 'idem-eval-fail', body),
+      );
+      // Pre-fix the claim would still exist (eval threw, bare catch
+      // swallowed it). Post-fix the plain DEL fallback fires and the
+      // claim is gone — sibling retries can run.
+      assert.equal(
+        mock.store.get('lla:testnet:idem:withdraw:userE:idem-eval-fail') ?? null,
+        null,
+        'eval-failure must trigger the plain-DEL fallback so retries can recover',
+      );
+    });
+  });
 });
 
 describe('isPreserveClaim guard', () => {

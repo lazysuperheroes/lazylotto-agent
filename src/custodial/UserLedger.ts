@@ -4,6 +4,7 @@ import type { UserAccount, UserBalances } from './types.js';
 import { InsufficientBalanceError, UserNotFoundError, UserInactiveError, emptyTokenEntry } from './types.js';
 import { roundForToken } from '../utils/math.js';
 import { acquireUserLock, releaseUserLock } from '../lib/locks.js';
+import { mintAuditOrphanId } from '../lib/orphanIds.js';
 
 // ── UserLedger ──────────────────────────────────────────────────
 //
@@ -187,7 +188,7 @@ export class UserLedger {
         );
         try {
           await this.store.upsertDeadLetter({
-            transactionId: `audit-orphan:in-band:deposit-anchor:${txId}`,
+            transactionId: mintAuditOrphanId('audit-orphan:in-band:deposit-anchor', txId),
             timestamp: new Date().toISOString(),
             error: `recordDeposit anchor failed after local credit: ${err instanceof Error ? err.message : String(err)}`,
             kind: 'audit_trail_orphaned',
@@ -231,7 +232,7 @@ export class UserLedger {
         );
         try {
           await this.store.upsertDeadLetter({
-            transactionId: `audit-orphan:in-band:rake-anchor:${txId}`,
+            transactionId: mintAuditOrphanId('audit-orphan:in-band:rake-anchor', txId),
             timestamp: new Date().toISOString(),
             error: `recordRake anchor failed after operator credit: ${err instanceof Error ? err.message : String(err)}`,
             kind: 'audit_trail_orphaned',
@@ -287,7 +288,7 @@ export class UserLedger {
           );
           try {
             await this.store.upsertDeadLetter({
-              transactionId: `audit-orphan:in-band:credit-flush:${txId}`,
+              transactionId: mintAuditOrphanId('audit-orphan:in-band:credit-flush', txId),
               timestamp: new Date().toISOString(),
               error: `creditDeposit flush failed after recording: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
               kind: 'audit_trail_orphaned',
@@ -302,6 +303,26 @@ export class UserLedger {
             });
           } catch {
             /* if even this fails, the console.error above is the trail */
+          }
+          // R5-FG-45 (P12-306): write the flush-failure to the topic
+          // as a control event so it survives Redis loss. Pre-fix
+          // the orphan row lived in Redis; if Redis was then lost
+          // and operator reconstructed from topic alone, the topic
+          // had the `mint` (deposit) but no orphan trail → over-credit
+          // by the flush-failed amount. Now: record on chain so
+          // topic-only DR sees the unresolved flush state.
+          try {
+            await this.accounting.recordControlEvent('deposit_credit_flush_orphaned', {
+              uncertainTxId: txId,
+              userId,
+              grossAmount,
+              token,
+              cause: flushErr instanceof Error ? flushErr.message.slice(0, 200) : String(flushErr).slice(0, 200),
+              idempotencyKey: `deposit-flush-orphan:${txId}`,
+            });
+          } catch {
+            /* topic write also failing is acceptable — the local row
+               and webhook are the operator's signal. */
           }
           // R3-FG-6: page the operator. Redis-deficient state needs
           // human intervention; the audit-orphan row alone wasn't paging
@@ -326,10 +347,22 @@ export class UserLedger {
           // The on-chain side is real and the audit row + webhook
           // already fired, so admin UI should surface a structured
           // discriminator rather than a 500.
-          if (flushErr instanceof Error) {
-            (flushErr as Error & { name: string }).name = 'DepositCreditFlushFailedError';
-          }
-          throw flushErr;
+          //
+          // R5-FG-29 (P4-005): WRAP rather than mutate `flushErr.name`.
+          // Pre-fix `(flushErr as Error & { name: string }).name = '...'`
+          // mutated the underlying error in place. Today flushErr is
+          // plain Error so it's harmless — but two callsites branch on
+          // `err.name` (`isPreserveClaim` and `transferAllPrizesWithRetry`).
+          // If a future codepath ever lets a `ReceiptUncertainError`
+          // propagate through `store.flush()`, the mutation would
+          // overwrite `.name` and `isPreserveClaim` would NOT recognize
+          // it → withIdempotency DELs the on-chain claim → double-spend
+          // window. Wrapping with `cause: flushErr` preserves the
+          // original error class signature.
+          throw Object.assign(
+            new Error('flush failed post-record'),
+            { name: 'DepositCreditFlushFailedError', cause: flushErr },
+          );
         }
       }
 

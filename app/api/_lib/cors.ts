@@ -115,7 +115,14 @@ export function corsHeadersFor(request: Request, methods = 'GET, POST, OPTIONS')
   return {
     'Access-Control-Allow-Origin': originFor(request),
     'Access-Control-Allow-Methods': methods,
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version',
+    // R5-FG-36 (P10-CFG-002): include `Idempotency-Key` so the
+    // browser's preflight allows the header on the five mutating
+    // routes that require it (refund, withdraw-fees, replay-deposit,
+    // user-withdraw, user-play). Pre-fix cross-origin browser
+    // requests from the dashboard failed preflight before reaching
+    // the handler — the route's required-header rejection never
+    // fired because the browser blocked the actual request.
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version, Idempotency-Key',
     'Access-Control-Expose-Headers': 'Mcp-Session-Id',
     'Vary': 'Origin',
   };
@@ -134,7 +141,14 @@ export function staticCorsHeaders(methods = 'GET, POST, OPTIONS'): Record<string
   return {
     'Access-Control-Allow-Origin': allowOrigin,
     'Access-Control-Allow-Methods': methods,
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version',
+    // R5-FG-36 (P10-CFG-002): include `Idempotency-Key` so the
+    // browser's preflight allows the header on the five mutating
+    // routes that require it (refund, withdraw-fees, replay-deposit,
+    // user-withdraw, user-play). Pre-fix cross-origin browser
+    // requests from the dashboard failed preflight before reaching
+    // the handler — the route's required-header rejection never
+    // fired because the browser blocked the actual request.
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version, Idempotency-Key',
     'Access-Control-Expose-Headers': 'Mcp-Session-Id',
     'Vary': 'Origin',
   };

@@ -37,6 +37,7 @@ import { escalateUncertainDlFailure } from '../lib/escalation.js';
 import { classifyMirrorResult } from './responseCodes.js';
 import { RELEASE_SCRIPT, acquireUserLock, releaseUserLock, tryAcquireUserLockWithBackoff } from '../lib/locks.js';
 import { parseTxIdTimestamp } from '../custodial/uncertainTxVerification.js';
+import { mintAuditOrphanId } from '../lib/orphanIds.js';
 
 const REFUND_KEY_PREFIX = KEY_PREFIX.refunded;
 
@@ -564,9 +565,46 @@ export async function processRefund(
       const redis = await getRedis();
       await redis.sadd(KEY_PREFIX.refundedOriginals, transactionId);
     } catch (e) {
+      // R5-FG-21 / R5-FG-93 (P3-007): pre-submit SADD-refused had no
+      // orphan trail. Pre-fix this throw flowed to the route as 5xx
+      // with no DL, no page — operator retried, SADD failed again,
+      // threw again. Once Redis recovered and operator retried, SADD
+      // succeeded and refund fired with no record of prior attempts.
+      // Mirror R4-FG-4: write `audit_trail_orphaned` + escalate
+      // BEFORE throwing so the operator has a paged trail.
+      try {
+        if (options?.store) {
+          await options.store.upsertDeadLetter({
+            transactionId: mintAuditOrphanId(
+              'audit-orphan:refund-sadd-pre-submit',
+              transactionId,
+            ),
+            timestamp: new Date().toISOString(),
+            error: `pre-submit refundedOriginals SADD failed: ${e instanceof Error ? e.message : String(e)}`,
+            kind: 'audit_trail_orphaned',
+            details: {
+              sourceKind: 'refund_pre_submit_sadd',
+              sourceTxId: transactionId,
+              phase: 'refunded_originals_sadd_pre_submit_failed',
+            },
+          });
+        }
+      } catch {
+        /* throw below is the operator-visible signal */
+      }
+      try {
+        await escalateUncertainDlFailure({
+          kind: 'refunded_originals_sadd_failed',
+          uncertainTxId: transactionId,
+          cause: e,
+        });
+      } catch {
+        /* throw below is the operator-visible signal */
+      }
       throw new Error(
         `Refund blocked: pre-submit refundedOriginals SADD failed (${e instanceof Error ? e.message : String(e)}). ` +
-          `Cannot proceed without the permanent duplicate-prevention gate landed.`,
+          `Cannot proceed without the permanent duplicate-prevention gate landed. ` +
+          `Audit-trail orphan row written + operator paged.`,
       );
     }
 
@@ -870,7 +908,7 @@ export async function processRefund(
       if (options?.store) {
         try {
           await options.store.upsertDeadLetter({
-            transactionId: `audit-orphan:refund-ledger:${transactionId}`,
+            transactionId: mintAuditOrphanId('audit-orphan:refund-ledger', transactionId),
             timestamp: new Date().toISOString(),
             error: `refund ledger adjustment failed after on-chain success: ${e instanceof Error ? e.message : String(e)}`,
             kind: 'audit_trail_orphaned',
@@ -947,7 +985,7 @@ export async function processRefund(
       if (options?.store) {
         try {
           await options.store.upsertDeadLetter({
-            transactionId: `audit-orphan:refund-anchor:${transactionId}`,
+            transactionId: mintAuditOrphanId('audit-orphan:refund-anchor', transactionId),
             timestamp: new Date().toISOString(),
             error: `refund HCS-20 audit anchor failed after on-chain refund: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
             kind: 'audit_trail_orphaned',
@@ -1009,7 +1047,7 @@ export async function processRefund(
       if (options?.store) {
         try {
           await options.store.upsertDeadLetter({
-            transactionId: `audit-orphan:refund-claim-overwrite:${transactionId}`,
+            transactionId: mintAuditOrphanId('audit-orphan:refund-claim-overwrite', transactionId),
             timestamp: new Date().toISOString(),
             error: `refund claim overwrite failed: ${e instanceof Error ? e.message : String(e)}`,
             kind: 'audit_trail_orphaned',
@@ -1050,7 +1088,7 @@ export async function processRefund(
     if (options?.store) {
       try {
         await options.store.upsertDeadLetter({
-          transactionId: `audit-orphan:refund-sadd:${transactionId}`,
+          transactionId: mintAuditOrphanId('audit-orphan:refund-sadd', transactionId),
           timestamp: new Date().toISOString(),
           error: `refundedOriginals SADD failed after on-chain refund: ${e instanceof Error ? e.message : String(e)}`,
           kind: 'audit_trail_orphaned',
@@ -1428,6 +1466,18 @@ export async function verifyUncertainRefunds(
     const ledgerAdjusted = !!refundProgress.ledgerAdjustedAt;
     let didAdjustLedger = false;
 
+    // R5-FG-16 (P5-RU-001 + P1-002): mutationError gate, mirroring
+    // R4-FG-6's withdrawal verifier pattern. R4-FG-14 added orphan +
+    // escalation on audit-anchor failure but did NOT skip the resolve
+    // write — entry stamped resolved while topic was missing the
+    // refund anchor → topic-only auditor sees phantom user credit.
+    // refund.ts is the 4th sibling miss for this archetype. Track
+    // any mutation step that failed; only mark resolved if all of
+    // them landed.
+    let refundMutationError:
+      | { phase: 'ledger_debit' | 'audit_anchor'; cause: unknown }
+      | null = null;
+
     // F8 (2026-05-06 audit U-06): debit the user identified on the
     // recorded `DepositRecord` rather than re-resolving via memo.
     // F9 (2026-05-06 audit OP-01): reverse the operator's rake
@@ -1530,6 +1580,11 @@ export async function verifyUncertainRefunds(
           }
         }
       } catch (e) {
+        // R5-FG-16: gate the resolve write on ledger-debit success.
+        // Pre-fix the catch logged + swallowed; resolve-write fired
+        // unconditionally → user kept their deposit credit AND
+        // received the refund (operator-side double-spend).
+        refundMutationError = { phase: 'ledger_debit', cause: e };
         logger.warn(
           'refund_uncertain verification: ledger adjustment failed',
           {
@@ -1646,6 +1701,13 @@ export async function verifyUncertainRefunds(
         // absent on the verifier path. Mirror in-flight processRefund:
         // audit anchor failure post-on-chain-refund must escalate so
         // an operator can manually replay.
+        //
+        // R5-FG-16 (P5-RU-001): set mutationError so the resolve
+        // write at the bottom of the function is skipped — pre-fix
+        // the catch wrote orphan + escalated AND fell through to
+        // resolve-write. Topic missed the refund anchor; entry
+        // marked resolved → operator never re-replayed.
+        refundMutationError = { phase: 'audit_anchor', cause: e };
         logger.error('CRITICAL: refund_uncertain verifier audit write failed — topic missing the refund anchor', {
           component: 'Refund',
           refundTxId,
@@ -1658,7 +1720,7 @@ export async function verifyUncertainRefunds(
         try {
           await store.upsertDeadLetter({
             // R2-FG-17: salt by writer phase.
-            transactionId: `audit-orphan:refund-verifier:${refundTxId}`,
+            transactionId: mintAuditOrphanId('audit-orphan:refund-verifier', refundTxId),
             timestamp: new Date().toISOString(),
             error: `refund verifier audit write failed: ${e instanceof Error ? e.message : String(e)}`,
             kind: 'audit_trail_orphaned',
@@ -1730,7 +1792,7 @@ export async function verifyUncertainRefunds(
         );
         try {
           await store.upsertDeadLetter({
-            transactionId: `audit-orphan:refund-verifier-sadd:${sadd_originalTxId}`,
+            transactionId: mintAuditOrphanId('audit-orphan:refund-verifier-sadd', sadd_originalTxId),
             timestamp: new Date().toISOString(),
             error: `verifier refundedOriginals SADD failed after on-chain refund: ${e instanceof Error ? e.message : String(e)}`,
             kind: 'audit_trail_orphaned',
@@ -1765,6 +1827,34 @@ export async function verifyUncertainRefunds(
       await store.flush();
     } catch {
       /* */
+    }
+
+    // R5-FG-16 (P5-RU-001): gate the resolve write on mutation
+    // success. Pre-fix the resolve-write fired even if the
+    // ledger-debit OR audit-anchor failed → entry stamped resolved
+    // while topic missing the refund anchor / user not debited.
+    // Mirrors R4-FG-6's withdrawal-verifier mutationError gate.
+    if (refundMutationError) {
+      logger.warn(
+        `refund_uncertain verifier: ${refundMutationError.phase} failed; entry left unresolved for retry`,
+        {
+          component: 'Refund',
+          refundTxId,
+          phase: refundMutationError.phase,
+          error:
+            refundMutationError.cause instanceof Error
+              ? refundMutationError.cause.message
+              : String(refundMutationError.cause),
+        },
+      );
+      await releaseRefundLock();
+      outcomes.push({
+        refundTxId,
+        originalTxId,
+        status: 'still_uncertain',
+        note: `Mutation step '${refundMutationError.phase}' failed; entry left unresolved for retry on next pass.`,
+      });
+      continue;
     }
 
     try {

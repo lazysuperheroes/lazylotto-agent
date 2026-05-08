@@ -360,6 +360,21 @@ export async function parseAuditTopic(
   // deduped (no key to dedup on); operators reading pre-R5 topics
   // accept the legacy ambiguity.
   const seenRakeKeys = new Set<string>();
+  // R5-FG-23 (P3-004 + P3-012): reader-side dedup of refund anchors
+  // by `originalDepositTxId`. R4-FG-58 added dedup by `refundTxId`;
+  // R4-FG-59 closed the orthogonal "different refundTxIds for same
+  // originalDepositTxId" case in verify-audit only. The reader fed
+  // to /api/admin/audit, /api/user/audit, and the audit page UI did
+  // NOT track this — two refund anchors for the same originalDepositTxId
+  // (one in-flight, one verifier with a fresh refundTxId) both
+  // passed through, summing rakeReversed twice.
+  const seenRefundedOriginals = new Set<string>();
+  // R5-FG-24 (P1-003): reader-side dedup of v1 `mint` (deposit) anchors
+  // by `depositTxId` extracted from `memo:'deposit:<txId>'`. Pre-fix
+  // an operator-driven /api/admin/replay-deposit retry that re-fired
+  // recordDeposit produced TWO mint anchors with identical body →
+  // reconstructed user balance showed DOUBLE the actual deposit.
+  const seenDepositTxIds = new Set<string>();
   const stats: AuditReaderResult['stats'] = {
     totalMessages: messages.length,
     v1Messages: 0,
@@ -450,7 +465,20 @@ export async function parseAuditTopic(
         stats.skippedMessages++;
         continue;
       }
+      // R5-FG-23 (P3-004): also dedup by originalDepositTxId.
+      // R4-FG-58 closed the same-refundTxId case; this closes the
+      // "different refundTxIds for same originalDepositTxId" case
+      // (in-flight processRefund + verifier with a fresh refundTxId
+      // both emit anchors → double-counted rakeReversed).
+      if (
+        ev.originalDepositTxId &&
+        seenRefundedOriginals.has(ev.originalDepositTxId)
+      ) {
+        stats.skippedMessages++;
+        continue;
+      }
       seenRefundTxIds.add(ev.refundTxId);
+      if (ev.originalDepositTxId) seenRefundedOriginals.add(ev.originalDepositTxId);
       events.push(ev);
       continue;
     }
@@ -546,8 +574,29 @@ export async function parseAuditTopic(
     if (op === 'mint') {
       stats.v1Messages++;
       const ev = parseV1Mint(msg);
-      if (ev) events.push(ev);
-      else stats.skippedMessages++;
+      if (!ev) {
+        stats.skippedMessages++;
+        continue;
+      }
+      // R5-FG-24 (P1-003): dedup v1 mint anchors on memo's
+      // `deposit:<txId>` extracted form. /api/admin/replay-deposit
+      // operator retry that re-fires recordDeposit emits two mint
+      // anchors with identical body — without dedup the reconstructed
+      // user balance shows DOUBLE the actual deposit. Legacy mints
+      // without `deposit:` memo pass through unfiltered.
+      const memo = ev.memo;
+      const depositTxId =
+        memo && memo.startsWith('deposit:') && memo.length > 'deposit:'.length
+          ? memo.slice('deposit:'.length)
+          : undefined;
+      if (depositTxId) {
+        if (seenDepositTxIds.has(depositTxId)) {
+          stats.skippedMessages++;
+          continue;
+        }
+        seenDepositTxIds.add(depositTxId);
+      }
+      events.push(ev);
       continue;
     }
     if (op === 'transfer') {
@@ -654,6 +703,33 @@ export async function parseAuditTopic(
       const sessions = seqMap.get(seq) ?? [];
       sessions.push(session.sessionId);
       seqMap.set(seq, sessions);
+    }
+  }
+
+  // R5-FG-46 (P12-308): post-process sessions referenced by
+  // `prize_recovery` events. Pre-fix the reader emitted both
+  // `closed_success_with_prizeTransfer.outcome='failed'` AND a
+  // separate `prize_recovery` event; verify-audit's per-user
+  // reconstruction skipped `prize_recovery` (`// deploy/prize_recovery
+  // /unknown not credited per-user`). An auditor saw a session with
+  // `prizeTransfer.status='failed'` and concluded the user never got
+  // their prize, even after the recovery script succeeded. Now: when
+  // a `prize_recovery` event references `affectedSessions`, flip
+  // those sessions' `prizeTransfer.status` from `failed` to
+  // `recovered` and surface a `recovered_via_prize_recovery` warning.
+  const sessionByIdForRecovery = new Map(sessions.map((s) => [s.sessionId, s]));
+  for (const ev of events) {
+    if (ev.type !== 'prize_recovery') continue;
+    const affected = ev.affectedSessions ?? [];
+    for (const sid of affected) {
+      const sess = sessionByIdForRecovery.get(sid);
+      if (!sess || !sess.prizeTransfer) continue;
+      if (sess.prizeTransfer.status === 'failed') {
+        sess.prizeTransfer = { ...sess.prizeTransfer, status: 'recovered' };
+        sess.warnings.push(
+          `recovered_via_prize_recovery: prize transfer initially failed (txId=${sess.prizeTransfer.txId ?? 'unknown'}), recovered by operator via recover-stuck-prizes script`,
+        );
+      }
     }
   }
 
@@ -863,7 +939,23 @@ async function reconstructSession(
       // with only a buried warning. R4-FG-23's protection was opt-out
       // for the attacker forever.
       const closePostCutoff = isPostLegacyCutoff(bucket.close.timestamp);
-      if (agent) {
+      // R5-FG-50 (P4-010): if `agent` is missing on the open (malformed
+      // open or attacker-written messages omitting it), refuse to
+      // validate — treat as `corrupt`. Pre-fix the reader fell through
+      // to the legacy unbound fallback (`else { usedLegacy=true }`),
+      // which made R4-FG-23's protection unavailable for ANY session
+      // whose open omitted `agent`. The whole point of binding is the
+      // operator key proves who emitted the session — without `agent`
+      // there is no binding to validate.
+      if (!agent) {
+        warnings.push(
+          'cannot_verify_root_binding_open_missing: close present but session-open lacks `agent`; binding cannot be validated',
+        );
+        observedRoot = '';
+        // mirror_lag_grace_window left as a future ergonomic — for now,
+        // operators with real lag can replay against a fully-mirrored
+        // topic snapshot.
+      } else {
         observedRoot = await computePoolsRoot(poolsForHash, {
           sessionId,
           user,
@@ -878,13 +970,6 @@ async function reconstructSession(
             usedLegacy = true;
           }
         }
-      } else if (!closePostCutoff) {
-        observedRoot = await computePoolsRoot(poolsForHash);
-        usedLegacy = true;
-      } else {
-        // Post-cutoff close with no `agent` from the open — refuse.
-        // (R5-FG-50 reinforces this for the open-missing case.)
-        observedRoot = '';
       }
       if (observedRoot !== bucket.close.poolsRoot) {
         warnings.push(

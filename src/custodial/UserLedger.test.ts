@@ -322,9 +322,12 @@ describe('UserLedger', () => {
     assert.equal(balances.tokens.hbar.available, 199, 'local credit must still land despite anchor failure');
 
     // Acid test: dead-letter row exists with the audit-orphan key.
+    // R5-FG-25: ID is now mintAuditOrphanId-salted; assert prefix
+    // match instead of the literal pre-salt form.
     const orphan = upsertCalls.find(
       (c) =>
-        c.transactionId === 'audit-orphan:in-band:deposit-anchor:tx-anchor-fail' &&
+        typeof c.transactionId === 'string' &&
+        c.transactionId.startsWith('audit-orphan:in-band:deposit-anchor:tx-anchor-fail:') &&
         c.kind === 'audit_trail_orphaned',
     );
     assert.ok(

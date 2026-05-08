@@ -63,6 +63,16 @@ interface CliArgs {
    * direction only) since the topic alone doesn't carry agent info.
    */
   agentAccountId: string | null;
+  /**
+   * R5-FG-44 (P12-305): when true, also load `audit_trail_orphaned`
+   * dead-letters from the configured store and merge them into the
+   * alerts list. Without this, an operator running on a "healthy
+   * looking" topic gets a clean conservation report while the agent
+   * is silently dead-lettering orphans every hour. Requires Redis
+   * env (UPSTASH_REDIS_REST_URL/TOKEN) since dead-letters live in
+   * Redis, not on chain.
+   */
+  storeSnapshot: boolean;
 }
 
 function parseArgs(): CliArgs {
@@ -74,6 +84,7 @@ function parseArgs(): CliArgs {
   let mirror: string | null = null;
 
   let agentAccountId: string | null = null;
+  let storeSnapshot = false;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -89,6 +100,8 @@ function parseArgs(): CliArgs {
       mirror = args[++i]!;
     } else if ((a === '--agent' || a === '--agent-account-id') && args[i + 1]) {
       agentAccountId = args[++i]!;
+    } else if (a === '--store-snapshot') {
+      storeSnapshot = true;
     } else if (a === '--help' || a === '-h') {
       printHelp();
       process.exit(0);
@@ -111,7 +124,7 @@ function parseArgs(): CliArgs {
     process.exit(1);
   }
 
-  return { topic, network, user, json, mirror, agentAccountId };
+  return { topic, network, user, json, mirror, agentAccountId, storeSnapshot };
 }
 
 function printHelp(): void {
@@ -1017,6 +1030,48 @@ async function main() {
               : `; pre-cutoff session lacks cross-session-replay protection.`),
         });
       }
+    }
+  }
+
+  // R5-FG-44 (P12-305): when --store-snapshot is set, load
+  // `audit_trail_orphaned` dead-letters from Redis and merge as
+  // alerts. Pre-fix verify-audit only walked the topic, so an
+  // operator on a healthy-looking topic got "Conservation OK" while
+  // the agent was silently dead-lettering 50 orphans/hour into
+  // Redis. Topic-only auditors get the topic-only view; operators
+  // running the runbook with Redis access get the full picture.
+  if (args.storeSnapshot) {
+    try {
+      const { createStore } = await import('../custodial/createStore.js');
+      const store = await createStore({
+        mode: 'redis',
+        agentAccountId: args.agentAccountId ?? '0.0.0',
+      });
+      await store.refreshDeadLetters().catch(() => undefined);
+      const orphans = store.getDeadLetters().filter((e) => e.kind === 'audit_trail_orphaned');
+      if (orphans.length > 0) {
+        // Group by sourceKind for digestible output.
+        const byKind = new Map<string, number>();
+        for (const o of orphans) {
+          const sk = String((o.details as { sourceKind?: string } | undefined)?.sourceKind ?? 'unknown');
+          byKind.set(sk, (byKind.get(sk) ?? 0) + 1);
+        }
+        for (const [sk, count] of byKind) {
+          alerts.push({
+            severity: 'critical',
+            category: 'audit_trail_orphaned',
+            message:
+              `R5-FG-44: ${count} audit_trail_orphaned dead-letter(s) of sourceKind='${sk}' ` +
+              `present in store. Topic-only audit shows clean conservation but the agent has ` +
+              `been silently dead-lettering — operator must replay each via the runbook.`,
+          });
+        }
+      }
+    } catch (snapshotErr) {
+      console.warn(
+        `[verify-audit] --store-snapshot load failed (Redis env missing or unreachable): ` +
+          `${snapshotErr instanceof Error ? snapshotErr.message : String(snapshotErr)}`,
+      );
     }
   }
 

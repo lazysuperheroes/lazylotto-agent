@@ -46,14 +46,27 @@ export const POST = withStore(async (request: Request) => {
     // run with safety rails silently disabled.
     assertRedisHealthy();
 
-    // Stricter than general user routes — plays cost HBAR and touch
-    // the dApp contracts, so cap to 3 per minute per identity.
-    if (!(await checkRateLimit({ request, action: 'user-play', limit: 3, windowSec: 60 }))) {
-      return rateLimitResponse(60);
-    }
-
+    // R5-FG-31 (P7-002): authenticate FIRST, then rate-limit by
+    // accountId. Pre-fix `checkRateLimit` ran before `requireTier`
+    // and bucketed by bearer-token prefix — token rotation defeated
+    // the per-action cap. Now buckets by `auth.accountId` so the
+    // cap holds across token churn.
     const auth = await requireTier(request, 'user');
     if (isErrorResponse(auth)) return auth;
+
+    // Stricter than general user routes — plays cost HBAR and touch
+    // the dApp contracts, so cap to 3 per minute per identity.
+    if (
+      !(await checkRateLimit({
+        request,
+        action: 'user-play',
+        limit: 3,
+        windowSec: 60,
+        identity: auth.accountId,
+      }))
+    ) {
+      return rateLimitResponse(60);
+    }
 
     // Resolve userId from authenticated accountId (same pattern as withdraw)
     const store = await getStore();
@@ -141,8 +154,13 @@ export const POST = withStore(async (request: Request) => {
     // Kill switch — translate to 503 + reason so the dashboard banner
     // can render the "Agent temporarily closed" state cleanly.
     if (err instanceof KillSwitchError) {
+      // R5-FG-33 (P7-005): drop the operator's free-text reason from
+      // the user-tier 503 body. R4-FG-40 closed the same recon class
+      // at /api/health; authenticated polling routes still leaked.
+      // Sanitized fixed message — operators see the real reason via
+      // admin tooling.
       return NextResponse.json(
-        { error: err.message, reason: err.reason ?? null },
+        { error: 'Agent operations temporarily paused by operator.', reason: null },
         { status: 503, headers: CORS_HEADERS },
       );
     }

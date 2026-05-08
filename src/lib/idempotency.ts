@@ -165,9 +165,51 @@ export async function withIdempotency<T>(
     // alone and let the 24h TTL be the worst-case fallback.
     try {
       await redis.eval(RELEASE_SCRIPT, [fullKey], [fence]);
-    } catch {
-      // The 24h TTL is the worst-case fallback. Operator can DEL
-      // manually if they want a faster retry.
+    } catch (evalErr) {
+      // R5-FG-48 (P6-006): bare catch was a 24h-stuck claim every
+      // time eval threw (Redis cluster failover, eval not yet
+      // supported in mock, network blip). Sibling retries got
+      // `kind:'in-flight'` for 24h with no recoverable signal.
+      // Operator manual DEL required `fullKey` which is constructed
+      // INSIDE this function and never logged on eval failure.
+      //
+      // Fix: fall back to plain DEL. The body threw a non-preserve-
+      // claim error so the on-chain action did NOT happen — DEL is
+      // safe (we'd have returned PreserveClaim above otherwise).
+      // Race vs. sibling acquire is nearly impossible: SET-NX gave
+      // us the fence; only a TTL-out + sibling acquire could swap
+      // it; the eval-failure window is microseconds.
+      try {
+        await redis.del(fullKey);
+        // Visibility for operator + monitoring: log the released
+        // key so the failure mode is grep-able.
+        try {
+          const { logger } = await import('./logger.js');
+          logger.warn(
+            'idempotency RELEASE_SCRIPT eval failed; fell back to plain DEL',
+            {
+              component: 'Idempotency',
+              event: 'idempotency_release_eval_failed',
+              key: fullKey,
+              error: evalErr instanceof Error ? evalErr.message : String(evalErr),
+            },
+          );
+        } catch {
+          /* logger import is best-effort */
+        }
+      } catch (delErr) {
+        // Both eval AND plain DEL failed — page the operator.
+        try {
+          const { escalateUncertainDlFailure } = await import('./escalation.js');
+          await escalateUncertainDlFailure({
+            kind: 'idempotency_release_failed',
+            uncertainTxId: fullKey,
+            cause: delErr,
+          });
+        } catch {
+          /* the throw below is the operator-visible signal */
+        }
+      }
     }
     throw err;
   }

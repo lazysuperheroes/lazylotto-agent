@@ -24,6 +24,8 @@ import {
   releaseUserLock,
   acquireOperatorLock,
   releaseOperatorLock,
+  startOperatorLockHeartbeat,
+  startUserLockHeartbeat,
 } from './locks.js';
 import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 
@@ -149,5 +151,64 @@ describe('Operator locks', () => {
     assert.ok(t1);
     assert.equal(t2, null);
     await releaseOperatorLock('scope-a', t1!);
+  });
+});
+
+describe('Lock heartbeat (R4-FG-66 + R5-FG-49)', () => {
+  beforeEach(clearLocks);
+
+  // revert-proof: if startOperatorLockHeartbeat reverts to no-op
+  // (the R4-FG-66 fix removed), the lock TTL is whatever was set at
+  // acquire — heartbeat would NOT extend it. This test acquires
+  // with a 2s TTL, lets the heartbeat fire 4× over 4s, and asserts
+  // the lock is still held. Pre-fix the lock would TTL out at 2s.
+  it('R4-FG-66: heartbeat extends an operator lock past its acquire-time TTL', async () => {
+    const token = await acquireOperatorLock('scope-a', 2);
+    assert.ok(token);
+    const hb = startOperatorLockHeartbeat('scope-a', token!, 500, 2);
+    try {
+      // Wait long enough for the original TTL to expire several times.
+      await new Promise((r) => setTimeout(r, 2_500));
+      // Lock must still be held — sibling SET-NX returns null.
+      const sibling = await acquireOperatorLock('scope-a', 60);
+      assert.equal(sibling, null, 'heartbeat should have kept the lock alive');
+    } finally {
+      hb.cancel();
+      await releaseOperatorLock('scope-a', token!);
+    }
+  });
+
+  // revert-proof: if startLockHeartbeat reverts to setInterval (the
+  // R5-FG-49 self-rescheduling-setTimeout fix removed), the
+  // cancelled-flag check happens AFTER stacked callbacks have queued
+  // — a sibling acquire could see its lock silently re-extended by
+  // a zombie callback. We can't directly observe Lua eval timing in
+  // this test, but we can assert that cancelling immediately stops
+  // further compare-and-extend attempts: re-acquire with a different
+  // token after cancel + delete; if a stacked callback still ran the
+  // Lua script, it would compare against the original token (no
+  // match → no-op), so the re-acquire stays valid.
+  it('R5-FG-49: cancel immediately halts further heartbeat ticks', async () => {
+    const tokenA = await acquireUserLock('locktest-1', 2);
+    assert.ok(tokenA);
+    const hb = startUserLockHeartbeat('locktest-1', tokenA!, 2, 100);
+    // Let it tick a few times.
+    await new Promise((r) => setTimeout(r, 250));
+    hb.cancel();
+    await releaseUserLock('locktest-1', tokenA!);
+
+    // Acquire fresh under a different token.
+    const tokenB = await acquireUserLock('locktest-1', 60);
+    assert.ok(tokenB, 'fresh acquire should succeed after cancel + release');
+
+    // If a stacked tick had survived `cancel()`, it would EXPIRE the
+    // key (matching tokenA, but tokenA was released; the EXPIRE
+    // would no-op against tokenB's value — Lua's GET == ARGV[1]
+    // check fences). Re-validate the tokenB lock is still held by
+    // attempting a sibling acquire.
+    await new Promise((r) => setTimeout(r, 300));
+    const sibling = await acquireUserLock('locktest-1', 60);
+    assert.equal(sibling, null, 'tokenB lock must remain held; no zombie tick should have nuked it');
+    await releaseUserLock('locktest-1', tokenB!);
   });
 });

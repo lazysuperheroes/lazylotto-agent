@@ -38,7 +38,7 @@ import { toEvmAddress } from '../utils/format.js';
 import { transferAllPrizesWithRetry } from '../hedera/contracts.js';
 import { getUserState, getSystemInfo } from '../mcp/client.js';
 import { AccountingService } from '../custodial/AccountingService.js';
-import { acquireUserLock, releaseUserLock } from '../lib/locks.js';
+import { acquireUserLock, releaseUserLock, startUserLockHeartbeat } from '../lib/locks.js';
 import { createStore } from '../custodial/createStore.js';
 
 interface CliArgs {
@@ -190,95 +190,118 @@ async function main() {
     process.exit(3);
   }
 
-  console.log('');
-  console.log('  → Calling contract...');
-  let txResult;
+  // R5-FG-27 (P6-009): wrap the entire post-acquire body in
+  // try/finally so any throw, early-return, or `process.exit` from
+  // a nested helper releases the lock instead of leaving it stuck
+  // for the full 600s TTL. Pre-fix only two release paths existed
+  // (transfer-fail catch + happy-path tail); every other failure
+  // mode (audit-write throw, getUserState throw, mirror propagation
+  // setTimeout error) silently held the lock.
+  //
+  // R5-FG-28 (P6-003): heartbeat the lock so a slow mainnet round
+  // (transferAllPrizesWithRetry: 3×~16s + 5s mirror wait + 2× MCP
+  // getUserState + recordPrizeRecovery + verification) doesn't
+  // exceed the 600s TTL. Mirrors R4-FG-66's reconcile heartbeat.
+  const recoveryLockHeartbeat = startUserLockHeartbeat(
+    recoveryLockKey,
+    lockToken,
+    600,
+    60_000,
+  );
+  let exitCode = 0;
   try {
-    txResult = await transferAllPrizesWithRetry(
-      client,
-      contractId,
-      userEvm,
-      agentState.pendingPrizesCount,
-    );
-  } catch (err) {
-    await releaseUserLock(recoveryLockKey, lockToken);
-    const message = err instanceof Error ? err.message : String(err);
-    const attemptsLog = (err as Error & { attemptsLog?: unknown[] }).attemptsLog;
-    console.error('');
-    console.error(`  ✗ Transfer failed: ${message}`);
-    if (attemptsLog) {
-      console.error('  Attempts:');
-      console.error(JSON.stringify(attemptsLog, null, 2));
-    }
-    process.exit(2);
-  }
-
-  console.log(`  ✓ Transfer succeeded on attempt ${txResult.attempt}`);
-  console.log(`      Tx ID: ${txResult.result.transactionId}`);
-  console.log(`      Gas used: ${txResult.gasUsed}`);
-  console.log(`      Status: ${txResult.result.status.toString()}`);
-
-  // ── Step 5: record on HCS-20 audit topic ────────────────
-  console.log('');
-  console.log('[5/5] Recording prize_recovery on HCS-20 audit topic...');
-  const hcs20TopicId = process.env.HCS20_TOPIC_ID;
-  // R4-FG-18 (round-4 high): exit code 4 when the audit log fails.
-  // Pre-fix the script printed a warning and exited 0; cron / ops
-  // runbook scripts saw "success" even though the topic is missing
-  // a `prize_recovery` anchor — defeats the very purpose of the
-  // audit trail. Track the failure and exit non-zero before the
-  // final `process.exit(0)`.
-  let auditWriteFailed = false;
-  if (!hcs20TopicId) {
-    console.warn('      ⚠ HCS20_TOPIC_ID not set in env — skipping audit log entry.');
-    console.warn('      The contract transfer succeeded, but the audit trail will not show this recovery.');
-    auditWriteFailed = true;
-  } else {
-    const tick = process.env.HCS20_TICK ?? 'LLCRED';
-    const accounting = new AccountingService({ client, tick, topicId: hcs20TopicId });
+    console.log('');
+    console.log('  → Calling contract...');
+    let txResult;
     try {
-      await accounting.recordPrizeRecovery({
-        userAccountId,
-        agentAccountId,
-        prizesTransferred: agentState.pendingPrizesCount,
-        prizesByToken: fungibleByToken,
-        contractTxId: txResult.result.transactionId,
-        reason,
-        performedBy: agentAccountId, // script runs as agent operator
-        attempts: txResult.attempt,
-        gasUsed: txResult.gasUsed,
-      });
-      console.log('      ✓ Audit entry submitted');
+      txResult = await transferAllPrizesWithRetry(
+        client,
+        contractId,
+        userEvm,
+        agentState.pendingPrizesCount,
+      );
     } catch (err) {
-      console.error(`      ✗ Audit log failed: ${err instanceof Error ? err.message : String(err)}`);
-      console.error('      Recovery itself succeeded; only the audit log entry failed.');
-      auditWriteFailed = true;
+      const message = err instanceof Error ? err.message : String(err);
+      const attemptsLog = (err as Error & { attemptsLog?: unknown[] }).attemptsLog;
+      console.error('');
+      console.error(`  ✗ Transfer failed: ${message}`);
+      if (attemptsLog) {
+        console.error('  Attempts:');
+        console.error(JSON.stringify(attemptsLog, null, 2));
+      }
+      exitCode = 2;
+      return;
     }
-  }
 
-  // ── Verification ────────────────────────────────────────
-  console.log('');
-  console.log('Post-recovery verification:');
-  // Mirror node propagation delay
-  console.log('  Waiting 5s for mirror node propagation...');
-  await new Promise((r) => setTimeout(r, 5000));
-  const agentAfter = await getUserState(agentAccountId);
-  const userAfter = await getUserState(userAccountId);
-  console.log(`  Agent pending after: ${agentAfter.pendingPrizesCount} (was ${agentState.pendingPrizesCount})`);
-  console.log(`  User pending after:  ${userAfter.pendingPrizesCount} (was ${userState.pendingPrizesCount})`);
+    console.log(`  ✓ Transfer succeeded on attempt ${txResult.attempt}`);
+    console.log(`      Tx ID: ${txResult.result.transactionId}`);
+    console.log(`      Gas used: ${txResult.gasUsed}`);
+    console.log(`      Status: ${txResult.result.status.toString()}`);
 
-  console.log('');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  Recovery complete.');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  await releaseUserLock(recoveryLockKey, lockToken);
-  // R4-FG-18: exit non-zero when audit log failed so monitoring shells
-  // surface the missing anchor.
-  if (auditWriteFailed) {
-    console.error('  ⚠ EXIT 4: audit log entry missing — prize_recovery anchor absent from topic.');
-    process.exit(4);
+    // ── Step 5: record on HCS-20 audit topic ────────────────
+    console.log('');
+    console.log('[5/5] Recording prize_recovery on HCS-20 audit topic...');
+    const hcs20TopicId = process.env.HCS20_TOPIC_ID;
+    // R4-FG-18 (round-4 high): exit code 4 when the audit log fails.
+    // Pre-fix the script printed a warning and exited 0; cron / ops
+    // runbook scripts saw "success" even though the topic is missing
+    // a `prize_recovery` anchor — defeats the very purpose of the
+    // audit trail. Track the failure and exit non-zero before the
+    // final `process.exit(0)`.
+    let auditWriteFailed = false;
+    if (!hcs20TopicId) {
+      console.warn('      ⚠ HCS20_TOPIC_ID not set in env — skipping audit log entry.');
+      console.warn('      The contract transfer succeeded, but the audit trail will not show this recovery.');
+      auditWriteFailed = true;
+    } else {
+      const tick = process.env.HCS20_TICK ?? 'LLCRED';
+      const accounting = new AccountingService({ client, tick, topicId: hcs20TopicId });
+      try {
+        await accounting.recordPrizeRecovery({
+          userAccountId,
+          agentAccountId,
+          prizesTransferred: agentState.pendingPrizesCount,
+          prizesByToken: fungibleByToken,
+          contractTxId: txResult.result.transactionId,
+          reason,
+          performedBy: agentAccountId, // script runs as agent operator
+          attempts: txResult.attempt,
+          gasUsed: txResult.gasUsed,
+        });
+        console.log('      ✓ Audit entry submitted');
+      } catch (err) {
+        console.error(`      ✗ Audit log failed: ${err instanceof Error ? err.message : String(err)}`);
+        console.error('      Recovery itself succeeded; only the audit log entry failed.');
+        auditWriteFailed = true;
+      }
+    }
+
+    // ── Verification ────────────────────────────────────────
+    console.log('');
+    console.log('Post-recovery verification:');
+    // Mirror node propagation delay
+    console.log('  Waiting 5s for mirror node propagation...');
+    await new Promise((r) => setTimeout(r, 5000));
+    const agentAfter = await getUserState(agentAccountId);
+    const userAfter = await getUserState(userAccountId);
+    console.log(`  Agent pending after: ${agentAfter.pendingPrizesCount} (was ${agentState.pendingPrizesCount})`);
+    console.log(`  User pending after:  ${userAfter.pendingPrizesCount} (was ${userState.pendingPrizesCount})`);
+
+    console.log('');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('  Recovery complete.');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    // R4-FG-18: exit non-zero when audit log failed so monitoring shells
+    // surface the missing anchor.
+    if (auditWriteFailed) {
+      console.error('  ⚠ EXIT 4: audit log entry missing — prize_recovery anchor absent from topic.');
+      exitCode = 4;
+    }
+  } finally {
+    recoveryLockHeartbeat.cancel();
+    await releaseUserLock(recoveryLockKey, lockToken);
   }
-  process.exit(0);
+  process.exit(exitCode);
 }
 
 main().catch((err) => {

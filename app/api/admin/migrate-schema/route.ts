@@ -44,14 +44,27 @@ export async function OPTIONS() {
 // withStore: F3 production-Redis preflight + uniform diagnostic shape.
 export const POST = withStore(async (request: Request) => {
   try {
-    // Modest limit — migration is cheap but operator-driven, no point
-    // letting it be hammered.
-    if (!(await checkRateLimit({ request, action: 'admin-migrate-schema', limit: 6, windowSec: 60 }))) {
-      return rateLimitResponse(60);
-    }
-
+    // R5-FG-32 (P7-003): authenticate first, then rate-limit by
+    // accountId. R4-FG-44 promised every admin route's checkRateLimit
+    // AFTER requireTier with identity: auth.accountId — migrate-schema
+    // was the sibling miss. Pre-fix bucketed by bearer-token prefix,
+    // so token rotation defeated the cap.
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
+
+    // Modest limit — migration is cheap but operator-driven, no point
+    // letting it be hammered.
+    if (
+      !(await checkRateLimit({
+        request,
+        action: 'admin-migrate-schema',
+        limit: 6,
+        windowSec: 60,
+        identity: auth.accountId,
+      }))
+    ) {
+      return rateLimitResponse(60);
+    }
 
     // Operator lock: migrate-schema walks the entire user list and
     // saves each one. Two concurrent runs would do the same work

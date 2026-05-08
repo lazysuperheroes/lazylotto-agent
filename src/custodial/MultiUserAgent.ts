@@ -952,19 +952,43 @@ export class MultiUserAgent {
           const pool = playedPools[i]!;
           const prizes = convertPrizeDetailsToV2(pool.prizeDetails ?? []);
           const spentToken = poolFeeTokenForAudit(pool.feeTokenId);
-          await this.accounting.recordPlayPoolResult({
-            sessionId: session.sessionId,
-            user: user.hederaAccountId,
-            agent: agentAccountId,
-            poolId: pool.poolId,
-            seq: i + 1,
-            entries: pool.entriesBought,
-            spent: pool.amountSpent,
-            spentToken,
-            wins: pool.wins,
-            prizes,
-          });
+          // R5-FG-22 (P5-SR-001): increment BEFORE the await. Pre-fix
+          // the post-await increment lost the count of any pool whose
+          // submit landed on the topic but whose await threw a
+          // ReceiptUncertainError or transient SDK error → the abort
+          // path computed `abortedPoolsRoot` over `slice(0, i-1)`,
+          // missing pool i — but the topic HAS the message → reader
+          // recomputed Merkle over i pool messages and abort marker
+          // carried root over i-1 → roots disagreed → reader marked
+          // session orphaned (not aborted), masking the real failure
+          // mode and breaking `closed_aborted` recovery semantics.
           v2WrittenPools++;
+          try {
+            await this.accounting.recordPlayPoolResult({
+              sessionId: session.sessionId,
+              user: user.hederaAccountId,
+              agent: agentAccountId,
+              poolId: pool.poolId,
+              seq: i + 1,
+              entries: pool.entriesBought,
+              spent: pool.amountSpent,
+              spentToken,
+              wins: pool.wins,
+              prizes,
+            });
+          } catch (poolErr) {
+            // Best-effort: if submit definitely never reached the
+            // network (pre-submit validation throw), decrement back
+            // — the abort-root will be computed over slice(0, i)
+            // matching what the topic actually has. PreserveClaim
+            // shapes (ReceiptUncertain / PostSubmit) leave the count
+            // optimistic since the topic likely has the message.
+            const { PreserveClaimError } = await import('../hedera/transfers.js');
+            if (!(poolErr instanceof PreserveClaimError)) {
+              v2WrittenPools = Math.max(0, v2WrittenPools - 1);
+            }
+            throw poolErr;
+          }
         }
 
         // 3. Close — compute Merkle root from the canonical pool data
@@ -2221,7 +2245,7 @@ export class MultiUserAgent {
       });
       try {
         await this.store.upsertDeadLetter({
-          transactionId: `audit-orphan:prize-recovery:${txResult.result.transactionId}`,
+          transactionId: mintAuditOrphanId('audit-orphan:prize-recovery', txResult.result.transactionId),
           timestamp: new Date().toISOString(),
           error: `prize_recovery audit failed after on-chain recovery: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
           kind: 'audit_trail_orphaned',

@@ -512,15 +512,27 @@ function createInMemoryStore(): RedisLike {
       args: string[],
     ): Promise<T> {
       // Emulate the specific scripts used by the codebase. In-memory store
-      // is single-threaded JS, so the compare-and-delete is trivially atomic.
+      // is single-threaded JS, so the compare-and-mutate is trivially atomic.
       //
-      // Known script: compare-and-delete (used by locks.ts)
+      // R5-FG-86 (P4-002 + P4-003): the mock used to match any
+      // script containing 'get' AND 'del', regardless of token-arg
+      // shape — too permissive (matched the heartbeat script's
+      // expire form, succeeded as a DEL, broke heartbeat tests).
+      // Now: parse the canonical compare-and-X verb and dispatch
+      // exactly. Unknown scripts throw so a writer regression is
+      // visible at test time.
+      const usesExpire = /redis\.call\(\s*['"]expire['"]/i.test(script);
+      const usesDel =
+        /redis\.call\(\s*['"]del['"]/i.test(script) && !usesExpire;
+      const guardedByGet = /redis\.call\(\s*['"]get['"]/i.test(script);
+
+      // Canonical compare-and-DEL (locks.ts RELEASE_SCRIPT):
       //   if redis.call("get", KEYS[1]) == ARGV[1] then
       //     return redis.call("del", KEYS[1])
       //   else
       //     return 0
       //   end
-      if (script.includes('get') && script.includes('del') && keys.length === 1 && args.length === 1) {
+      if (guardedByGet && usesDel && keys.length === 1 && args.length === 1) {
         const key = keys[0]!;
         const expected = args[0]!;
         const entry = store.get(key);
@@ -529,6 +541,28 @@ function createInMemoryStore(): RedisLike {
         store.delete(key);
         return 1 as unknown as T;
       }
+
+      // R5-FG-86 / R4-FG-66: HEARTBEAT_RELEASE_OR_EXTEND_SCRIPT.
+      //   if redis.call('get', KEYS[1]) == ARGV[1] then
+      //     return redis.call('expire', KEYS[1], ARGV[2])
+      //   else
+      //     return 0
+      //   end
+      if (guardedByGet && usesExpire && keys.length === 1 && args.length === 2) {
+        const key = keys[0]!;
+        const expected = args[0]!;
+        const ttlSec = Number(args[1]);
+        const entry = store.get(key);
+        if (!entry || isExpired(entry)) return 0 as unknown as T;
+        if (entry.value !== expected) return 0 as unknown as T;
+        if (Number.isFinite(ttlSec) && ttlSec > 0) {
+          entry.expiresAt = Date.now() + ttlSec * 1000;
+        } else {
+          delete entry.expiresAt;
+        }
+        return 1 as unknown as T;
+      }
+
       throw new Error('In-memory eval: unsupported script pattern');
     },
   };

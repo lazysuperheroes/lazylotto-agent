@@ -38,16 +38,24 @@ export async function OPTIONS() {
 
 export const POST = withStore(async (request: Request) => {
   try {
+    // R5-FG-31 (P7-002): authenticate first, then rate-limit by
+    // accountId so token rotation can't defeat the cap.
+    const auth = await requireTier(request, 'user');
+    if (isErrorResponse(auth)) return auth;
+
     // Tighter rate limit than play because changing strategy
     // shouldn't be a hot-loop operation. 10 per 5 minutes.
     if (
-      !(await checkRateLimit({ request, action: 'user-strategy', limit: 10, windowSec: 300 }))
+      !(await checkRateLimit({
+        request,
+        action: 'user-strategy',
+        limit: 10,
+        windowSec: 300,
+        identity: auth.accountId,
+      }))
     ) {
       return rateLimitResponse(300);
     }
-
-    const auth = await requireTier(request, 'user');
-    if (isErrorResponse(auth)) return auth;
 
     const body = (await request.json().catch(() => ({}))) as { strategy?: string };
     const strategy = body.strategy?.toLowerCase() as ValidStrategy | undefined;
@@ -128,8 +136,9 @@ export const POST = withStore(async (request: Request) => {
     }
   } catch (err) {
     if (err instanceof KillSwitchError) {
+      // R5-FG-33: sanitize 503 — drop operator reason. See user/play.
       return NextResponse.json(
-        { error: err.message, reason: err.reason ?? null },
+        { error: 'Agent operations temporarily paused by operator.', reason: null },
         { status: 503, headers: CORS_HEADERS },
       );
     }

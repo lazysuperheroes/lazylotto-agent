@@ -30,7 +30,9 @@ export interface EscalateUncertainDlInput {
     /** R4-FG-5: HCS-20 recordDeposit anchor failed after local-store credit landed. */
     | 'deposit_anchor_failed'
     /** R4-FG-5: HCS-20 recordRake anchor failed after operator-rake credit landed. */
-    | 'rake_anchor_failed';
+    | 'rake_anchor_failed'
+    /** R5-FG-48: withIdempotency RELEASE_SCRIPT eval AND plain DEL fallback both failed; claim wedged. */
+    | 'idempotency_release_failed';
   /** The submitted on-chain tx whose status is unknown. */
   uncertainTxId: string;
   /** Affected userId (omit for operator-fee). */

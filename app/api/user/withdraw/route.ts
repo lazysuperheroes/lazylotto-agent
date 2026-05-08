@@ -44,13 +44,23 @@ export const POST = withStore(async (request: Request) => {
     // until Redis recovers. Reads continue normally on other routes.
     assertRedisHealthy();
 
-    // Withdrawal is sensitive — strict rate limit
-    if (!(await checkRateLimit({ request, action: 'user-withdraw', limit: 5, windowSec: 60 }))) {
-      return rateLimitResponse(60);
-    }
-
+    // R5-FG-31 (P7-002): authenticate first, then rate-limit by
+    // accountId so token rotation can't defeat the cap.
     const auth = await requireTier(request, 'user');
     if (isErrorResponse(auth)) return auth;
+
+    // Withdrawal is sensitive — strict rate limit
+    if (
+      !(await checkRateLimit({
+        request,
+        action: 'user-withdraw',
+        limit: 5,
+        windowSec: 60,
+        identity: auth.accountId,
+      }))
+    ) {
+      return rateLimitResponse(60);
+    }
 
     const body = (await request.json().catch(() => ({}))) as {
       amount?: number;

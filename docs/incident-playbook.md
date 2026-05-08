@@ -988,6 +988,213 @@ issue is still unresolved, a fresh dead-letter is written.
 
 ---
 
+## Symptom 20 — Page: `kind: 'deposit_anchor_failed'`
+
+**You'll see this from**: webhook page / Slack / Discord. R4-FG-5
+fires this when `UserLedger.creditDeposit` flushed local state but
+`accounting.recordDeposit` (HCS-20 mint anchor) threw. Local credit
+is real; topic-only auditors will NOT see the deposit.
+
+### Diagnose
+
+1. Check the dead-letter row at
+   `audit-orphan:in-band:deposit-anchor:<txId>:<salt>` (R5-FG-25).
+   `kind: 'audit_trail_orphaned'`,
+   `details.sourceKind: 'in_band_deposit_anchor'`. Confirms which
+   txId is missing the anchor.
+2. `details.userId` and `details.netAmount` give the affected user.
+3. Cross-check `/api/user/audit?account=<accountId>` — local credit
+   should appear; the corresponding `mint` op on the topic will be
+   absent.
+
+### Reconcile
+
+1. Wait 5 min for HCS to recover (most often the anchor failure is
+   a transient submit failure, not a sustained issue).
+2. Run `npx tsx src/scripts/audit-deposit-discrepancy.ts` —
+   compares live store totalDeposited against on-chain mints. Any
+   gap is the unanchored deposit set.
+3. Forward-fix: call `/api/admin/replay-deposit` with the txId.
+   The atomic SADD claim on the local credit means re-running is
+   idempotent (no double-credit); the replay re-attempts the
+   `recordDeposit` anchor. R4-FG-34's self-heal also applies if the
+   replay was previously cached as `flush_failed_paged`.
+4. After the anchor lands, mark the orphan row resolved via
+   `/api/admin/uncertain-tx/<id>/force-release` if it didn't
+   self-resolve.
+
+### Prevention
+
+R5-FG-3's `safeSubmit` covers post-submit errors at the SDK layer;
+the underlying mirror node / Hedera congestion is out of our hands.
+A sustained anchor-failure rate (≥1 per hour) is a Hedera-side
+incident — escalate to Hedera ops.
+
+---
+
+## Symptom 21 — Page: `kind: 'rake_anchor_failed'`
+
+**You'll see this from**: webhook page. R4-FG-5 fires this when the
+deposit's local credit + rake credit landed but `recordRake` (the
+companion HCS-20 transfer anchor) failed. Operator silently kept
+the rake but topic-only auditors see no rake transfer.
+
+### Diagnose
+
+Almost identical to Symptom 20. Look for the
+`audit-orphan:in-band:rake-anchor:<txId>:<salt>` row and confirm
+`details.sourceKind: 'in_band_rake_anchor'`.
+
+### Reconcile
+
+Run `replay-deposit` for the same txId — both `recordDeposit` and
+`recordRake` re-fire (in separate try blocks at
+`UserLedger.creditDeposit:181-263`). The deposit-mint replay is
+idempotent (R5-FG-24 reader-side dedup); the rake replay is
+similarly idempotent on the topic post-R5-FG-14 (writer + reader
+dedup on `(from, depositTxId)`).
+
+### Prevention
+
+R5-FG-69 deferred — long-term improvement is to batch deposit+rake
+into a single submit so they can't desync. Until then, an
+operator-driven `replay-deposit` is the standing fix.
+
+---
+
+## Symptom 22 — Page: `kind: 'refunded_originals_sadd_failed'`
+
+**You'll see this from**: webhook page. R3-FG-7 / R5-FG-21 fires
+this when the SADD into the permanent `refundedOriginals` set
+failed AFTER the on-chain refund either landed (verifier path) or
+was about to be attempted (in-flight pre-submit path). The ban-set
+membership is what prevents a second on-chain refund after the
+30-day per-tx claim TTL expires.
+
+### Diagnose
+
+1. Look for the orphan row keyed
+   `audit-orphan:refund-verifier-sadd:<originalTxId>:<salt>`
+   (verifier path, R5-FG-25 salted) or
+   `audit-orphan:refund-sadd-pre-submit:<originalTxId>:<salt>`
+   (pre-submit path, R5-FG-21).
+2. `details.originalTxId` is the deposit that's missing the
+   permanent-ban entry.
+3. Check Redis: `SISMEMBER lla:<network>:refunded-originals
+   <originalTxId>` — if 0, the ban is genuinely missing.
+
+### Reconcile
+
+1. Manually `SADD lla:<network>:refunded-originals <originalTxId>`
+   to land the ban. The 30-day per-tx claim still protects until it
+   expires; SADD before then prevents any window from opening.
+2. Mark the orphan row resolved via the admin UI.
+
+### Prevention
+
+The SADD targets a single Redis key — sustained failures are a
+Redis health symptom (Symptom 9 / Symptom 16). If isolated, the
+write was likely lost to transient network blip.
+
+---
+
+## Symptom 23 — Page: `kind: 'deposit_credit_flush_failed'`
+
+**You'll see this from**: webhook page. R3-FG-6 fires this when
+`UserLedger.creditDeposit` recorded the deposit + rake locally but
+`store.flush()` failed (twice — there's a built-in retry).
+
+### Diagnose
+
+1. R5-FG-45: also look for the on-chain
+   `deposit_credit_flush_orphaned` control event in the audit
+   topic. Topic-only DR (Redis loss) reads this to detect over-credit.
+2. The orphan row at
+   `audit-orphan:in-band:credit-flush:<txId>:<salt>` carries
+   `details.grossAmount` and `details.userId`.
+
+### Reconcile
+
+1. Inspect Redis health (`/api/admin/monitoring`). If unhealthy,
+   recover Redis first (Symptom 9).
+2. With Redis healthy: trigger a write that hits `flush()` for the
+   affected user (e.g., `replay-deposit`). Local state is already
+   correct; the replay's flush will land. R4-FG-34's self-heal
+   applies — `flush_failed_paged` cache invalidates on retry.
+3. If Redis was lost entirely: rebuild from the on-chain trail per
+   `docs/disaster-recovery.md`. The R5-FG-45 control event tags
+   which deposits had unfinished flushes so they don't double-credit
+   on rebuild.
+
+### Prevention
+
+`flush_failed_paged` is operator-paged but does NOT block the user's
+local credit. The local cache holds the new balance; subsequent
+operations work for the affected user as long as their Lambda stays
+warm. Cold starts re-load from Redis; if Redis is still missing the
+flush, the user will see a snapped-back balance until the next
+write.
+
+---
+
+## Symptom 24 — Dead-letter row with `kind: 'audit_trail_orphaned'`,
+sourceKind in `{deposit, rake, prize_recovery, replay_deposit, force_release_*}`
+
+**You'll see this from**: dashboard / admin DL list / `read-accounting`
+output flagging the orphan. R4-FG-19 / R4-FG-26 / R5-FG-21 / R5-FG-44
+all classify failed audit anchors under this kind, with the specific
+sourceKind discriminating the failure point.
+
+### Diagnose
+
+The orphan row's `details` object names the missing anchor and the
+phase. Cross-link to the on-chain action it was supposed to anchor:
+
+| `sourceKind`                            | Missing anchor                | Recovery |
+|-----------------------------------------|-------------------------------|----------|
+| `in_band_deposit_anchor`                | `mint` (deposit)              | replay-deposit (Symptom 20) |
+| `in_band_rake_anchor`                   | `transfer` (rake)             | replay-deposit (Symptom 21) |
+| `in_band_credit_flush`                  | local flush                   | Symptom 23 |
+| `in_band_play_settle`                   | session settle                | Operator manual reconcile vs dApp pool state |
+| `in_band_withdrawal`                    | `burn`                        | Cross-check mirror; if SUCCESS, force-release as resolved |
+| `prize_recovery_post_success_orphan`    | `prize_recovery` event        | recover-stuck-prizes script with `--audit-only` |
+| `refund_post_success_orphan`            | `refund` event                | recordRefund replay via admin tool |
+| `refund_pre_submit_sadd`                | refundedOriginals SADD        | Symptom 22 |
+| `force_release_*`                       | `force_release` control event | Re-run force-release once Hedera healthy |
+
+### Reconcile
+
+Per the table above. After the missing anchor lands, the orphan row
+is marked resolved (verifier picks it up automatically; or operator
+clicks force-release).
+
+---
+
+## Symptom 25 — `legacy_abort_no_merkle` warning on session
+
+**You'll see this from**: `read-accounting` output, `verify-audit`
+alerts, audit page session card. R4-FG-24 introduced
+`poolsRoot` on `play_session_aborted`; R5-FG-2 added the cutover.
+
+### Diagnose
+
+1. Pre-cutoff (consensus_timestamp before
+   `LEGACY_MERKLE_CUTOFF_TIMESTAMP`, default `2026-05-08T00:00:00Z`)
+   — informational only. The aborted message lacks Merkle
+   tamper-evidence; count-only check confirmed pool count matches.
+2. Post-cutoff — promoted to `corrupt` status (R5-FG-2). This
+   indicates either operator-key forgery or a writer regression
+   that dropped the field. Critical alert.
+
+### Reconcile
+
+Pre-cutoff: no action needed.
+Post-cutoff: investigate as a security incident (Symptom 8 — operator
+key compromise). Compare on-chain pool messages to the abort
+claim's `completedPools` count; verify operator-key access logs.
+
+---
+
 ## When in doubt
 
 1. **Engage the kill switch first** — it's almost never the wrong move

@@ -43,7 +43,7 @@ import { logger } from '~/lib/logger';
 import { getRedis, KEY_PREFIX } from '~/auth/redis';
 import { getMirrorBaseUrl } from '~/hedera/mirror';
 import { classifyMirrorResult } from '~/hedera/responseCodes';
-import { RELEASE_SCRIPT } from '~/lib/locks';
+import { RELEASE_SCRIPT, startVerifyLockHeartbeat } from '~/lib/locks';
 import { applyForceRelease, uniqueForceReleaseOrphanId } from './handlers';
 import { escalateUncertainDlFailure } from '~/lib/escalation';
 
@@ -320,6 +320,21 @@ export const POST = withStore(async (request: Request) => {
       }
     };
 
+    // R5-FG-26 (P4-007): heartbeat the verifier lock so the route's
+    // work (handler + mirror cross-check + ledger mutation + HCS
+    // submit + R4-FG-29 fallback + resolve upsert + flush) doesn't
+    // outrun the 60s TTL on HCS congestion. R4-FG-66 added heartbeat
+    // for reconcile's identical pattern; force-release was missed.
+    // Cancel in finally; fence ensures we only extend OUR token.
+    const verifyHbTxIdOrSubKey =
+      entry.kind === 'refund_uncertain' ? `refund:${id}` : id;
+    const verifyHeartbeat = startVerifyLockHeartbeat(
+      verifyHbTxIdOrSubKey,
+      lockFence,
+      VERIFY_LOCK_TTL_SEC,
+      20_000,
+    );
+
     try {
     // R2-FG-9 (round-2 B-11): re-read the entry AFTER lock acquisition.
     // Between the initial read above and the lock-acquire, a concurrent
@@ -392,16 +407,33 @@ export const POST = withStore(async (request: Request) => {
     // docs/hcs20-v2-schema.md) can see exactly when + why an override
     // happened. Best-effort: a failed audit write doesn't block the
     // resolution (the local mutation already happened).
+    // R5-FG-19 (P9-001 + R4-FG-32 reopened): treat the audit anchor
+    // as a HARD pre-condition for resolution. Pre-fix the resolve
+    // write fired regardless of step-2 (recordControlEvent) success;
+    // if step 2 failed, the entry was still resolved + the orphan
+    // row carried a different id → topic never received the
+    // `force_release` anchor. R4 deferred R4-FG-32 due to handler
+    // idempotency tension; that deferral is unsafe given P9-001 and
+    // is closed here.
+    let auditAnchorFailed = false;
     try {
       const accounting = multiUser.getAccountingForRecovery();
+      // R5-FG-20 (P1-005 + P5-PU-003): pass idempotencyKey so the
+      // reader dedups double-emit of `force_release` from a 504
+      // timeout retry / two admin sessions racing. R3-FG-22 +
+      // R4-FG-7 wired body-level dedup for play_uncertain triage; this
+      // route-level recordControlEvent was the sibling miss.
+      const fenceTs = entry.timestamp ? new Date(entry.timestamp).getTime() : 0;
       await accounting.recordControlEvent('force_release', {
         by: auth.accountId,
         reason,
         uncertainTxId: id,
         kind: entry.kind,
         mirrorResult,
+        idempotencyKey: `force-release:${id}:${fenceTs}`,
       });
     } catch (auditErr) {
+      auditAnchorFailed = true;
       // R4-FG-26 (round-4 high): use the salted helper from
       // handlers.ts (R3-FG-26 sibling miss). Pre-fix this site used
       // the literal `audit-orphan:force-release:${id}` — repeated
@@ -488,6 +520,60 @@ export const POST = withStore(async (request: Request) => {
       const cached = store.getDeadLetters().find((e) => e.transactionId === id);
       if (cached) latestEntry = cached;
     }
+    // R5-FG-17 (P5-PU-002): handler reported a partial mutation —
+    // some local state landed but a downstream HCS anchor failed.
+    // Skip the resolve-write so the next pass / operator retry can
+    // re-attempt the anchor before promising "this entry resolved".
+    if (result.partialMutation) {
+      logger.warn(
+        'force-release entry left UNRESOLVED — handler reported partialMutation',
+        {
+          component: 'AdminForceRelease',
+          uncertainTxId: id,
+          phase: result.partialMutation.phase,
+          cause: result.partialMutation.cause,
+        },
+      );
+      return NextResponse.json(
+        {
+          ok: false,
+          status: 503,
+          error:
+            `Handler completed with partial mutation (${result.partialMutation.phase}). ` +
+            `Audit-trail orphan row written + operator paged. Entry left unresolved so a ` +
+            `retry after Hedera recovers will re-attempt the missing step.`,
+          hint: 'Check /api/admin/dead-letters for the audit_trail_orphaned row.',
+        },
+        { status: 503, headers: CORS_HEADERS },
+      );
+    }
+
+    // R5-FG-19: skip resolve-write when the audit anchor failed.
+    // The entry stays unresolved so a future operator retry (after
+    // fixing the underlying HCS submit issue) re-attempts the anchor
+    // before promising "this entry was force-released".
+    if (auditAnchorFailed) {
+      logger.warn(
+        'force-release entry left UNRESOLVED — audit anchor failed; orphan row written + escalated; retry after Hedera health restored',
+        {
+          component: 'AdminForceRelease',
+          uncertainTxId: id,
+        },
+      );
+      return NextResponse.json(
+        {
+          ok: false,
+          status: 503,
+          error:
+            'Force-release HCS-20 audit anchor write failed. Operator paged via dead-letter ' +
+            'orphan; entry left unresolved so a retry after Hedera recovers will attempt the anchor again. ' +
+            'Local mutations from the handler (if any) are persisted and idempotent.',
+          hint: 'Check /api/admin/dead-letters for the audit_trail_orphaned row keyed force_release_route_audit. Retry the force-release once Hedera is healthy.',
+        },
+        { status: 503, headers: CORS_HEADERS },
+      );
+    }
+
     try {
       await store.upsertDeadLetter({
         ...latestEntry,
@@ -528,6 +614,9 @@ export const POST = withStore(async (request: Request) => {
     } finally {
       // R3-FG-5: always release the verifier lock — every prior `return`
       // inside the try-block flows through this finally first.
+      // R5-FG-26: cancel heartbeat first so a stacked tick can't
+      // re-extend the lock between our DEL and a sibling acquire.
+      verifyHeartbeat.cancel();
       await releaseLock();
     }
   } catch (err) {

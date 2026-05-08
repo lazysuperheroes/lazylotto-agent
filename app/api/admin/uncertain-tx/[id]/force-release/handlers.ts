@@ -56,6 +56,7 @@ export function uniqueForceReleaseOrphanId(txId: string): string {
 }
 import { HBAR_TOKEN_KEY } from '~/config/strategy';
 import { RELEASE_SCRIPT, tryAcquireUserLockWithBackoff, releaseUserLock } from '~/lib/locks';
+import { escalateUncertainDlFailure } from '~/lib/escalation';
 
 /**
  * Standard error envelope for the per-user-lock contention path.
@@ -111,6 +112,17 @@ export interface ForceReleaseContext {
 export interface HandlerResult {
   ok: true;
   action: string;
+  /**
+   * R5-FG-17 (P5-PU-002): when the handler made a local mutation
+   * but a downstream HCS audit anchor failed, set `partialMutation`
+   * so the route's resolve-write is skipped. Pre-fix the route
+   * resolved unconditionally on `ok: true` — for play_uncertain
+   * SUCCESS the result was: entry resolved with `successTriagedAt`
+   * set but topic missing the
+   * `play_uncertain_success_pending_triage` anchor. F15 gate then
+   * refused any future re-trigger; topic-only auditor saw a hole.
+   */
+  partialMutation?: { phase: string; cause: string };
 }
 
 export interface HandlerError {
@@ -453,6 +465,37 @@ async function handleOperatorFee(
           error: e instanceof Error ? e.message : String(e),
         });
       }
+    } else if (typeof details.tokenKey === 'string') {
+      // R5-FG-18 (P5-OFW-002): legacy-DL fallback. Mirrors the
+      // verifier's R4-FG-33 fix at uncertainTxVerification.ts:1268.
+      // Pre-fix the force-release FAILED branch only released when
+      // `failedFence` was present — legacy DLs (written before
+      // R3-FG-2 deploy) had no fence, so the route returned
+      // "operator state untouched" and resolved the entry while
+      // the pending claim sat for the full 30-min TTL blocking
+      // concurrent operator-fee withdrawals. Operators trained to
+      // manually `redis.del` → standing runbook becomes a double-pay
+      // vector. FAILED on chain means no tokens moved, so DELing
+      // is safe; log loudly so the migration gap is visible.
+      try {
+        const pendingKey = `${KEY_PREFIX.lockOperator}withdraw-pending:${details.tokenKey}`;
+        await ctx.redis.del(pendingKey);
+        ctx.log.warn(
+          'force-release operator-fee FAILED legacy-DL fallback: unfenced DEL (no pendingClaimFence)',
+          {
+            component: 'AdminForceRelease',
+            uncertainTxId: entry.transactionId,
+            tokenKey: details.tokenKey,
+          },
+        );
+      } catch (e) {
+        ctx.log.warn('force-release operator-fee FAILED legacy-DL DEL failed', {
+          component: 'AdminForceRelease',
+          uncertainTxId: entry.transactionId,
+          tokenKey: details.tokenKey,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
     }
     return {
       ok: true,
@@ -753,6 +796,13 @@ async function handlePlay(
   // topic-only auditor sees the user's pre-play balance with the
   // operator wallet short by the spend amount — silent insolvency
   // exactly when force-release is the resolution path.
+  // R5-FG-17 (P5-PU-002): track triage-anchor failure so the route
+  // gates the resolve-write. Pre-fix the catch wrote orphan and
+  // proceeded to stamp `successTriagedAt` + return `ok:true`,
+  // route-level resolve fired unconditionally → entry resolved
+  // with `successTriagedAt` set but topic had NO anchor → F15
+  // refused future re-trigger → topic-only auditor sees a hole.
+  let triageAnchorFailed: { phase: string; cause: string } | null = null;
   try {
     await ctx.accounting.recordControlEvent('play_uncertain_success_pending_triage', {
       by: ctx.by,
@@ -769,6 +819,10 @@ async function handlePlay(
       uncertainTxId: entry.transactionId,
       error: anchorErr instanceof Error ? anchorErr.message : String(anchorErr),
     });
+    triageAnchorFailed = {
+      phase: 'success_triage_anchor',
+      cause: anchorErr instanceof Error ? anchorErr.message : String(anchorErr),
+    };
     // R2-FG-8: include `phase` for replay tooling.
     try {
       await ctx.store.upsertDeadLetter({
@@ -787,30 +841,56 @@ async function handlePlay(
     } catch {
       /* logged above */
     }
-  }
-
-  try {
-    const base = await refreshAndGuard(ctx.store, entry);
-    if (base) {
-      await ctx.store.upsertDeadLetter({
-        ...base,
-        details: {
-          ...(base.details ?? {}),
-          successTriagedAt: new Date().toISOString(),
-        },
+    // R5-FG-17: page the operator. The verifier sibling already
+    // escalates here (uncertainTxVerification.ts:1751) — force-release
+    // was the silent miss.
+    try {
+      await escalateUncertainDlFailure({
+        kind: 'play_uncertain',
+        uncertainTxId: entry.transactionId,
+        userId: details.userId,
+        cause: anchorErr,
+      });
+    } catch (escErr) {
+      ctx.log.warn('force-release play_uncertain triage escalation also failed', {
+        component: 'AdminForceRelease',
+        uncertainTxId: entry.transactionId,
+        error: escErr instanceof Error ? escErr.message : String(escErr),
       });
     }
-  } catch (e) {
-    ctx.log.warn('force-release play_uncertain successTriagedAt stamp failed', {
-      component: 'AdminForceRelease',
-      uncertainTxId: entry.transactionId,
-      error: e instanceof Error ? e.message : String(e),
-    });
+  }
+
+  // R5-FG-17: skip the local successTriagedAt stamp when the anchor
+  // failed. Pre-fix the stamp ran unconditionally — the F15 gate
+  // refuses future re-trigger when stamp is set, but the topic has
+  // no anchor → wedge.
+  if (!triageAnchorFailed) {
+    try {
+      const base = await refreshAndGuard(ctx.store, entry);
+      if (base) {
+        await ctx.store.upsertDeadLetter({
+          ...base,
+          details: {
+            ...(base.details ?? {}),
+            successTriagedAt: new Date().toISOString(),
+          },
+        });
+      }
+    } catch (e) {
+      ctx.log.warn('force-release play_uncertain successTriagedAt stamp failed', {
+        component: 'AdminForceRelease',
+        uncertainTxId: entry.transactionId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
   }
 
   return {
     ok: true,
-    action: `mirror reports SUCCESS — reservations held for manual settlement reconstruction (operator must reconcile against dApp pool state); HCS-20 triage anchor written`,
+    action: triageAnchorFailed
+      ? `mirror reports SUCCESS — reservations held; triage anchor FAILED (operator paged); entry left unresolved for retry`
+      : `mirror reports SUCCESS — reservations held for manual settlement reconstruction (operator must reconcile against dApp pool state); HCS-20 triage anchor written`,
+    ...(triageAnchorFailed ? { partialMutation: triageAnchorFailed } : {}),
   };
 }
 
@@ -1191,12 +1271,46 @@ async function handleRefund(
     try {
       await ctx.redis.sadd(KEY_PREFIX.refundedOriginals, details.originalTxId);
     } catch (e) {
-      ctx.log.warn('force-release refund SADD permanent-set failed', {
+      // R5-FG-21 (P9-003 + P3-007): SADD failure here is silent
+      // fail-open. R3-FG-7 / R3-FG-23 promised escalation; pre-fix
+      // this site only `ctx.log.warn`'d. After the 30d per-tx claim
+      // TTL expires, the second on-chain refund window opens because
+      // sismember=0 lets a fresh attempt through.
+      ctx.log.error('CRITICAL: force-release refund SADD permanent-set failed', {
         component: 'AdminForceRelease',
+        event: 'refunded_originals_sadd_failed',
         uncertainTxId: entry.transactionId,
         originalTxId: details.originalTxId,
         error: e instanceof Error ? e.message : String(e),
       });
+      try {
+        await ctx.store.upsertDeadLetter({
+          transactionId: uniqueForceReleaseOrphanId(entry.transactionId),
+          timestamp: new Date().toISOString(),
+          error: `force-release refund SADD permanent-set failed: ${e instanceof Error ? e.message : String(e)}`,
+          kind: 'audit_trail_orphaned',
+          details: {
+            sourceKind: 'force_release_refund_sadd',
+            sourceTxId: entry.transactionId,
+            originalTxId: details.originalTxId,
+            phase: 'refunded_originals_sadd_failed',
+          },
+        });
+      } catch {
+        /* logged above */
+      }
+      try {
+        await escalateUncertainDlFailure({
+          kind: 'refunded_originals_sadd_failed',
+          uncertainTxId: details.originalTxId,
+          cause: e,
+        });
+      } catch (escErr) {
+        ctx.log.warn('force-release refund SADD escalation also failed', {
+          component: 'AdminForceRelease',
+          error: escErr instanceof Error ? escErr.message : String(escErr),
+        });
+      }
     }
   }
 

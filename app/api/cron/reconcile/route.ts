@@ -42,6 +42,20 @@ import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import type { ReconciliationResult } from '~/custodial/Reconciliation';
 import { isAuthorizedCron, escapeMrkdwn } from './helpers';
 
+/**
+ * R5-FG-35 (P10-CFG-001): explicit function timeout. Pre-fix the
+ * route relied on the platform default (10s Hobby / 15s Pro), which
+ * killed the function long before R4-FG-16's 900s reconcile lock
+ * could finish. Net: function dies at 15s, lock held for 900s, next
+ * 14 cron ticks skip with "in progress" — the exact failure mode
+ * R4-FG-16 was supposed to guard. R4-FG-66's heartbeat is also a
+ * no-op if the function dies before the next tick.
+ *
+ * 300s = Pro limit. Lower the lock TTL alongside (in helpers.ts /
+ * acquireOperatorLock) so lock TTL ≈ 1.5× function ceiling.
+ */
+export const maxDuration = 300;
+
 // CORS for the cron endpoint isn't strictly necessary (Vercel Cron
 // hits it from the same origin), but include it so an operator can
 // curl it manually from their machine for debugging.
@@ -87,8 +101,23 @@ export const GET = withStore(async (request: Request) => {
   // $CRON_SECRET` lumped every cron call into one shared
   // bucket-by-bearer-prefix. Compute the IP-bucket directly so the
   // documented "buckets by source IP" actually holds.
+  // R5-FG-30 (P4-006): read the LAST entry of x-forwarded-for, not
+  // the first. Pre-fix split(',')[0] read the attacker-supplied
+  // value — Vercel's edge prepends the real IP rather than stripping
+  // caller-supplied headers, so `X-Forwarded-For: 1.2.3.4` from the
+  // client lands as `1.2.3.4, <real-ip>` and the rate-limit bucketed
+  // by the spoofed first element. With a leaked CRON_SECRET, an
+  // attacker rotating xff per request got a fresh per-IP bucket each
+  // call. Prefer x-real-ip (Vercel-controlled, not client-spoofable);
+  // fall back to xff's last entry; bracket+port stripped for IPv6.
+  const realIp = request.headers.get('x-real-ip');
   const xff = request.headers.get('x-forwarded-for');
-  const clientIp = xff?.split(',')[0]?.trim() ?? 'cron-unknown-ip';
+  const xffLast = xff?.split(',').at(-1)?.trim();
+  const rawIp = realIp?.trim() || xffLast;
+  // Strip IPv6 brackets + port (e.g. "[::1]:54321" → "::1").
+  const clientIp = rawIp
+    ? rawIp.replace(/^\[/, '').replace(/\]:\d+$/, '').replace(/^([^:]+):\d+$/, '$1')
+    : 'cron-unknown-ip';
   if (
     !(await checkRateLimit({
       request,
