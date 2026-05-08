@@ -134,14 +134,26 @@ sequence number).
   "amt": "15",
   "from": "0.0.7349994",
   "to": "0.0.8456987",
-  "memo": "rake"
+  "memo": "rake:0.0.X@1775596937.272650838",
+  "depositTxId": "0.0.X@1775596937.272650838"
 }
 ```
 
 - `from` is the user, `to` is the agent operator account
-- `memo: "rake"` is the canonical marker
+- `memo` is `"rake"` (legacy v1) or `"rake:<depositTxId>"` (R5+)
 - `amt` in token display units
 - `token` carries the same meaning as on `mint` (see above)
+- **`depositTxId` (R5-FG-14, REQUIRED for new emissions):** body
+  field carrying the originating deposit's transactionId. Readers
+  MUST dedup rake events on `(from, depositTxId)` (a retry of
+  `recordDeposit` can otherwise emit two rake transfers for one
+  logical deposit). External auditors verifying conservation
+  invariants MUST cross-check that every rake's `depositTxId`
+  references an observed `mint` op on the topic — orphan rakes are
+  forged operator credits. Legacy pre-R5 rakes carry only `memo:
+  "rake"` with no depositTxId; those are exempt from the pairing
+  check (the field is the canonical marker that distinguishes
+  post-R5 emissions).
 
 ### `op: "burn"` (withdrawal)
 
@@ -477,13 +489,28 @@ algorithm):
    - For each NFT entry, sort `ser[]` ascending
    - Sort NFT entries ascending by `tk`
    - Concatenate: fungible entries first, then NFT entries
+   - **R5-FG-1 (round-5 critical):** the `sym` field on NFT prize
+     entries is **NOT** included in the canonical hash input. Pre-fix,
+     `sym` was hashed; the slim path (R3-FG-46) truncates `sym` to
+     8 chars when the message exceeds 900 bytes, so any pool with an
+     NFT whose symbol exceeds 8 chars produced a writer/reader
+     disagreement on the root. `sym` is display metadata; only token
+     id and serial set are load-bearing for tamper-evidence.
 4. Hash the canonical prizes array as `prizesHash =
    sha256(JSON.stringify(canonicalPrizes))` (hex digest)
 5. For each pool, build the line:
    `${poolId}|${spent}|${spentToken}|${wins}|${prizesHash}`
-6. Join all lines with `\n`
-7. Hash the joined string: `sha256(joined).hexDigest()`
-8. Prepend `"sha256:"` to get the final `poolsRoot` value
+6. **R4-FG-23 binding line (NEW in R4):** prepend the per-session
+   binding line `bv:1|${sessionId}|${user}|${agent}` to the joined
+   set of pool lines. The `bv:1` prefix is the binding-version stamp
+   — readers MUST recognize `bv:` prefixes and treat unknown
+   binding-versions as `corrupt`. Without this, an attacker with
+   operator-key access could replay a Merkle root computed for one
+   session under a different `(sessionId, user, agent)` tuple.
+7. Join the binding line + all pool lines with `\n` (binding line
+   first, then pool lines in `poolId`-ascending order).
+8. Hash the joined string: `sha256(joined).hexDigest()`
+9. Prepend `"sha256:"` to get the final `poolsRoot` value
 
 Example:
 
@@ -504,6 +531,53 @@ The reader recomputes this from the pool messages it actually
 saw and rejects the close if the result doesn't match what the
 writer claimed. Any mismatch is logged as `corrupt` and the
 session is rendered with a red warning.
+
+### Legacy unbound fallback (pre-R4 sessions only)
+
+Sessions emitted BEFORE the R4-FG-23 binding-line change shipped
+do not include the `bv:1|sessionId|user|agent` prefix. To preserve
+auditability of historical data the reader implements a legacy
+fallback: on a bound-form mismatch, recompute without the binding
+line; if THAT matches, status is `closed_success` with a
+`legacy_merkle_binding` warning.
+
+**R5-FG-2 cutover:** the legacy fallback is **disabled** for any
+message whose consensus_timestamp is later than
+`LEGACY_MERKLE_CUTOFF_TIMESTAMP` (env, default
+`2026-05-08T00:00:00Z` — the R4 deploy date). Post-cutover messages
+that don't validate against the bound form are `corrupt`, full
+stop. This closes the "operator-key compromise → forge close with
+legacy unbound root" attack that R4-FG-23 was meant to prevent.
+
+External auditors implementing this spec MUST honour the cutover
+or the protection is opt-out for an attacker. Pre-cutover sessions
+remain auditable but lack cross-session-replay protection — the
+warning surfaces this in `verify-audit.ts` output (R5-FG-47).
+
+### `poolsRoot` on `play_session_aborted` (R4-FG-24, optional)
+
+Post-R4 abort messages MAY carry an optional `poolsRoot` field
+covering the pools that landed before the abort:
+
+```json
+{
+  "p": "hcs-20",
+  "op": "play_session_aborted",
+  "sessionId": "uuid",
+  "completedPools": 3,
+  "poolsRoot": "sha256:...",   // optional, R4-FG-24
+  "reason": "v2_write_failure",
+  "abortedAt": "..."
+}
+```
+
+When present, the reader validates `poolsRoot` against the bound
+form (same algorithm as `play_session_close`, applied to
+`pools.slice(0, completedPools)`). When absent on a pre-cutover
+abort, status is `closed_aborted` with a `legacy_abort_no_merkle`
+warning — count-only check. **R5-FG-2 cutover:** post-cutover
+aborts that lack `poolsRoot` are `corrupt`; this closes the "drop
+the field to bypass binding" bypass.
 
 ---
 

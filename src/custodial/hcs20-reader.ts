@@ -88,6 +88,15 @@ export interface NormalizedRakeEvent extends BaseEvent {
   agent: string;
   amount: number;
   token: string;
+  /**
+   * R5-FG-14: optional deposit txId so a topic-only auditor can pair
+   * `mint(rakeAmount>0)` with the rake transfer (conservation
+   * invariant 1) and `verify-audit.ts` can flag a missing pair as a
+   * critical alert. Pre-fix the rake event carried only `memo:'rake'`.
+   * Legacy v1 rakes pre-R5 emit no depositTxId — those still parse
+   * but are exempt from the pairing check at the caller.
+   */
+  depositTxId?: string;
 }
 
 export interface NormalizedWithdrawalEvent extends BaseEvent {
@@ -239,6 +248,41 @@ export interface AuditReaderResult {
   };
 }
 
+// ── Legacy Merkle cutover (R5-FG-2) ─────────────────────────────
+
+/**
+ * R5-FG-2 (P1-004 + P3-005 + P4-010 + P6-005): the legacy unbound
+ * Merkle fallback at `bucket.close.poolsRoot` validation is a forever
+ * opt-out for an attacker with operator-key access — bound check
+ * fails, legacy succeeds, status reads as `closed_success` with only
+ * a buried warning. After R4-FG-23 was deployed, every legitimate
+ * writer signs with the bound form; any session emitted AFTER that
+ * deployment with a legacy unbound root is forged and must be
+ * `corrupt`, not "passes with warning".
+ *
+ * The cutover defaults to the R4 deploy time (2026-05-08T00:00:00Z,
+ * matching the R4-2 commit). Operators can override via
+ * `LEGACY_MERKLE_CUTOFF_TIMESTAMP` (any Date.parse-able value) to
+ * accommodate replay of pre-cutover archives.
+ */
+const DEFAULT_LEGACY_MERKLE_CUTOFF_ISO = '2026-05-08T00:00:00.000Z';
+
+function getLegacyMerkleCutoffMs(): number {
+  const raw = process.env.LEGACY_MERKLE_CUTOFF_TIMESTAMP;
+  if (raw) {
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return Date.parse(DEFAULT_LEGACY_MERKLE_CUTOFF_ISO);
+}
+
+function isPostLegacyCutoff(messageTimestamp: string | undefined): boolean {
+  if (!messageTimestamp) return false;
+  const ts = Date.parse(messageTimestamp);
+  if (!Number.isFinite(ts)) return false;
+  return ts > getLegacyMerkleCutoffMs();
+}
+
 // ── Main entry point ────────────────────────────────────────────
 
 /**
@@ -307,6 +351,15 @@ export async function parseAuditTopic(
   // dedup the reader summed `rakeReversed` twice and operator balance
   // reconstruction showed double-rake-reversal vs actual.
   const seenRefundTxIds = new Set<string>();
+  // R5-FG-14 / R5-FG-24 (P1-011 + P12-310): reader-side dedup for
+  // rake transfers on `(from, depositTxId)`. A retry of `recordDeposit`
+  // (replay-deposit, mid-flight Lambda freeze) can emit two rake
+  // transfers for one logical deposit; without dedup the reader
+  // double-counts `totalRakeCollected` while `totalRakeReversed`
+  // matches one of them. Legacy rakes with no depositTxId are NOT
+  // deduped (no key to dedup on); operators reading pre-R5 topics
+  // accept the legacy ambiguity.
+  const seenRakeKeys = new Set<string>();
   const stats: AuditReaderResult['stats'] = {
     totalMessages: messages.length,
     v1Messages: 0,
@@ -500,8 +553,21 @@ export async function parseAuditTopic(
     if (op === 'transfer') {
       stats.v1Messages++;
       const ev = parseV1Transfer(msg);
-      if (ev) events.push(ev);
-      else stats.skippedMessages++;
+      if (!ev) {
+        stats.skippedMessages++;
+        continue;
+      }
+      // R5-FG-14: dedup rake events on (from, depositTxId). Legacy
+      // events with no depositTxId pass through unfiltered.
+      if (ev.type === 'rake' && ev.depositTxId) {
+        const rakeKey = `${ev.user}|${ev.depositTxId}`;
+        if (seenRakeKeys.has(rakeKey)) {
+          stats.skippedMessages++;
+          continue;
+        }
+        seenRakeKeys.add(rakeKey);
+      }
+      events.push(ev);
       continue;
     }
     if (op === 'burn') {
@@ -789,28 +855,40 @@ async function reconstructSession(
       }));
       let observedRoot: string;
       let usedLegacy = false;
+      // R5-FG-2 (P1-004): refuse the legacy unbound fallback for any
+      // close message emitted AFTER LEGACY_MERKLE_CUTOFF_TIMESTAMP.
+      // Pre-fix an attacker with operator-key access could forge a
+      // close with a legacy unbound root for any historical poolset
+      // — bound check fails, legacy passes, status='closed_success'
+      // with only a buried warning. R4-FG-23's protection was opt-out
+      // for the attacker forever.
+      const closePostCutoff = isPostLegacyCutoff(bucket.close.timestamp);
       if (agent) {
         observedRoot = await computePoolsRoot(poolsForHash, {
           sessionId,
           user,
           agent,
         });
-        if (observedRoot !== bucket.close.poolsRoot) {
+        if (observedRoot !== bucket.close.poolsRoot && !closePostCutoff) {
           // Try legacy unbound form for back-compat with pre-R4-FG-23
-          // close messages.
+          // close messages (only if this session predates the cutover).
           const legacyRoot = await computePoolsRoot(poolsForHash);
           if (legacyRoot === bucket.close.poolsRoot) {
             observedRoot = legacyRoot;
             usedLegacy = true;
           }
         }
-      } else {
+      } else if (!closePostCutoff) {
         observedRoot = await computePoolsRoot(poolsForHash);
         usedLegacy = true;
+      } else {
+        // Post-cutoff close with no `agent` from the open — refuse.
+        // (R5-FG-50 reinforces this for the open-missing case.)
+        observedRoot = '';
       }
       if (observedRoot !== bucket.close.poolsRoot) {
         warnings.push(
-          `poolsRoot mismatch: close claims ${bucket.close.poolsRoot}, observed ${observedRoot}`,
+          `poolsRoot mismatch: close claims ${bucket.close.poolsRoot}, observed ${observedRoot || '(refused legacy fallback post-cutoff)'}`,
         );
         status = 'corrupt';
       } else {
@@ -858,20 +936,29 @@ async function reconstructSession(
         user,
         agent,
       });
+      const abortPostCutoff = isPostLegacyCutoff(bucket.aborted.timestamp);
       if (observedRoot !== bucket.aborted.poolsRoot) {
         // Last-ditch legacy fallback (extremely unlikely on aborted
         // since the field is brand new, but matches the close path).
-        const legacyRoot = await computePoolsRoot(poolsForHash);
-        if (legacyRoot === bucket.aborted.poolsRoot) {
+        // R5-FG-2: refuse legacy fallback for post-cutoff aborts.
+        if (abortPostCutoff) {
           warnings.push(
-            'legacy_merkle_binding: aborted validated against pre-R4-FG-23 unbound Merkle',
-          );
-          status = 'closed_aborted';
-        } else {
-          warnings.push(
-            `Aborted poolsRoot mismatch: aborted claims ${bucket.aborted.poolsRoot}, observed ${observedRoot}`,
+            `Aborted poolsRoot mismatch: aborted claims ${bucket.aborted.poolsRoot}, observed ${observedRoot} (refused legacy fallback post-cutoff)`,
           );
           status = 'corrupt';
+        } else {
+          const legacyRoot = await computePoolsRoot(poolsForHash);
+          if (legacyRoot === bucket.aborted.poolsRoot) {
+            warnings.push(
+              'legacy_merkle_binding: aborted validated against pre-R4-FG-23 unbound Merkle',
+            );
+            status = 'closed_aborted';
+          } else {
+            warnings.push(
+              `Aborted poolsRoot mismatch: aborted claims ${bucket.aborted.poolsRoot}, observed ${observedRoot}`,
+            );
+            status = 'corrupt';
+          }
         }
       } else {
         status = 'closed_aborted';
@@ -879,12 +966,23 @@ async function reconstructSession(
     } else {
       // Legacy abort (pre-R4-FG-24) has no poolsRoot. Surface that the
       // session lacks Merkle tamper-evidence so operators can see it.
+      // R5-FG-2: post-cutoff aborts MUST carry a poolsRoot — refusing
+      // closes the "drop the poolsRoot field to bypass binding" attack.
       if (!bucket.aborted.poolsRoot) {
-        warnings.push(
-          'legacy_abort_no_merkle: aborted message predates R4-FG-24 (no Merkle tamper-evidence; count-only check)',
-        );
+        if (isPostLegacyCutoff(bucket.aborted.timestamp)) {
+          warnings.push(
+            'legacy_abort_no_merkle: post-cutoff aborted lacks poolsRoot — refusing as corrupt',
+          );
+          status = 'corrupt';
+        } else {
+          warnings.push(
+            'legacy_abort_no_merkle: aborted message predates R4-FG-24 (no Merkle tamper-evidence; count-only check)',
+          );
+          status = 'closed_aborted';
+        }
+      } else {
+        status = 'closed_aborted';
       }
-      status = 'closed_aborted';
     }
   } else {
     // Open seen, no terminal — in_flight or orphaned by timeout
@@ -985,6 +1083,19 @@ function parseV1Transfer(
   const amt = Number(msg.payload.amt);
   if (!Number.isFinite(amt)) return null;
 
+  // R5-FG-14: extract `depositTxId` from either the body field
+  // (post-R5 emissions) or from `memo:'rake:<txId>'` (also post-R5,
+  // for legacy clients that ignore extra body fields). Legacy v1
+  // emissions have plain `memo:'rake'` and no depositTxId — keep
+  // parsing but the pairing check at verify-audit exempts them.
+  const bodyDepositTxId =
+    typeof msg.payload.depositTxId === 'string' && msg.payload.depositTxId.length > 0
+      ? (msg.payload.depositTxId as string)
+      : undefined;
+  const memoDepositTxId =
+    memo.startsWith('rake:') && memo.length > 5 ? memo.slice(5) : undefined;
+  const depositTxId = bodyDepositTxId ?? memoDepositTxId;
+
   if (memo === 'rake' || memo.startsWith('rake')) {
     return {
       sequence: msg.sequence,
@@ -994,6 +1105,7 @@ function parseV1Transfer(
       agent: to,
       amount: amt,
       token: resolveTokenField(msg.payload),
+      ...(depositTxId ? { depositTxId } : {}),
     };
   }
 
@@ -1006,6 +1118,7 @@ function parseV1Transfer(
     agent: to,
     amount: amt,
     token: resolveTokenField(msg.payload),
+    ...(depositTxId ? { depositTxId } : {}),
   };
 }
 

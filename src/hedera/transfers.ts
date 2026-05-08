@@ -110,6 +110,81 @@ export class ReceiptUncertainError extends PreserveClaimError {
 }
 
 /**
+ * R5-FG-3 (P2-001 + P3-002): thrown when ANY error occurs in the
+ * `submit + awaitReceipt` window AFTER `tx.execute()` has returned a
+ * response but the receipt has not yet been confirmed. Pre-fix this
+ * exact gap let raw SDK errors (signer disposed, network reset
+ * mid-fetch, V8 OOM, post-internal-retry rejections in non-receipt
+ * shape) fall through `withIdempotency`'s catch, which only treated
+ * `PreserveClaimError` as "keep claim" → the on-chain submit may have
+ * landed, the claim was DELed, and a client retry with the same
+ * `Idempotency-Key` saw a fresh SET-NX win and re-executed → double-spend.
+ *
+ * Subclass of `PreserveClaimError`, so `withIdempotency` keeps the
+ * claim — operator must verify outcome via mirror node before any retry.
+ */
+export class PostSubmitError extends PreserveClaimError {
+  readonly transactionId: string;
+  readonly originalError: unknown;
+  constructor(transactionId: string, originalError: unknown) {
+    const causeMsg =
+      originalError instanceof Error ? originalError.message : String(originalError);
+    super(
+      `Transaction ${transactionId} was submitted but a post-submit error ` +
+        `occurred before the receipt could be confirmed: ${causeMsg}. ` +
+        `On-chain status is UNKNOWN — verify via the mirror node before retrying.`,
+    );
+    this.name = 'PostSubmitError';
+    this.transactionId = transactionId;
+    this.originalError = originalError;
+  }
+}
+
+/**
+ * R5-FG-3: submit a transaction and await its receipt under a single
+ * try/catch that lifts ANY post-submit error to `PreserveClaimError`.
+ * This is the canonical helper for any code path that does
+ * `tx.execute()` + post-conditions in `withIdempotency` scope —
+ * processWithdrawal, processRefund, transferAllPrizesWithRetry, etc.
+ *
+ * Contract:
+ *   - `build()` runs WITHOUT a try/catch around it. If `build()`
+ *     throws (pre-submit failure: validation, signing, network blip
+ *     before tx hit the wire), the error propagates as-is.
+ *   - Once `build()` returns, the on-chain submit is in flight.
+ *     ANY error from this point — including the receipt timeout AND
+ *     arbitrary throws between submit and the await — is wrapped as
+ *     `PreserveClaimError` so the caller's idempotency claim survives.
+ *   - On success, returns `{ response, receipt, transactionId }`.
+ */
+export async function safeSubmit(
+  client: Client,
+  build: () => Promise<TransactionResponse>,
+  options?: { ceilingMs?: number },
+): Promise<{
+  response: TransactionResponse;
+  receipt: TransactionReceipt;
+  transactionId: string;
+}> {
+  // Pre-submit: any throw here is a confirmed pre-submit failure.
+  // The body did NOT reach the network so releasing an idempotency
+  // claim is safe (matches `withIdempotency`'s default semantics).
+  const response = await build();
+  const transactionId = response.transactionId.toString();
+  // Post-submit window: every throw must lift to PreserveClaim.
+  try {
+    const receipt = await awaitReceipt(client, response, options?.ceilingMs);
+    return { response, receipt, transactionId };
+  } catch (err) {
+    if (err instanceof PreserveClaimError) {
+      // Already preserve-claim shape (ReceiptUncertainError most often).
+      throw err;
+    }
+    throw new PostSubmitError(transactionId, err);
+  }
+}
+
+/**
  * Transfer HBAR between accounts.
  *
  * Uses a bounded receipt wait (DEFAULT_RECEIPT_TIMEOUT_MS = 8s). On
@@ -123,9 +198,12 @@ export async function transferHbar(
   to: string,
   amount: number
 ): Promise<TransferResult> {
-  const response = await submitHbarTransfer(client, from, to, amount);
-  await awaitReceipt(client, response);
-  return { transactionId: response.transactionId.toString() };
+  // R5-FG-3: route through safeSubmit so any error in the
+  // submit→awaitReceipt window lifts to PreserveClaimError.
+  const { transactionId } = await safeSubmit(client, () =>
+    submitHbarTransfer(client, from, to, amount),
+  );
+  return { transactionId };
 }
 
 /**
@@ -142,16 +220,11 @@ export async function transferToken(
   amount: number,
   decimals?: number
 ): Promise<TransferResult> {
-  const response = await submitTokenTransfer(
-    client,
-    from,
-    to,
-    tokenId,
-    amount,
-    decimals,
+  // R5-FG-3: route through safeSubmit (see `transferHbar`).
+  const { transactionId } = await safeSubmit(client, () =>
+    submitTokenTransfer(client, from, to, tokenId, amount, decimals),
   );
-  await awaitReceipt(client, response);
-  return { transactionId: response.transactionId.toString() };
+  return { transactionId };
 }
 
 // ── Phased helpers (submit + bounded awaitReceipt) ─────────────────

@@ -1771,17 +1771,34 @@ export async function verifyUncertainPlays(
       continue;
     }
     try {
-      await store.upsertDeadLetter({
-        ...entry,
-        details: {
-          ...(entry.details ?? {}),
-          // F15 gate: force-release refuses entries already triaged.
-          successTriagedAt: new Date().toISOString(),
-        },
-        resolvedAt: new Date().toISOString(),
-        resolvedBy: 'reconcile-success-needs-manual-triage',
-        resolutionTxId: uncertainTxId,
-      });
+      // R5-FG-8 (P1-001 + P5-PU-001): refresh-then-spread, mirroring
+      // R4-FG-1 in markResolved. Pre-fix this site spread `...entry`
+      // (verifier-loop pre-mutation snapshot) — a concurrent
+      // force-release that wrote a top-level field between loop entry
+      // and this resolve-write had its mutation REVERTED.
+      let base: DeadLetterEntry = entry;
+      try {
+        await store.refreshDeadLetters();
+        const fresh = store
+          .getDeadLetters()
+          .find((e) => e.transactionId === entry.transactionId);
+        if (fresh) base = fresh;
+      } catch {
+        /* fall through with caller-supplied snapshot */
+      }
+      if (!base.resolvedAt) {
+        await store.upsertDeadLetter({
+          ...base,
+          details: {
+            ...(base.details ?? {}),
+            // F15 gate: force-release refuses entries already triaged.
+            successTriagedAt: new Date().toISOString(),
+          },
+          resolvedAt: new Date().toISOString(),
+          resolvedBy: 'reconcile-success-needs-manual-triage',
+          resolutionTxId: uncertainTxId,
+        });
+      }
     } catch {
       /* logged via escalation */
     }

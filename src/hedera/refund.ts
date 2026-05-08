@@ -20,8 +20,9 @@ import type { Client } from '@hashgraph/sdk';
 import {
   submitHbarTransfer,
   submitTokenTransfer,
-  awaitReceipt,
+  safeSubmit,
   ReceiptUncertainError,
+  PostSubmitError,
 } from './transfers.js';
 import { getMirrorBaseUrl } from './mirror.js';
 import { getOperatorAccountId } from './wallet.js';
@@ -569,28 +570,35 @@ export async function processRefund(
       );
     }
 
-    // Submit the refund tx, then await the receipt with an explicit
-    // 8s ceiling. Splitting submit from awaitReceipt is what makes
-    // the receipt-uncertain regime distinguishable from
-    // pre-submission failure.
-    const response = refundToken
-      ? await submitTokenTransfer(
-          client,
-          agentAccountId,
-          senderAccountId,
-          refundToken,
-          humanRefundAmount,
-        )
-      : await submitHbarTransfer(
-          client,
-          agentAccountId,
-          senderAccountId,
-          humanRefundAmount,
-        );
-    refundTxId = response.transactionId.toString();
-    await awaitReceipt(client, response);
+    // R5-FG-3 (P2-001 + P3-002): route through safeSubmit so any
+    // post-submit error — receipt timeout OR raw SDK throws between
+    // execute() and the receipt resolve — lifts to PreserveClaimError.
+    // Pre-fix only ReceiptUncertainError survived to Regime C; non-
+    // receipt-shape post-submit errors (signer disposed, V8 OOM,
+    // network reset) fell through to Regime A/B and DELed the claim
+    // while the on-chain submit may have landed → double-spend window.
+    const submitResult = await safeSubmit(client, () =>
+      refundToken
+        ? submitTokenTransfer(
+            client,
+            agentAccountId,
+            senderAccountId,
+            refundToken,
+            humanRefundAmount,
+          )
+        : submitHbarTransfer(
+            client,
+            agentAccountId,
+            senderAccountId,
+            humanRefundAmount,
+          ),
+    );
+    refundTxId = submitResult.transactionId;
   } catch (err) {
-    if (err instanceof ReceiptUncertainError) {
+    // R5-FG-3: ANY post-submit error (ReceiptUncertainError or the
+    // new PostSubmitError) takes the uncertain regime — keep claim,
+    // dead-letter, escalate. Pre-fix only ReceiptUncertainError did.
+    if (err instanceof ReceiptUncertainError || err instanceof PostSubmitError) {
       // Regime C: tx submitted, outcome unknown. KEEP claim. Persist a
       // refund_uncertain dead-letter so reconcile (or an admin tool)
       // can resolve via the mirror node without double-refunding.
@@ -1343,12 +1351,27 @@ export async function verifyUncertainRefunds(
         /* */
       }
       try {
-        await store.upsertDeadLetter({
-          ...entry,
-          resolvedAt: new Date().toISOString(),
-          resolvedBy: 'reconcile',
-          // No resolutionTxId — there isn't one; the refund failed.
-        });
+        // R5-FG-8 (P1-002): refresh-then-spread to avoid clobbering a
+        // concurrent force-release's top-level field write (mirrors
+        // R4-FG-1 in markResolved).
+        let baseFailed: typeof entry = entry;
+        try {
+          await store.refreshDeadLetters();
+          const fresh = store
+            .getDeadLetters()
+            .find((e) => e.transactionId === entry.transactionId);
+          if (fresh) baseFailed = fresh;
+        } catch {
+          /* fall through with caller-supplied snapshot */
+        }
+        if (!baseFailed.resolvedAt) {
+          await store.upsertDeadLetter({
+            ...baseFailed,
+            resolvedAt: new Date().toISOString(),
+            resolvedBy: 'reconcile',
+            // No resolutionTxId — there isn't one; the refund failed.
+          });
+        }
       } catch (e) {
         logger.warn('refund_uncertain dead-letter resolve write failed', {
           component: 'Refund',
@@ -1524,10 +1547,23 @@ export async function verifyUncertainRefunds(
     if (didAdjustLedger && !refundProgress.ledgerAdjustedAt) {
       refundProgress.ledgerAdjustedAt = new Date().toISOString();
       try {
-        await store.upsertDeadLetter({
-          ...entry,
-          details: { ...(entry.details ?? {}), ...refundProgress },
-        });
+        // R5-FG-8: refresh-then-spread before stamping progress.
+        let baseLedger: typeof entry = entry;
+        try {
+          await store.refreshDeadLetters();
+          const fresh = store
+            .getDeadLetters()
+            .find((e) => e.transactionId === entry.transactionId);
+          if (fresh) baseLedger = fresh;
+        } catch {
+          /* fall through */
+        }
+        if (!baseLedger.resolvedAt) {
+          await store.upsertDeadLetter({
+            ...baseLedger,
+            details: { ...(baseLedger.details ?? {}), ...refundProgress },
+          });
+        }
       } catch (e) {
         // Same self-healing semantics as F1: a failed stamp is logged
         // but the running accumulator carries the marker forward to
@@ -1581,10 +1617,23 @@ export async function verifyUncertainRefunds(
         // F6: stamp auditWrittenAt the moment the audit anchor lands.
         refundProgress.auditWrittenAt = new Date().toISOString();
         try {
-          await store.upsertDeadLetter({
-            ...entry,
-            details: { ...(entry.details ?? {}), ...refundProgress },
-          });
+          // R5-FG-8: refresh-then-spread before stamping progress.
+          let baseAudit: typeof entry = entry;
+          try {
+            await store.refreshDeadLetters();
+            const fresh = store
+              .getDeadLetters()
+              .find((e) => e.transactionId === entry.transactionId);
+            if (fresh) baseAudit = fresh;
+          } catch {
+            /* fall through */
+          }
+          if (!baseAudit.resolvedAt) {
+            await store.upsertDeadLetter({
+              ...baseAudit,
+              details: { ...(baseAudit.details ?? {}), ...refundProgress },
+            });
+          }
         } catch (stampErr) {
           logger.warn('refund_uncertain auditWrittenAt stamp failed', {
             component: 'Refund',
@@ -1719,17 +1768,30 @@ export async function verifyUncertainRefunds(
     }
 
     try {
-      await store.upsertDeadLetter({
-        ...entry,
-        // F6: persist the running progress accumulator so a future
-        // re-run (e.g. operator clears resolvedAt) sees the correct
-        // skip gates. The intermediate stamps already wrote these,
-        // but include them here as belt-and-braces.
-        details: { ...(entry.details ?? {}), ...refundProgress },
-        resolvedAt: new Date().toISOString(),
-        resolvedBy: 'reconcile',
-        resolutionTxId: refundTxId,
-      });
+      // R5-FG-8 (P1-002): refresh-then-spread for SUCCESS resolve.
+      let baseSuccess: typeof entry = entry;
+      try {
+        await store.refreshDeadLetters();
+        const fresh = store
+          .getDeadLetters()
+          .find((e) => e.transactionId === entry.transactionId);
+        if (fresh) baseSuccess = fresh;
+      } catch {
+        /* fall through with caller-supplied snapshot */
+      }
+      if (!baseSuccess.resolvedAt) {
+        await store.upsertDeadLetter({
+          ...baseSuccess,
+          // F6: persist the running progress accumulator so a future
+          // re-run (e.g. operator clears resolvedAt) sees the correct
+          // skip gates. The intermediate stamps already wrote these,
+          // but include them here as belt-and-braces.
+          details: { ...(baseSuccess.details ?? {}), ...refundProgress },
+          resolvedAt: new Date().toISOString(),
+          resolvedBy: 'reconcile',
+          resolutionTxId: refundTxId,
+        });
+      }
     } catch (e) {
       logger.warn('refund_uncertain dead-letter resolve write failed', {
         component: 'Refund',

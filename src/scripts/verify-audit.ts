@@ -351,6 +351,25 @@ async function main() {
   /** Collisions across kinds — same txId claimed by both a user burn AND an operator burn. */
   const crossKindBurnCollisions: Array<{ txId: string }> = [];
   /**
+   * R5-FG-14 (P12-301): track depositTxIds for both deposits AND
+   * rake events so the cross-check can flag rakes that reference no
+   * deposit (forged rake credit on operator) and post-cutoff rakes
+   * that lack a depositTxId entirely (writer regression — should
+   * always carry the field after R5).
+   */
+  const depositTxIdsByUser = new Map<string, Set<string>>();
+  const rakeDepositTxIdsByUser = new Map<string, Set<string>>();
+  const rakeMissingDepositTxIdPostCutoff: Array<{
+    user: string;
+    sequence: number;
+    timestamp: string;
+  }> = [];
+  const rakeOrphanedFromDeposit: Array<{
+    user: string;
+    depositTxId: string;
+    sequence: number;
+  }> = [];
+  /**
    * R4-FG-59 (round-4 medium): track refund anchors by their
    * `originalDepositTxId` so two refund events referencing the same
    * deposit don't double-credit `totalRefunded` for that user. F18
@@ -447,14 +466,20 @@ async function main() {
       // can verify it actually transferred to the agent.
       const memo = (event as { memo?: string }).memo;
       if (memo && memo.startsWith('deposit:')) {
+        const depositTxId = memo.slice('deposit:'.length);
         depositTxIds.push({
           sequence: event.sequence,
           timestamp: event.timestamp,
-          depositTxId: memo.slice('deposit:'.length),
+          depositTxId,
           user: event.user,
           amount: event.amount,
           token: normalizeLegacyToken(event.token),
         });
+        // R5-FG-14: track deposit txIds per user for rake pairing.
+        if (!depositTxIdsByUser.has(event.user)) {
+          depositTxIdsByUser.set(event.user, new Set());
+        }
+        depositTxIdsByUser.get(event.user)!.add(depositTxId);
       }
     } else if (event.type === 'rake') {
       const led = getOrCreateLedger(event.user);
@@ -466,6 +491,28 @@ async function main() {
         normalizeLegacyToken(event.token),
         event.amount,
       );
+      // R5-FG-14: track depositTxId pairing. Post-cutoff rakes MUST
+      // carry depositTxId; rakes whose depositTxId references no
+      // observed deposit are forged rake credits.
+      const rakeDepositTxId = (event as { depositTxId?: string }).depositTxId;
+      if (rakeDepositTxId) {
+        if (!rakeDepositTxIdsByUser.has(event.user)) {
+          rakeDepositTxIdsByUser.set(event.user, new Set());
+        }
+        rakeDepositTxIdsByUser.get(event.user)!.add(rakeDepositTxId);
+      } else {
+        const ts = Date.parse(event.timestamp);
+        const cutoff = Date.parse(
+          process.env.LEGACY_MERKLE_CUTOFF_TIMESTAMP ?? '2026-05-08T00:00:00.000Z',
+        );
+        if (Number.isFinite(ts) && Number.isFinite(cutoff) && ts > cutoff) {
+          rakeMissingDepositTxIdPostCutoff.push({
+            user: event.user,
+            sequence: event.sequence,
+            timestamp: event.timestamp,
+          });
+        }
+      }
     } else if (event.type === 'withdrawal') {
       // F18: dedup duplicate burns by withdrawTxId. Pre-F18 messages
       // had no withdrawTxId; those count as-is. With F18 in flight
@@ -896,6 +943,81 @@ async function main() {
         `this user named "${mismatch.activeStrategy}". Pre-R4-FG-60 the verifier ignored ` +
         `strategy_change events; this is the cross-check.`,
     });
+  }
+
+  // R5-FG-14 (P12-301 + P1-011): conservation cross-check —
+  // every rake event with a depositTxId must reference a known
+  // deposit. A rake whose depositTxId doesn't appear in the deposit
+  // set is a forged rake credit (operator-key compromise) or a
+  // writer regression. Critical alert.
+  for (const [user, rakeSet] of rakeDepositTxIdsByUser) {
+    const depSet = depositTxIdsByUser.get(user);
+    for (const depositTxId of rakeSet) {
+      if (!depSet || !depSet.has(depositTxId)) {
+        rakeOrphanedFromDeposit.push({ user, depositTxId, sequence: -1 });
+      }
+    }
+  }
+  for (const orphan of rakeOrphanedFromDeposit) {
+    alerts.push({
+      severity: 'critical',
+      category: 'rake_without_deposit',
+      message:
+        `R5-FG-14: rake transfer for user=${orphan.user.slice(0, 12)} ` +
+        `references depositTxId=${orphan.depositTxId} which has no matching deposit on the topic. ` +
+        `Either the deposit anchor failed to land (operator should run replay-deposit) or the ` +
+        `rake credit is forged (operator-key compromise — verify-audit conservation invariant 1).`,
+    });
+  }
+  for (const orphan of rakeMissingDepositTxIdPostCutoff) {
+    alerts.push({
+      severity: 'critical',
+      category: 'rake_missing_deposit_tx_id',
+      message:
+        `R5-FG-14: post-cutoff rake event at seq=${orphan.sequence} for user=${orphan.user.slice(0, 12)} ` +
+        `lacks depositTxId. Writers MUST stamp depositTxId after R5; this is a writer regression or ` +
+        `a forged anchor without the field.`,
+    });
+  }
+
+  // R5-FG-2 / R5-FG-47 (P12-307 + P1-010): promote legacy-Merkle
+  // warnings into top-level alerts so external monitoring scraping
+  // `--json` for severity surfaces them instead of burying them in
+  // per-user `warnings`. Severity escalates to `critical` for sessions
+  // emitted AFTER LEGACY_MERKLE_CUTOFF_TIMESTAMP — those should not
+  // exist on a healthy topic (the writer always binds post-cutover),
+  // so observing one means either operator-key forgery or a writer
+  // regression.
+  const legacyCutoffMs = (() => {
+    const raw = process.env.LEGACY_MERKLE_CUTOFF_TIMESTAMP;
+    if (raw) {
+      const p = Date.parse(raw);
+      if (Number.isFinite(p)) return p;
+    }
+    return Date.parse('2026-05-08T00:00:00.000Z');
+  })();
+  for (const session of result.sessions) {
+    for (const w of session.warnings) {
+      if (w.startsWith('legacy_merkle_binding') || w.startsWith('legacy_abort_no_merkle')) {
+        const sessionTs = session.closedAt ?? session.openedAt;
+        const postCutoff =
+          sessionTs && Number.isFinite(Date.parse(sessionTs))
+            ? Date.parse(sessionTs) > legacyCutoffMs
+            : false;
+        alerts.push({
+          severity: postCutoff ? 'critical' : 'warning',
+          category: w.startsWith('legacy_abort_no_merkle')
+            ? 'legacy_abort_no_merkle'
+            : 'legacy_merkle_binding',
+          message:
+            `session=${session.sessionId.slice(0, 12)} (user=${session.user.slice(0, 12)}) ` +
+            `validated against the legacy unbound Merkle form` +
+            (postCutoff
+              ? ` despite being emitted post-cutoff — possible operator-key forgery or writer regression.`
+              : `; pre-cutoff session lacks cross-session-replay protection.`),
+        });
+      }
+    }
   }
 
   // R2-FG-18: surface agentSeq duplicates as critical alerts.

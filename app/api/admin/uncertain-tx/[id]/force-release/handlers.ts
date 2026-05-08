@@ -121,6 +121,34 @@ export interface HandlerError {
 }
 
 /**
+ * R5-FG-8 (P9-004): refresh-then-spread for stamp helpers. Mirrors
+ * R4-FG-1 (`markResolved`) and R3-FG-10 (`stampProgress`). Pre-fix
+ * each `stamp` closure spread `...entry` (the route-call snapshot) —
+ * a concurrent verifier write between the route picking up the entry
+ * and the stamp landing had its top-level mutation REVERTED. Returns
+ * the fresh base, or the caller-supplied entry if refresh fails.
+ * Returns `null` if the entry is already resolved (caller should
+ * skip the stamp; clobbering would re-open it).
+ */
+async function refreshAndGuard(
+  store: IStore,
+  entry: DeadLetterEntry,
+): Promise<DeadLetterEntry | null> {
+  let base: DeadLetterEntry = entry;
+  try {
+    await store.refreshDeadLetters();
+    const fresh = store
+      .getDeadLetters()
+      .find((e) => e.transactionId === entry.transactionId);
+    if (fresh) base = fresh;
+  } catch {
+    /* fall through with caller-supplied snapshot */
+  }
+  if (base.resolvedAt) return null;
+  return base;
+}
+
+/**
  * Dispatch by kind. Returns either an action description (success)
  * or an error envelope the route maps to an HTTP response. Throws
  * only on unexpected exceptions (the route catches and returns 500).
@@ -246,9 +274,11 @@ async function handleWithdrawal(
 
   const stamp = async (): Promise<void> => {
     try {
+      const base = await refreshAndGuard(ctx.store, entry);
+      if (!base) return;
       await ctx.store.upsertDeadLetter({
-        ...entry,
-        details: { ...(entry.details ?? {}), ...progress },
+        ...base,
+        details: { ...(base.details ?? {}), ...progress },
       });
     } catch (e) {
       ctx.log.warn('force-release withdrawal stamp failed', {
@@ -442,9 +472,11 @@ async function handleOperatorFee(
 
   const stamp = async (): Promise<void> => {
     try {
+      const base = await refreshAndGuard(ctx.store, entry);
+      if (!base) return;
       await ctx.store.upsertDeadLetter({
-        ...entry,
-        details: { ...(entry.details ?? {}), ...progress },
+        ...base,
+        details: { ...(base.details ?? {}), ...progress },
       });
     } catch (e) {
       ctx.log.warn('force-release operator-fee stamp failed', {
@@ -758,13 +790,16 @@ async function handlePlay(
   }
 
   try {
-    await ctx.store.upsertDeadLetter({
-      ...entry,
-      details: {
-        ...(entry.details ?? {}),
-        successTriagedAt: new Date().toISOString(),
-      },
-    });
+    const base = await refreshAndGuard(ctx.store, entry);
+    if (base) {
+      await ctx.store.upsertDeadLetter({
+        ...base,
+        details: {
+          ...(base.details ?? {}),
+          successTriagedAt: new Date().toISOString(),
+        },
+      });
+    }
   } catch (e) {
     ctx.log.warn('force-release play_uncertain successTriagedAt stamp failed', {
       component: 'AdminForceRelease',
@@ -909,9 +944,11 @@ async function handleRefund(
 
   const stamp = async (): Promise<void> => {
     try {
+      const base = await refreshAndGuard(ctx.store, entry);
+      if (!base) return;
       await ctx.store.upsertDeadLetter({
-        ...entry,
-        details: { ...(entry.details ?? {}), ...progress },
+        ...base,
+        details: { ...(base.details ?? {}), ...progress },
       });
     } catch (e) {
       ctx.log.warn('force-release refund stamp failed', {

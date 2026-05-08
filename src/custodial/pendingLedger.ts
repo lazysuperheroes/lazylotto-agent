@@ -200,6 +200,29 @@ export async function applyPendingLedgerForUser(
     // Filter to the requested user only.
     if (entry.userId !== userId) continue;
 
+    // R5-FG-4 (P3-001 + P5-RU-003): SET-NX a per-(userId, sourceTx)
+    // atomic claim before mutating. Pre-fix two concurrent drain
+    // passes (eager inside withUserLock for Lambda A, periodic
+    // reconcile on Lambda B) both LRANGE'd, captured overlapping
+    // snapshots, and after Lambda A LREM'd, Lambda B's snapshot still
+    // contained the row — so B re-applied the debit + rake reversal.
+    // The user lock is RELEASED between A and B's acquires, so the
+    // lock alone doesn't serialize. Now: claim atomically before the
+    // mutation; LREM is belt-and-braces; 7d TTL bounds the claim.
+    const claimKey = `${KEY_PREFIX.pendingLedgerClaim}${entry.userId}:${entry.sourceTx}`;
+    const claimed = await redis
+      .set(claimKey, '1', { nx: true, ex: 7 * 24 * 60 * 60 })
+      .catch(() => null);
+    if (claimed === null) {
+      // Another drain pass already claimed this entry. Skip the
+      // mutation; that pass will LREM. Belt-and-braces: also LREM in
+      // case the claimer crashed mid-flight (leaving the row), since
+      // the claim's 7d TTL keeps re-application safe.
+      const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
+      await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
+      continue;
+    }
+
     try {
       const user = store.getUser(entry.userId);
       if (!user) {
@@ -304,6 +327,20 @@ export async function drainPendingLedgerAdjustments(
     const lockToken = await acquireUserLock(entry.userId, 30);
     if (!lockToken) {
       result.deferred++;
+      continue;
+    }
+
+    // R5-FG-4: per-(userId, sourceTx) claim. See `applyPendingLedgerForUser`.
+    const claimKey = `${KEY_PREFIX.pendingLedgerClaim}${entry.userId}:${entry.sourceTx}`;
+    const claimed = await redis
+      .set(claimKey, '1', { nx: true, ex: 7 * 24 * 60 * 60 })
+      .catch(() => null);
+    if (claimed === null) {
+      // Sibling drain already applied (or is mid-apply). Best-effort
+      // LREM in case the row was left behind, then release the lock.
+      const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
+      await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
+      await releaseUserLock(entry.userId, lockToken);
       continue;
     }
 

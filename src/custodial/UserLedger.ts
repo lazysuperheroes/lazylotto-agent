@@ -220,7 +220,10 @@ export class UserLedger {
       }
 
       try {
-        await this.accounting.recordRake(user.hederaAccountId, this.agentAccountId, rakeAmount, token);
+        // R5-FG-14: pass the deposit's txId so the reader can dedup
+        // rake events on (from, depositTxId) and verify-audit can
+        // pair every mint(rakeAmount>0) with a rake transfer.
+        await this.accounting.recordRake(user.hederaAccountId, this.agentAccountId, rakeAmount, token, txId);
       } catch (err) {
         console.error(
           `[UserLedger] CRITICAL: HCS-20 recordRake failed for user ${userId}, txId ${txId} — operator rake credited, audit topic missing the pair:`,

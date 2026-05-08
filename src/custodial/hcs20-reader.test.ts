@@ -429,6 +429,38 @@ describe('hcs20-reader: R4-FG-23 cross-session Merkle replay', () => {
       'expected legacy_merkle_binding warning',
     );
   });
+
+  // revert-proof: if `isPostLegacyCutoff` is removed from
+  // `reconstructSession` close branch, this test fails — the legacy
+  // fallback would accept the unbound root post-cutoff and produce
+  // 'closed_success' instead of 'corrupt'. R5-FG-2 (P1-004 + P3-005).
+  it('R5-FG-2: post-cutoff legacy unbound close is corrupt, not closed_success', async () => {
+    const sessionId = 'sess-post-cutoff';
+    const poolsData = [
+      { poolId: 0, spent: 4, spentToken: 'HBAR', wins: 0, prizes: [] as PrizeEntry[] },
+    ];
+    // Set cutoff to the unix epoch so any test message is "post-cutoff".
+    const prev = process.env.LEGACY_MERKLE_CUTOFF_TIMESTAMP;
+    process.env.LEGACY_MERKLE_CUTOFF_TIMESTAMP = '1970-01-01T00:00:00.000Z';
+    try {
+      const messages: RawTopicMessage[] = [
+        open(1, sessionId, 1),
+        pool(2, sessionId, 0, 1, 4, 0),
+        // Pre-R4-FG-23 root, but message timestamp is post-cutoff.
+        await close(3, sessionId, 1, poolsData, 0, T0, { legacyBinding: true }),
+      ];
+      const result = await parseAuditTopic(messages, NOW);
+      const session = result.sessions[0]!;
+      assert.equal(
+        session.status,
+        'corrupt',
+        'post-cutoff legacy unbound close MUST refuse the legacy fallback',
+      );
+    } finally {
+      if (prev === undefined) delete process.env.LEGACY_MERKLE_CUTOFF_TIMESTAMP;
+      else process.env.LEGACY_MERKLE_CUTOFF_TIMESTAMP = prev;
+    }
+  });
 });
 
 describe('hcs20-reader: R4-FG-24 aborted Merkle root', () => {

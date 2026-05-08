@@ -39,6 +39,14 @@ export const KEY_PREFIX = {
   refundedOriginals: `lla:${NET}:refunded-originals`,
   // Pending ledger adjustments when a refund can't grab the user lock
   pendingLedger: `lla:${NET}:pending-ledger`,
+  // R5-FG-4 (round-5 critical): per-(userId, sourceTx) atomic claim
+  // for `applyPendingLedgerForUser` / `drainPendingLedgerAdjustments`.
+  // Two concurrent drains both LRANGE the queue; without this claim,
+  // each pass acquires the per-user lock, applies the debit, and
+  // LREMs — but the LRANGE snapshot pre-dates the sibling's LREM, so
+  // both apply twice. SET-NX before mutate makes the apply atomic;
+  // LREM remains belt-and-braces. 7-day TTL matches deposit dedup.
+  pendingLedgerClaim: `lla:${NET}:pending-ledger-claim:`,
   // Withdrawal velocity counters, keyed per token + user
   velocity: `lla:${NET}:velocity:withdrawal:`,
   // Per-txId verifier locks for *_uncertain dead-letters — prevents

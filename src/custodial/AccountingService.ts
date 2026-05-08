@@ -217,12 +217,29 @@ export class AccountingService {
 
   /**
    * Record a rake fee as an HCS-20 transfer from user to agent.
+   *
+   * R5-FG-14 / R5-FG-57 (P12-301 + P1-011 + P12-310): `depositTxId` is
+   * embedded in both the body field AND `memo:'rake:<txId>'`. Pre-fix
+   * the rake event carried only `memo:'rake'` and a topic-only auditor
+   * could compute aggregate rake but could not pair a specific rake
+   * transfer with the deposit it came from — so the conservation
+   * invariant "every mint with rakePercent>0 has a paired rake transfer"
+   * was unprovable. Also: a retry of `recordDeposit` (rare but
+   * possible — replay-deposit, mid-flight Lambda freeze) could emit
+   * two rake transfers double-counting `totalRakeCollected` while
+   * `totalRakeReversed` matches one of them. Now the reader can dedup
+   * on `(from, depositTxId)` (R5-FG-24).
+   *
+   * `depositTxId` is required for new emissions (R5-FG-89 ratchet).
+   * Legacy v1 rake events with no depositTxId remain readable via the
+   * existing memo:'rake' fallback.
    */
   async recordRake(
     userAccountId: string,
     agentAccountId: string,
     amount: number,
     token: string = 'HBAR',
+    depositTxId?: string,
   ): Promise<void> {
     await this.submitMessage({
       p: 'hcs-20',
@@ -232,7 +249,8 @@ export class AccountingService {
       amt: String(amount),
       from: userAccountId,
       to: agentAccountId,
-      memo: 'rake',
+      memo: depositTxId ? `rake:${depositTxId}` : 'rake',
+      ...(depositTxId ? { depositTxId } : {}),
     });
   }
 
@@ -580,6 +598,19 @@ export class AccountingService {
         } else {
           this.fallbackAgentSeqs.set(agentAccountId, highestSeq);
         }
+        // R5-FG-13: clear the consecutive-failure counter on success
+        // so the next terminal failure starts the backoff ladder fresh
+        // (10min). Without this, every recovery cycle would keep
+        // climbing the ladder until the cap.
+        try {
+          const { getRedis } = await import('../auth/redis.js');
+          const redis = await getRedis();
+          const network = process.env.HEDERA_NETWORK ?? 'testnet';
+          const seedFailCountKey = `lla:${network}:agentseq-seed-fail-count:${agentAccountId}`;
+          await redis.del(seedFailCountKey);
+        } catch {
+          /* counter clear is best-effort; backoff cap bounds damage */
+        }
         console.log(
           `[AccountingService] agentSeq initialized for ${agentAccountId}: ` +
             `next=${highestSeq + 1} (last seen seq ${highestSeq})`,
@@ -596,16 +627,40 @@ export class AccountingService {
             `Last error: ${lastError instanceof Error ? lastError.message : lastError}`,
         );
         this.agentSeqSeedFailed.add(agentAccountId);
-        // R3-FG-19: ALSO flag cluster-wide via Redis with 10-min TTL
-        // so sibling Lambdas refuse too. Without this, Lambda A
-        // refuses while Lambda B (warm, seeded earlier) keeps
-        // INCRing — inconsistent UX, no escalation.
+        // R3-FG-19: ALSO flag cluster-wide via Redis with TTL so
+        // sibling Lambdas refuse too. Without this, Lambda A refuses
+        // while Lambda B (warm, seeded earlier) keeps INCRing —
+        // inconsistent UX, no escalation.
+        //
+        // R5-FG-13 (P6-002): exponential backoff on the seed-failed
+        // TTL. Pre-fix the TTL was a hardcoded 10min; on a sustained
+        // mirror outage every warm Lambda burned ~4.2s of mirror
+        // calls every 10min — N Lambdas × 4.2s every 10min becomes
+        // a fan-out DoS that prolongs the degradation. Now we INCR a
+        // consecutive-failure counter per agent and scale the TTL:
+        // attempt 1 → 10min, 2 → 20min, 3 → 40min, capped at 60min.
+        // Counter clears on the next successful seed (above).
         try {
           const { getRedis } = await import('../auth/redis.js');
           const redis = await getRedis();
           const network = process.env.HEDERA_NETWORK ?? 'testnet';
           const seedFailKey = `lla:${network}:agentseq-seed-failed:${agentAccountId}`;
-          await redis.set(seedFailKey, '1', { ex: 600 });
+          const seedFailCountKey = `lla:${network}:agentseq-seed-fail-count:${agentAccountId}`;
+          const failCount = (await redis.incr(seedFailCountKey)) ?? 1;
+          // Re-arm the count's own TTL so a fully-recovered agent
+          // doesn't carry a stale counter forever.
+          await redis.expire(seedFailCountKey, 24 * 60 * 60);
+          const baseSec = 600; // 10 minutes
+          const capSec = 3600; // 1 hour
+          const ttlSec = Math.min(
+            capSec,
+            baseSec * Math.pow(2, Math.max(0, Number(failCount) - 1)),
+          );
+          await redis.set(seedFailKey, String(failCount), { ex: ttlSec });
+          console.warn(
+            `[AccountingService] agentSeq seed flagged for ${agentAccountId}: ` +
+              `attempt #${failCount}, TTL ${ttlSec}s (recovery_pending)`,
+          );
         } catch (redisErr) {
           console.error(
             `[AccountingService] could not flag seed-failed cluster-wide for ${agentAccountId}:`,
