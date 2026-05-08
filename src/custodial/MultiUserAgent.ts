@@ -28,6 +28,8 @@ import {
   transferHbar,
   transferToken,
   ReceiptUncertainError,
+  PreserveClaimError,
+  PostSubmitError,
 } from '../hedera/transfers.js';
 import { escalateUncertainDlFailure } from '../lib/escalation.js';
 import { mintAuditOrphanId } from '../lib/orphanIds.js';
@@ -1140,23 +1142,28 @@ export class MultiUserAgent {
 
       return session;
     } catch (error) {
-      if (error instanceof ReceiptUncertainError) {
-        // Receipt timeout on a contract submission (buy / roll /
-        // prize transfer). The on-chain action MAY have landed —
-        // releasing the reservations would let the user re-play with
-        // a fresh balance, then if the original tx settles they'd
-        // have got entries on-chain at the operator's expense. KEEP
-        // reservations. Persist a play_uncertain dead-letter so
-        // reconcile can resolve via the mirror node:
+      // R6-FG-2 (P1-001 + P3-003): broaden the gate to ANY
+      // PreserveClaimError subclass — both ReceiptUncertainError
+      // (timeout) AND PostSubmitError (signer disposed, V8 OOM,
+      // network reset between execute() and awaitReceipt). Pre-fix
+      // PostSubmitError fell through to releaseReserve over every
+      // reservation → on-chain may have landed → fresh-key retry
+      // lets the user re-play with healed balance → operator pays
+      // for two plays.
+      if (error instanceof ReceiptUncertainError || error instanceof PostSubmitError) {
+        const uncertainTxId = error.transactionId;
+        // Receipt-uncertain or post-submit error on a contract
+        // submission. The on-chain action MAY have landed; releasing
+        // the reservations would let the user re-play with a fresh
+        // balance. KEEP reservations. Persist a play_uncertain
+        // dead-letter so reconcile can resolve via mirror node:
         //   - Confirmed FAILED → release reservations.
-        //   - Confirmed SUCCESS → flag for manual triage (in-band
-        //     settlement code did not run; operator must reconcile
-        //     entries against dApp pool state).
-        //   - Still NOT_FOUND → leave for next reconcile pass; after
-        //     24h of NOT_FOUND it gets promoted to FAILED.
+        //   - Confirmed SUCCESS → flag for manual triage.
+        //   - Still NOT_FOUND → next reconcile pass; 24h NOT_FOUND
+        //     promotes to FAILED.
         try {
           await this.store.upsertDeadLetter({
-            transactionId: error.transactionId,
+            transactionId: uncertainTxId,
             timestamp: new Date().toISOString(),
             error: error.message,
             kind: 'play_uncertain',
@@ -1170,30 +1177,30 @@ export class MultiUserAgent {
         } catch (dlErr) {
           // H11: dead-letter write failure during uncertain catch is
           // the worst possible state (held reserves, no recovery
-          // anchor). Log loudly + escalate via the same webhook the
-          // reconcile insolvency check uses.
+          // anchor). Log loudly + escalate.
           logger.error(
             'CRITICAL: play_uncertain dead-letter write failed — held reserves with no recovery anchor',
             {
               component: 'MultiUserAgent',
               event: 'play_uncertain_dl_write_failed',
               userId,
-              uncertainTxId: error.transactionId,
+              uncertainTxId,
               error: dlErr instanceof Error ? dlErr.message : String(dlErr),
             },
           );
           await escalateUncertainDlFailure({
             kind: 'play_uncertain',
             userId,
-            uncertainTxId: error.transactionId,
+            uncertainTxId,
             cause: dlErr,
           });
         }
-        logger.error('play receipt timed out — dead-lettered as play_uncertain', {
+        logger.error('play post-submit uncertain — dead-lettered', {
           component: 'MultiUserAgent',
           event: 'play_receipt_uncertain',
           userId,
-          uncertainTxId: error.transactionId,
+          uncertainTxId,
+          errorClass: error.constructor.name,
         });
         // Reservations INTENTIONALLY retained. Rethrow.
         throw error;
@@ -1412,26 +1419,36 @@ export class MultiUserAgent {
           transactionId = result.transactionId;
         }
       } catch (transferError) {
-        if (transferError instanceof ReceiptUncertainError) {
-          // Receipt timed out — tx may have landed. Audit finding C24
-          // applied to withdraw: if we release the reserve here, a
-          // retry with a fresh idempotency key (or no key) would let
-          // the user spend that balance AGAIN, then a successful
-          // original tx would drain the operator wallet a second
-          // time. KEEP the reserve. Persist a withdrawal_uncertain
-          // dead-letter so reconcile (or an admin tool) verifies the
-          // tx on chain and either settles (success) or releases the
-          // reserve (failed).
+        // R6-FG-1 (P1-002 + P3-001 + P10-002): broaden the gate to
+        // ANY PreserveClaimError subclass — ReceiptUncertainError OR
+        // PostSubmitError. Pre-fix this only caught the receipt-timeout
+        // shape; R5-FG-3's PostSubmitError (covers signer-disposed,
+        // V8 OOM, network reset between execute() and awaitReceipt)
+        // fell through to the release-reserve branch → on-chain may
+        // have landed → fresh-key retry double-spends.
+        if (
+          transferError instanceof ReceiptUncertainError ||
+          transferError instanceof PostSubmitError
+        ) {
+          const uncertainTxId = transferError.transactionId;
+          // Audit finding C24 applied to withdraw: if we release the
+          // reserve here, a retry with a fresh idempotency key (or
+          // no key) would let the user spend that balance AGAIN, then
+          // a successful original tx would drain the operator wallet
+          // a second time. KEEP the reserve. Persist a
+          // withdrawal_uncertain dead-letter so reconcile verifies
+          // the tx on chain and either settles (success) or releases
+          // the reserve (failed).
           try {
             await this.store.upsertDeadLetter({
-              transactionId: transferError.transactionId,
+              transactionId: uncertainTxId,
               timestamp: new Date().toISOString(),
               error: transferError.message,
               kind: 'withdrawal_uncertain',
               details: {
                 userId,
                 recipientAccountId: user.hederaAccountId,
-                withdrawTxId: transferError.transactionId,
+                withdrawTxId: uncertainTxId,
                 amount,
                 tokenKey: withdrawToken,
                 isHbar,
@@ -1444,28 +1461,29 @@ export class MultiUserAgent {
                 component: 'MultiUserAgent',
                 event: 'withdrawal_uncertain_dl_write_failed',
                 userId,
-                withdrawTxId: transferError.transactionId,
+                withdrawTxId: uncertainTxId,
                 error: dlErr instanceof Error ? dlErr.message : String(dlErr),
               },
             );
             await escalateUncertainDlFailure({
               kind: 'withdrawal_uncertain',
               userId,
-              uncertainTxId: transferError.transactionId,
+              uncertainTxId,
               cause: dlErr,
             });
           }
-          logger.error('withdrawal receipt timed out — dead-lettered as withdrawal_uncertain', {
+          logger.error('withdrawal post-submit uncertain — dead-lettered', {
             component: 'MultiUserAgent',
             event: 'withdrawal_receipt_uncertain',
             userId,
-            withdrawTxId: transferError.transactionId,
+            withdrawTxId: uncertainTxId,
             amount,
             token: withdrawToken,
+            errorClass: transferError.constructor.name,
           });
           // Reserve INTENTIONALLY retained. Rethrow so withIdempotency
-          // (which knows about ReceiptUncertainError) preserves its
-          // claim and the caller surfaces uncertainty.
+          // (which checks isPreserveClaim) preserves its claim and
+          // the caller surfaces uncertainty.
           throw transferError;
         }
         // Confirmed pre-submit OR on-chain failure — release reserve.
@@ -1783,14 +1801,19 @@ export class MultiUserAgent {
         transactionId = result.transactionId;
       }
     } catch (transferError) {
+      // R6-FG-3 (P1-003 + P3-002): broaden BOTH gates to catch
+      // PostSubmitError as well as ReceiptUncertainError. Pre-fix
+      // PostSubmitError (R5-FG-3 introduced) was treated as
+      // pre-submit failure → claim DELed → fresh-key retry passed
+      // SET-NX → operator double-pay if original landed.
+      const isUncertain =
+        transferError instanceof ReceiptUncertainError ||
+        transferError instanceof PostSubmitError;
       // F24: pre-submit / confirmed-failure path — release the
-      // per-token claim so a retry can run. ReceiptUncertainError
-      // is the exception (claim retained for verifier resolution),
-      // handled below.
-      if (
-        pendingClaimAcquired &&
-        !(transferError instanceof ReceiptUncertainError)
-      ) {
+      // per-token claim so a retry can run. PreserveClaim shapes
+      // (uncertain + post-submit) retain the claim for verifier
+      // resolution.
+      if (pendingClaimAcquired && !isUncertain) {
         try {
           // R3-FG-2: fenced compare-and-delete instead of unfenced DEL.
           const redis = await getRedis();
@@ -1799,26 +1822,22 @@ export class MultiUserAgent {
           /* TTL is the fallback */
         }
       }
-      if (transferError instanceof ReceiptUncertainError) {
+      if (isUncertain) {
+        const uncertainTxId = transferError.transactionId;
         // C24 applied to operator fee withdraw: tx may have landed.
-        // Persist a dead-letter; the operator state is INTENTIONALLY
-        // not debited yet so reconcile can choose: confirmed-success
+        // Persist a dead-letter; operator state INTENTIONALLY not
+        // debited yet so reconcile can choose: confirmed-success
         // → debit and resolve; confirmed-failed → just resolve;
-        // still-uncertain → leave for next pass. Future withdraw-fees
-        // calls bounce on the operator-level idempotency claim that
-        // withIdempotency held over this throw, preventing double-pay
-        // via repeated retries with the SAME key. Different-key
-        // retries are still gated by the operator lock + the
-        // unresolved dead-letter row (admin UI surfaces this).
+        // still-uncertain → leave for next pass.
         try {
           await this.store.upsertDeadLetter({
-            transactionId: transferError.transactionId,
+            transactionId: uncertainTxId,
             timestamp: new Date().toISOString(),
             error: transferError.message,
             kind: 'operator_fee_withdraw_uncertain',
             details: {
               recipientAccountId,
-              withdrawTxId: transferError.transactionId,
+              withdrawTxId: uncertainTxId,
               amount,
               tokenKey,
               token,
@@ -1834,22 +1853,23 @@ export class MultiUserAgent {
             {
               component: 'MultiUserAgent',
               event: 'operator_fee_withdraw_uncertain_dl_write_failed',
-              withdrawTxId: transferError.transactionId,
+              withdrawTxId: uncertainTxId,
               error: dlErr instanceof Error ? dlErr.message : String(dlErr),
             },
           );
           await escalateUncertainDlFailure({
             kind: 'operator_fee_withdraw_uncertain',
-            uncertainTxId: transferError.transactionId,
+            uncertainTxId,
             cause: dlErr,
           });
         }
-        logger.error('operator fee withdrawal receipt timed out', {
+        logger.error('operator fee withdrawal post-submit uncertain', {
           component: 'MultiUserAgent',
           event: 'operator_fee_withdraw_receipt_uncertain',
-          withdrawTxId: transferError.transactionId,
+          withdrawTxId: uncertainTxId,
           amount,
           token,
+          errorClass: transferError.constructor.name,
         });
         throw transferError;
       }

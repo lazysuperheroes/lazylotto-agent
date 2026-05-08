@@ -3,12 +3,11 @@ import {
   ContractExecuteTransaction,
   ContractId,
   Hbar,
-  TransactionResponse,
   TransactionReceipt,
   Status,
 } from '@hashgraph/sdk';
 import { GAS_ESTIMATES, HEDERA_DEFAULTS, PRIZE_TRANSFER_RETRY } from '../config/defaults.js';
-import { awaitReceipt, CONTRACT_RECEIPT_TIMEOUT_MS } from './transfers.js';
+import { CONTRACT_RECEIPT_TIMEOUT_MS, safeSubmit, PreserveClaimError } from './transfers.js';
 
 export interface TransactionIntent {
   contractId: string;
@@ -91,15 +90,18 @@ export async function executeIntent(
     tx.setPayableAmount(Hbar.fromTinybars(intent.payableAmount));
   }
 
-  const txResponse: TransactionResponse = await tx.execute(client);
-  // Bounded receipt wait — on timeout throws ReceiptUncertainError
-  // (the canonical "tx submitted, on-chain status unknown" sentinel).
-  // Callers wrapped in withIdempotency get claim retention for free
-  // because withIdempotency knows about ReceiptUncertainError. M13:
-  // contract receipts are slower than HBAR/token transfer receipts
-  // (storage writes, gas refunds, gas-laddered retries) so we use
-  // CONTRACT_RECEIPT_TIMEOUT_MS (2x the transfer ceiling).
-  const receipt = await awaitReceipt(client, txResponse, CONTRACT_RECEIPT_TIMEOUT_MS);
+  // R6-FG-4 (P3-004 + P5-011): route through safeSubmit so any
+  // post-submit error (signer disposed, network reset, V8 OOM
+  // between execute() and awaitReceipt) lifts to PostSubmitError
+  // (a PreserveClaimError subclass). Pre-fix raw `tx.execute() +
+  // awaitReceipt` allowed vanilla post-submit errors to bypass
+  // withIdempotency's claim-preservation → contract-call double-
+  // spend window for buy/roll/transferAllPrizes/staking ops.
+  const { response: txResponse, receipt } = await safeSubmit(
+    client,
+    () => tx.execute(client),
+    { ceilingMs: CONTRACT_RECEIPT_TIMEOUT_MS },
+  );
 
   if (receipt.status !== Status.Success) {
     throw new Error(
@@ -109,15 +111,7 @@ export async function executeIntent(
 
   // Estimate gas cost using the published Hedera mainnet gas price
   // (~0.000000082 HBAR/gas). NOTE (R4-FG-63 deferred): this uses
-  // intent.gas (the LIMIT) rather than gas actually consumed. The
-  // proposed fix to read `receipt.transactionFee` doesn't apply
-  // because TransactionReceipt does not expose the fee — that lives
-  // on TransactionRecord, which requires a separate paid query.
-  // Leaving the over-estimate in place: it's worse for solvency
-  // tracking (under-reports operator headroom) but always errs on
-  // the safe side (operator looks insolvent earlier rather than
-  // later). Proper fix: bolt on a TransactionRecordQuery only when
-  // an exact fee is needed, e.g., for fee-withdrawal accounting.
+  // intent.gas (the LIMIT) rather than gas actually consumed.
   const estimatedGasHbar = intent.gas * 0.000000082;
 
   return {
@@ -144,15 +138,12 @@ export async function executeEncodedCall(
     .setGas(gas)
     .setFunctionParameters(Buffer.from(encodedCalldata.slice(2), 'hex'));
 
-  const txResponse: TransactionResponse = await tx.execute(client);
-  // Bounded receipt wait — on timeout throws ReceiptUncertainError
-  // (the canonical "tx submitted, on-chain status unknown" sentinel).
-  // Callers wrapped in withIdempotency get claim retention for free
-  // because withIdempotency knows about ReceiptUncertainError. M13:
-  // contract receipts are slower than HBAR/token transfer receipts
-  // (storage writes, gas refunds, gas-laddered retries) so we use
-  // CONTRACT_RECEIPT_TIMEOUT_MS (2x the transfer ceiling).
-  const receipt = await awaitReceipt(client, txResponse, CONTRACT_RECEIPT_TIMEOUT_MS);
+  // R6-FG-4: route through safeSubmit (see executeIntent above).
+  const { response: txResponse, receipt } = await safeSubmit(
+    client,
+    () => tx.execute(client),
+    { ceilingMs: CONTRACT_RECEIPT_TIMEOUT_MS },
+  );
 
   if (receipt.status !== Status.Success) {
     throw new Error(
@@ -161,8 +152,7 @@ export async function executeEncodedCall(
   }
 
   // R4-FG-63 deferred: same estimation caveat as `executeIntent` —
-  // intent.gas is the LIMIT, not the actual gas consumed. Real fee
-  // lives on TransactionRecord which we don't query for cost.
+  // gas param is the LIMIT, not the actual gas consumed.
   const estimatedGasHbar = gas * 0.000000082;
 
   return {
@@ -279,21 +269,20 @@ export async function transferAllPrizesWithRetry(
         ...(errTxId ? { lastSubmittedTxId: errTxId } : {}),
       });
 
-      // R4-FG-17 (round-4 high): rethrow ReceiptUncertainError
-      // immediately. Pre-fix the retry catch only short-circuited on
-      // INSUFFICIENT_GAS; ReceiptUncertainError was wrapped + retried.
-      // But the underlying tx may have landed and burned the prize-
-      // loop counter. The next attempt submits a new transaction;
-      // when the first did succeed, the second reverts and the
-      // wrapper logs success — `prizeTransfer.attempts` undercounts.
-      // Withdrawals + refunds already follow this rule (no retry on
-      // uncertain); contracts.ts must too.
-      const isReceiptUncertain =
-        err instanceof Error &&
-        (err.constructor.name === 'ReceiptUncertainError' ||
-          message.includes('ReceiptUncertainError') ||
-          message.includes('receipt timeout'));
-      if (isReceiptUncertain) {
+      // R4-FG-17 + R6-FG-5 (P3-005): rethrow ANY PreserveClaimError
+      // subclass immediately. Pre-fix used string-name comparison
+      // (`err.constructor.name === 'ReceiptUncertainError'` plus
+      // message-substring checks). PostSubmitError's constructor.name
+      // is 'PostSubmitError' and its message starts with
+      // `Transaction X was submitted but a post-submit error...` —
+      // neither matches the old string check. Result: the retry
+      // escalator submitted a SECOND prize-transfer transaction
+      // when the original had landed but reported a non-receipt-
+      // shape post-submit error. Now: structural check via
+      // `instanceof PreserveClaimError` covers BOTH subclasses.
+      // Withdrawals + refunds already use the structural check;
+      // contracts.ts now matches.
+      if (err instanceof PreserveClaimError) {
         const wrapped = new Error(
           `Prize transfer receipt uncertain on attempt ${i + 1}: ${message}`,
         );
