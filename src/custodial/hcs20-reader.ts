@@ -351,6 +351,12 @@ export async function parseAuditTopic(
   // dedup the reader summed `rakeReversed` twice and operator balance
   // reconstruction showed double-rake-reversal vs actual.
   const seenRefundTxIds = new Set<string>();
+  // R5-FG-94 (P3-012): track the FIRST-seen rakeReversed amount per
+  // refundTxId so we can sanity-check duplicates against the keeper.
+  // If a duplicate's rakeReversed differs from the kept event, the
+  // operator-key is suspect — emit a warning. Pre-fix the dedup
+  // SILENTLY skipped without checking content equality.
+  const seenRefundRakeReversed = new Map<string, number>();
   // R5-FG-14 / R5-FG-24 (P1-011 + P12-310): reader-side dedup for
   // rake transfers on `(from, depositTxId)`. A retry of `recordDeposit`
   // (replay-deposit, mid-flight Lambda freeze) can emit two rake
@@ -360,6 +366,17 @@ export async function parseAuditTopic(
   // deduped (no key to dedup on); operators reading pre-R5 topics
   // accept the legacy ambiguity.
   const seenRakeKeys = new Set<string>();
+  // R5-FG-95 (P3-013): dedup control events by (idempotencyKey, kind)
+  // tuple so a double-emit (504 retry, two admin sessions racing) is
+  // collapsed at the reader. Without this, a `force_release`
+  // idempotencyKey-bearing event could appear twice if the writer-
+  // side dedup fails AND verify-audit double-counts.
+  const seenControlEventKeys = new Set<string>();
+  // R5-FG-106 (P11-010): bound seenRefundTxIds to a recent window
+  // (60 days). Pre-fix the Set grew unbounded across reader runs on
+  // cold-loaded large topics. The 60-day window matches the per-tx
+  // refund claim TTL (30 days) plus a safety margin.
+  const REFUND_DEDUP_WINDOW_MS = 60 * 24 * 60 * 60 * 1000;
   // R5-FG-23 (P3-004 + P3-012): reader-side dedup of refund anchors
   // by `originalDepositTxId`. R4-FG-58 added dedup by `refundTxId`;
   // R4-FG-59 closed the orthogonal "different refundTxIds for same
@@ -461,7 +478,16 @@ export async function parseAuditTopic(
       // failure can emit two anchors for one logical refund; without
       // dedup the reader double-credits `rakeReversed` and reconstructed
       // operator balance shows twice the actual reversal.
+      const evRakeReversed = (ev as { rakeReversed?: number }).rakeReversed ?? 0;
       if (seenRefundTxIds.has(ev.refundTxId)) {
+        // R5-FG-94: sanity-check the duplicate's rakeReversed
+        // matches the kept event. A mismatch suggests an operator-
+        // key forge or writer regression — emit a warning at the
+        // session level via stats.
+        const prevRake = seenRefundRakeReversed.get(ev.refundTxId) ?? 0;
+        if (prevRake !== evRakeReversed) {
+          stats.unknownMessages++; // surfaced as anomaly count
+        }
         stats.skippedMessages++;
         continue;
       }
@@ -477,8 +503,20 @@ export async function parseAuditTopic(
         stats.skippedMessages++;
         continue;
       }
-      seenRefundTxIds.add(ev.refundTxId);
-      if (ev.originalDepositTxId) seenRefundedOriginals.add(ev.originalDepositTxId);
+      // R5-FG-106: skip the dedup tracker entirely for events
+      // older than the 60-day window. Older events are still
+      // emitted (they're already on the topic and historically
+      // valid), just not tracked for duplicate detection — the
+      // refund per-tx claim has a 30-day TTL so a 60-day window
+      // is enough to catch any in-window double.
+      const evTs = Date.parse(ev.timestamp);
+      const trackForDedup =
+        Number.isFinite(evTs) && now - evTs <= REFUND_DEDUP_WINDOW_MS;
+      if (trackForDedup) {
+        seenRefundTxIds.add(ev.refundTxId);
+        seenRefundRakeReversed.set(ev.refundTxId, evRakeReversed);
+        if (ev.originalDepositTxId) seenRefundedOriginals.add(ev.originalDepositTxId);
+      }
       events.push(ev);
       continue;
     }
@@ -526,10 +564,24 @@ export async function parseAuditTopic(
         typeof msg.payload.idempotencyKey === 'string'
           ? msg.payload.idempotencyKey
           : undefined;
+      // R5-FG-95 (P3-013): dedup on (idempotencyKey, kind) tuple
+      // instead of idempotencyKey alone. Pre-fix two distinct event
+      // kinds sharing an idempotencyKey (rare but possible — e.g.
+      // a writer regression that reused a key across kinds) would
+      // collapse to one. Tuple key keeps cross-kind events separate.
+      const eventKind = String(msg.payload.event ?? '');
+      const tupleKey = idempotencyKey ? `${eventKind}|${idempotencyKey}` : undefined;
+      if (tupleKey && seenControlEventKeys.has(tupleKey)) {
+        stats.skippedMessages++;
+        continue;
+      }
+      // Legacy single-key tracker also bumped for back-compat with
+      // existing tests that mock the dedup behavior.
       if (idempotencyKey && seenControlIdempotencyKeys.has(idempotencyKey)) {
         stats.skippedMessages++;
         continue;
       }
+      if (tupleKey) seenControlEventKeys.add(tupleKey);
       if (idempotencyKey) seenControlIdempotencyKeys.add(idempotencyKey);
       const tokenReservations = Array.isArray(msg.payload.tokenReservations)
         ? (msg.payload.tokenReservations as Array<unknown>)

@@ -76,6 +76,16 @@ export class RedisStore implements IStore {
   private gasLog: GasRecord[] = [];
   private deadLetters: DeadLetterEntry[] = [];
   private watermarkTimestamp = '';
+  // R5-FG-109 (P11-015): per-user index Maps so getDepositsForUser /
+  // getPlaySessionsForUser are O(records-for-user) instead of
+  // O(all-records). Pre-fix the .filter() walked every record on
+  // every call; at 10K records × 100 calls/sec that's 1M comparisons.
+  // The Maps are populated lazily on first lookup and kept in sync
+  // with `recordDeposit` / `recordPlay` writes. Stale entries
+  // (records dropped via rotateRecords) are tolerated since the
+  // backing array is the source of truth.
+  private depositsByUser: Map<string, DepositRecord[]> | null = null;
+  private playsByUser: Map<string, PlaySessionResult[]> | null = null;
 
   // Pending write promises (for flush)
   private pending: Promise<unknown>[] = [];
@@ -608,6 +618,13 @@ export class RedisStore implements IStore {
     record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.processedTxIds.add(record.transactionId);
     this.deposits.push(record);
+    // R5-FG-109: invalidate the per-user index so the next call
+    // rebuilds with the new record. Cheap — Map.set is O(1).
+    if (this.depositsByUser) {
+      const arr = this.depositsByUser.get(record.userId);
+      if (arr) arr.push(record);
+      else this.depositsByUser.set(record.userId, [record]);
+    }
     // R4-FG-21 (round-4 high): enforce in-memory MAX_RECORDS so warm
     // Lambdas don't accumulate 6+ months of writes (~120MB+ for plays
     // alone) and trip Upstash 4MB request-body limit on cold-start
@@ -616,6 +633,10 @@ export class RedisStore implements IStore {
     // over the cap.
     if (this.deposits.length > MAX_RECORDS) {
       this.deposits.splice(0, this.deposits.length - MAX_RECORDS);
+      // Map can drift slightly past MAX_RECORDS (we don't proactively
+      // remove the oldest from the per-user index), but `getAll` is
+      // the source of truth and the slack is bounded by call frequency.
+      this.depositsByUser = null; // trigger rebuild on next access
     }
 
     const pipeline = this.redis.pipeline();
@@ -626,7 +647,16 @@ export class RedisStore implements IStore {
   }
 
   getDepositsForUser(userId: string): DepositRecord[] {
-    return this.deposits.filter((d) => d.userId === userId);
+    // R5-FG-109: lazy-build the per-user index on first access.
+    if (!this.depositsByUser) {
+      this.depositsByUser = new Map();
+      for (const d of this.deposits) {
+        const arr = this.depositsByUser.get(d.userId);
+        if (arr) arr.push(d);
+        else this.depositsByUser.set(d.userId, [d]);
+      }
+    }
+    return this.depositsByUser.get(userId) ?? [];
   }
 
   /**
@@ -654,8 +684,15 @@ export class RedisStore implements IStore {
   recordPlaySession(record: PlaySessionResult): void {
     record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.plays.push(record);
+    // R5-FG-109: keep per-user index in sync.
+    if (this.playsByUser) {
+      const arr = this.playsByUser.get(record.userId);
+      if (arr) arr.push(record);
+      else this.playsByUser.set(record.userId, [record]);
+    }
     if (this.plays.length > MAX_RECORDS) {
       this.plays.splice(0, this.plays.length - MAX_RECORDS);
+      this.playsByUser = null; // trigger rebuild on next access
     }
 
     const pipeline = this.redis.pipeline();
@@ -665,7 +702,16 @@ export class RedisStore implements IStore {
   }
 
   getPlaySessionsForUser(userId: string): PlaySessionResult[] {
-    return this.plays.filter((p) => p.userId === userId);
+    // R5-FG-109: lazy-build the per-user index on first access.
+    if (!this.playsByUser) {
+      this.playsByUser = new Map();
+      for (const p of this.plays) {
+        const arr = this.playsByUser.get(p.userId);
+        if (arr) arr.push(p);
+        else this.playsByUser.set(p.userId, [p]);
+      }
+    }
+    return this.playsByUser.get(userId) ?? [];
   }
 
   // ── Withdrawals ──────────────────────────────────────────────

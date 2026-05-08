@@ -384,9 +384,33 @@ export async function drainPendingLedgerAdjustments(
         return b;
       });
       // R4-FG-13: apply rake reversal in the periodic drain path too.
+      // R5-FG-96 (P3-014): cross-check the queued rakeAmount against
+      // the deposit record's current rakeAmount. The two should match
+      // (the queue snapshot was built from the same DepositRecord),
+      // but operator-side migrations or hand-edits could drift the
+      // values; if they differ we use the deposit record's value
+      // (canonical) and log a warning.
       if (entry.rakeReversal && entry.rakeReversal.amount > 0) {
         const rakeKey = entry.rakeReversal.tokenKey;
-        const rakeAmt = entry.rakeReversal.amount;
+        let rakeAmt = entry.rakeReversal.amount;
+        if (store.getDepositByTxId) {
+          try {
+            const dep = await store.getDepositByTxId(entry.sourceTx);
+            if (dep && typeof dep.rakeAmount === 'number' && dep.rakeAmount !== rakeAmt) {
+              logger.warn('pending ledger rake amount drifted from deposit record', {
+                component: 'PendingLedger',
+                event: 'pending_ledger_rake_drift',
+                userId: entry.userId,
+                sourceTx: entry.sourceTx,
+                queuedAmount: rakeAmt,
+                depositRecordAmount: dep.rakeAmount,
+              });
+              rakeAmt = dep.rakeAmount;
+            }
+          } catch {
+            /* deposit record lookup is advisory; proceed with queued amount */
+          }
+        }
         store.updateOperator((op) => ({
           ...op,
           balances: {

@@ -77,14 +77,19 @@ async function fetchTopicMessages(topicId: string, network: string): Promise<Raw
   return messages;
 }
 
-function buildOnChainSnapshot(messages: RawTopicMessage[]): OnChainSnapshot {
+async function buildOnChainSnapshot(messages: RawTopicMessage[]): Promise<OnChainSnapshot> {
+  // R5-FG-98 (R4-FG-73 deferral): use parseAuditTopic events instead
+  // of raw `op:'mint'` filter. Pre-fix the strict op-filter ignored
+  // any future schema where deposits land under a different op name
+  // (e.g. an HCS-20 v3 batch-mint or aggregated event). Routing
+  // through parseAuditTopic future-proofs the script against
+  // wire-format evolution.
+  const { parseAuditTopic } = await import('../custodial/hcs20-reader.js');
+  const result = await parseAuditTopic(messages);
   const perAccount = new Map<string, number>();
-  for (const m of messages) {
-    if (m.payload.op !== 'mint') continue;
-    const to = String(m.payload.to ?? '');
-    const amt = Number(m.payload.amt);
-    if (!to || !Number.isFinite(amt)) continue;
-    perAccount.set(to, (perAccount.get(to) ?? 0) + amt);
+  for (const ev of result.events) {
+    if (ev.type !== 'deposit') continue;
+    perAccount.set(ev.user, (perAccount.get(ev.user) ?? 0) + ev.amount);
   }
   return { perAccount };
 }
@@ -107,7 +112,7 @@ async function main() {
   // Phase 1: pull on-chain mints from the topic
   console.log('[1/3] Walking HCS-20 topic for mint ops...');
   const messages = await fetchTopicMessages(topicId, network);
-  const onChain = buildOnChainSnapshot(messages);
+  const onChain = await buildOnChainSnapshot(messages);
   let onChainTotal = 0;
   for (const v of onChain.perAccount.values()) onChainTotal += v;
   console.log(`      ${messages.length} messages, ${onChain.perAccount.size} unique mint recipients, ${onChainTotal.toFixed(4)} total HBAR-equiv minted`);

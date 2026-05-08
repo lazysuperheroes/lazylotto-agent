@@ -53,6 +53,18 @@ export interface EscalateUncertainDlInput {
 /** R3-FG-48: skip the page if we've already escalated this txId in the last 6h. */
 const ESCALATION_DEDUP_TTL_SEC = 6 * 60 * 60;
 
+/**
+ * R5-FG-97 (P3-015): per-Lambda local-process suppression for the
+ * fail-open path. Pre-fix: when Redis dedup throws, the catch logs
+ * "paging anyway" and fires the webhook — but a sustained Redis
+ * outage would let the same Lambda warm-handler page repeatedly
+ * for the same incident on every retry. Now: keep a Map of
+ * `(kind:txId:fingerprint) → expiresAtMs`; suppress within 5 min
+ * on the same Lambda even when Redis is down.
+ */
+const LOCAL_ESCALATION_SUPPRESSION_MS = 5 * 60 * 1000;
+const localEscalationLog = new Map<string, number>();
+
 export async function escalateUncertainDlFailure(
   input: EscalateUncertainDlInput,
 ): Promise<void> {
@@ -116,6 +128,30 @@ export async function escalateUncertainDlFailure(
     // Redis unavailable — fail open and page anyway. Better duplicate
     // pages than silent loss when the alerting backbone is the only
     // way the operator sees the issue.
+    //
+    // R5-FG-97 (P3-015): per-Lambda Map suppression for 5min on
+    // this same key so a sustained Redis outage doesn't cause the
+    // same warm Lambda to fire repeated webhook calls for the same
+    // incident.
+    const localKey = `${input.kind}:${input.uncertainTxId}:${causeFingerprint}`;
+    const nowMs = Date.now();
+    const suppressUntil = localEscalationLog.get(localKey);
+    if (suppressUntil !== undefined && suppressUntil > nowMs) {
+      logger.warn('escalateUncertainDlFailure: dedup down, but local-Lambda suppression still active', {
+        component: 'Escalation',
+        kind: input.kind,
+        suppressedForMs: suppressUntil - nowMs,
+      });
+      return;
+    }
+    localEscalationLog.set(localKey, nowMs + LOCAL_ESCALATION_SUPPRESSION_MS);
+    // Light GC: drop entries that have already expired so the Map
+    // doesn't grow unbounded across a long-lived warm Lambda.
+    if (localEscalationLog.size > 1000) {
+      for (const [k, v] of localEscalationLog) {
+        if (v <= nowMs) localEscalationLog.delete(k);
+      }
+    }
     logger.warn('escalateUncertainDlFailure: dedup check failed; paging anyway', {
       component: 'Escalation',
       error: e instanceof Error ? e.message : String(e),

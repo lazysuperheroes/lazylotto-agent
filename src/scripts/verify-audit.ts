@@ -280,7 +280,25 @@ async function main() {
   const allMessages: RawTopicMessage[] = [];
   let nextPath: string | null = `/topics/${args.topic}/messages?limit=100&order=asc`;
   let pageCount = 0;
+  // R5-FG-108 (P11-014): wall-clock budget separate from per-page
+  // timeout. Pre-fix 8s timeout × 1000 pages = 133 minutes worst
+  // case; operator running with no progress signal waited an
+  // unbounded time. Now: hard cap at 5 minutes; on overrun, return
+  // partial data with a clear warning so the operator can re-run
+  // with a tighter time window.
+  const WALL_CLOCK_BUDGET_MS = 5 * 60 * 1000;
+  const startMs = Date.now();
+  let partial = false;
   while (nextPath) {
+    if (Date.now() - startMs > WALL_CLOCK_BUDGET_MS) {
+      console.warn(
+        `\n  ⚠ Wall-clock budget exhausted (${WALL_CLOCK_BUDGET_MS / 1000}s) ` +
+          `after ${pageCount} pages, ${allMessages.length} messages. ` +
+          `Returning partial data — re-run with a narrower topic window for full coverage.\n`,
+      );
+      partial = true;
+      break;
+    }
     const url = nextPath.startsWith('/api/v1')
       ? `${mirrorBase.replace(/\/api\/v1$/, '')}${nextPath}`
       : `${mirrorBase}${nextPath}`;
@@ -297,9 +315,14 @@ async function main() {
     for (const m of data.messages ?? []) {
       try {
         const payload = JSON.parse(Buffer.from(m.message, 'base64').toString('utf-8'));
+        // R5-FG-85: preserve sub-second precision.
+        const tsParts = m.consensus_timestamp.split('.');
+        const ms =
+          Number(tsParts[0] ?? 0) * 1000 +
+          Math.floor(Number(tsParts[1] ?? 0) / 1_000_000);
         allMessages.push({
           sequence: m.sequence_number,
-          timestamp: new Date(Number(m.consensus_timestamp.split('.')[0]) * 1000).toISOString(),
+          timestamp: new Date(ms).toISOString(),
           payload,
         });
       } catch {
@@ -311,7 +334,10 @@ async function main() {
   }
 
   if (!args.json) {
-    console.log(`[1/3] Pulled ${allMessages.length} messages from ${pageCount} page(s)`);
+    console.log(
+      `[1/3] Pulled ${allMessages.length} messages from ${pageCount} page(s)` +
+        (partial ? ' (PARTIAL)' : ''),
+    );
   }
 
   // Run the reader
@@ -881,13 +907,35 @@ async function main() {
     ...burnTxIds.map((b) => b.withdrawTxId),
   ];
   if (allCrossCheckTxIds.length > 0) {
+    // R5-FG-101 (R4-FG-83 deferral): process in chunks of 500 so the
+    // MirrorTxCache's pending-promise Map doesn't grow unbounded for
+    // a topic with 100K+ txIds. Pre-fix `warmMany(allCrossCheckTxIds)`
+    // queued every promise simultaneously; the cache held all of
+    // them until the script exited.
+    // R5-FG-105 (P11-008): batch size bumped to 25 with a per-batch
+    // 50ms throttle. Pre-fix batches of 10 sequentially yielded ~30s
+    // for a 1000-tx topic; batches of 25 with throttle is ~3× faster
+    // while staying well under mirror node 100req/s caps.
     if (!args.json) {
       console.log(
         `[2.5/3] Cross-checking ${depositTxIds.length} mint(s) + ${burnTxIds.length} burn(s) ` +
-          `(${new Set(allCrossCheckTxIds).size} unique tx) against mirror in batches of 10...`,
+          `(${new Set(allCrossCheckTxIds).size} unique tx) against mirror in chunks of 500 × batches of 25...`,
       );
     }
-    await txCache.warmMany(allCrossCheckTxIds, 10);
+    const CHUNK_SIZE = 500;
+    const BATCH_SIZE = 25;
+    const BATCH_THROTTLE_MS = 50;
+    for (let i = 0; i < allCrossCheckTxIds.length; i += CHUNK_SIZE) {
+      const chunk = allCrossCheckTxIds.slice(i, i + CHUNK_SIZE);
+      await txCache.warmMany(chunk, BATCH_SIZE);
+      // Drop cached promises after each chunk so the Map doesn't grow.
+      // The MirrorTxCache.fetch loop below re-fetches per-tx; warmMany
+      // already populated the resolved-value cache, which the loop
+      // hits without re-issuing network calls.
+      if (BATCH_THROTTLE_MS > 0 && i + CHUNK_SIZE < allCrossCheckTxIds.length) {
+        await new Promise((r) => setTimeout(r, BATCH_THROTTLE_MS));
+      }
+    }
 
     for (const dep of depositTxIds) {
       const tx = await txCache.fetch(dep.depositTxId);

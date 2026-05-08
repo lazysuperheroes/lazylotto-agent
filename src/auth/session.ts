@@ -27,6 +27,17 @@ function generateToken(): string {
 /**
  * Create a new session for an authenticated account.
  */
+/**
+ * Create a fresh session token.
+ *
+ * R5-FG-103 (P10-TIME-001): the returned `expiresAt` is computed
+ * from the LAMBDA's local clock at creation time. Lambda clocks
+ * have ~1ms drift but can drift further across availability zones.
+ * For session validity, the AUTHORITATIVE signal is the Redis
+ * `EX` TTL — `expiresAt` is advisory only (used by the dashboard
+ * countdown UI). Never use `expiresAt < Date.now()` as a
+ * server-side gate; rely on Redis returning null on `get` instead.
+ */
 export async function createSession(
   accountId: string,
   tier: AuthTier,

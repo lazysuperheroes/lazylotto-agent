@@ -45,6 +45,15 @@ interface CliArgs {
   userAccountId: string;
   execute: boolean;
   reason: string;
+  /**
+   * R5-FG-99 (P10-CLI-001 sub): gate the per-prize breakdown
+   * behind --verbose. Pre-fix the script printed
+   * `agentState.pendingPrizes` unconditionally — for an account
+   * with hundreds of pending NFTs this blew the terminal scrollback
+   * and slowed the script. The summary by-token totals + NFT count
+   * are still printed; --verbose shows the full per-prize listing.
+   */
+  verbose: boolean;
 }
 
 function parseArgs(): CliArgs {
@@ -58,6 +67,7 @@ function parseArgs(): CliArgs {
 
   const userAccountId = args[0]!;
   const execute = args.includes('--execute');
+  const verbose = args.includes('--verbose');
   const reasonIdx = args.indexOf('--reason');
   const reason = reasonIdx >= 0 && args[reasonIdx + 1] ? args[reasonIdx + 1]! : 'manual recovery via script';
 
@@ -66,11 +76,11 @@ function parseArgs(): CliArgs {
     process.exit(1);
   }
 
-  return { userAccountId, execute, reason };
+  return { userAccountId, execute, reason, verbose };
 }
 
 async function main() {
-  const { userAccountId, execute, reason } = parseArgs();
+  const { userAccountId, execute, reason, verbose } = parseArgs();
 
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('  LazyLotto Stuck Prize Recovery');
@@ -114,6 +124,14 @@ async function main() {
   }
   if (nftCount > 0) {
     console.log(`        - ${nftCount} NFT(s)`);
+  }
+  // R5-FG-99: per-prize detail only when --verbose is passed.
+  if (verbose) {
+    console.log('      Verbose per-prize breakdown:');
+    for (let i = 0; i < agentState.pendingPrizes.length; i++) {
+      const p = agentState.pendingPrizes[i]!;
+      console.log(`        [${i}] fungible=${JSON.stringify(p.fungiblePrize ?? null)} nfts=${JSON.stringify(p.nfts)}`);
+    }
   }
 
   // ── Step 2: also check what the user currently has (sanity) ─

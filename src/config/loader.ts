@@ -60,16 +60,39 @@ const INLINE_STRATEGIES: Record<string, unknown> = {
 export function loadStrategy(name: string): Strategy {
   if (BUILT_IN.includes(name)) {
     // Try filesystem first (CLI / local dev)
+    const path = resolve(__dirname, '..', '..', 'strategies', `${name}.json`);
+    let fileExists = false;
     try {
-      const path = resolve(__dirname, '..', '..', 'strategies', `${name}.json`);
-      const raw = JSON.parse(readFileSync(path, 'utf-8'));
-      return resolveTokenAliases(StrategySchema.parse(raw));
+      const fileRaw = readFileSync(path, 'utf-8');
+      fileExists = true;
+      try {
+        const parsed = JSON.parse(fileRaw);
+        return resolveTokenAliases(StrategySchema.parse(parsed));
+      } catch (parseErr) {
+        // R5-FG-100 (R4-FG-76 deferral): parse failure on a built-in
+        // file should NOT silently fall through to inline. Pre-fix
+        // R4-FG-76 deferred this; the bug was that an operator
+        // editing strategies/balanced.json with a typo (or a future
+        // schema bump that the inline copy is ahead of) saw the
+        // inline copy's behavior instead of their edits, with no
+        // warning. Now: warn loudly so the fall-through to inline
+        // is visible.
+        console.warn(
+          `[loadStrategy] WARNING: strategies/${name}.json EXISTS but failed to parse: ` +
+            `${parseErr instanceof Error ? parseErr.message : String(parseErr)}. ` +
+            `Falling back to inlined strategy. Operator edits to the file will be IGNORED ` +
+            `until the parse error is fixed.`,
+        );
+      }
     } catch {
-      // Fallback to inlined strategy (serverless)
-      const raw = INLINE_STRATEGIES[name];
-      if (raw) return resolveTokenAliases(StrategySchema.parse(raw));
-      throw new Error(`Built-in strategy "${name}" not found on filesystem or inline`);
+      // ENOENT / read-failure — silent fall-through to inline (this
+      // is the serverless path; the file doesn't exist on Vercel).
+      void fileExists;
     }
+    // Fallback to inlined strategy (serverless OR malformed file)
+    const raw = INLINE_STRATEGIES[name];
+    if (raw) return resolveTokenAliases(StrategySchema.parse(raw));
+    throw new Error(`Built-in strategy "${name}" not found on filesystem or inline`);
   }
 
   // R4-FG-71 (round-4 low): refuse path-shaped names with traversal

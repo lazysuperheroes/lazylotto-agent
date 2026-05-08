@@ -59,6 +59,68 @@ interface AccountingConfig {
  * all record methods are safe no-ops so the agent can run in development
  * without on-chain accounting.
  */
+
+/**
+ * R5-FG-102 (P4-012) + R5-FG-110 (P11-011): pure transformation
+ * that slims a PlayPoolResultMessage to fit under the HCS 1024-byte
+ * topic ceiling. Steps in priority order:
+ *   1. Drop strategyMeta (info-only, not load-bearing).
+ *   2. Truncate prize `sym` strings to 8 chars (display metadata
+ *      already excluded from canonical Merkle hash by R5-FG-1).
+ *   3. R5-FG-110: cap prizes[] count to top-10 by descending
+ *      fungible amount (NFT prizes ranked by serial-count proxy).
+ *      Stamp `slim_truncated_prizes:<dropped-count>` so the reader
+ *      can flag the truncation. Worst-case multi-NFT pools (50+
+ *      pieces) still fit.
+ *   4. Stamp `slim:1` so a topic-only auditor sees the message
+ *      was slimmed (verify-audit downgrades trust accordingly).
+ *
+ * Returns the original message unchanged when it already fits.
+ */
+export function slimPoolResult(
+  msg: PlayPoolResultMessage,
+  byteCap: number,
+): PlayPoolResultMessage {
+  if (Buffer.byteLength(JSON.stringify(msg), 'utf-8') <= byteCap) return msg;
+  // Step 1: drop strategyMeta.
+  let slim: PlayPoolResultMessage = (() => {
+    const { strategyMeta: _s, ...rest } = msg as PlayPoolResultMessage & { strategyMeta?: unknown };
+    return rest as PlayPoolResultMessage;
+  })();
+  // Step 2: truncate sym fields.
+  if (Buffer.byteLength(JSON.stringify(slim), 'utf-8') > byteCap) {
+    slim = {
+      ...slim,
+      prizes: slim.prizes.map((p) => ({
+        ...p,
+        ...((p as { sym?: string }).sym
+          ? { sym: ((p as { sym?: string }).sym as string).slice(0, 8) }
+          : {}),
+      })),
+    };
+  }
+  // Step 3: cap prize count if still too big.
+  if (Buffer.byteLength(JSON.stringify(slim), 'utf-8') > byteCap) {
+    const TOP_N = 10;
+    const sorted = [...slim.prizes].sort((a, b) => {
+      const aRank = a.t === 'ft' ? a.amt : (a.ser?.length ?? 0);
+      const bRank = b.t === 'ft' ? b.amt : (b.ser?.length ?? 0);
+      return bRank - aRank;
+    });
+    const kept = sorted.slice(0, TOP_N);
+    const dropped = slim.prizes.length - kept.length;
+    slim = {
+      ...slim,
+      prizes: kept,
+      ...(dropped > 0
+        ? ({ slim_truncated_prizes: dropped } as Record<string, number>)
+        : {}),
+    };
+  }
+  // Step 4: tag.
+  return { ...slim, slim: 1 } as PlayPoolResultMessage;
+}
+
 export class AccountingService {
   private readonly client: Client;
   private readonly tick: string;
@@ -876,38 +938,15 @@ export class AccountingService {
       ts: new Date().toISOString(),
     };
 
-    // R3-FG-46 (round-3 P10-HCS-001): pre-flight size check. Multi-NFT
-    // pools with UTF-8 multibyte symbols (Japanese title, accented
-    // chars) can blow past the 1024-byte HCS topic ceiling. Pre-fix
-    // the submit threw inside `enforceTopicMessageSizeLimit`, the play
-    // loop's catch aborted the session, and the reader marked it
-    // `corrupt`. Now: if oversized, emit a slimmed fallback that drops
-    // strategyMeta and truncates prize symbols. Always preserves the
-    // load-bearing fields (sessionId, agentSeq, poolId, spent, wins,
-    // prize amounts/types) so verify-audit can still reconstruct.
-    const fullSize = Buffer.byteLength(JSON.stringify(message), 'utf-8');
-    if (fullSize > 900) {
-      // Drop strategyMeta first (info-only).
-      const { strategyMeta: _strat, ...slim } = message;
-      message = slim as PlayPoolResultMessage;
-      // If still too big, truncate prize symbols.
-      if (Buffer.byteLength(JSON.stringify(message), 'utf-8') > 900) {
-        message = {
-          ...message,
-          prizes: message.prizes.map((p) => ({
-            ...p,
-            ...((p as { sym?: string }).sym
-              ? { sym: ((p as { sym?: string }).sym as string).slice(0, 8) }
-              : {}),
-          })),
-        };
-      }
-      // R4-FG-69 (round-4 low): tag the slimmed payload so a
-      // topic-only auditor can distinguish full vs slim messages
-      // and flag investigative attention to slimmed ones (load-bearing
-      // fields are present; the decision metadata isn't).
-      message = { ...message, slim: 1 };
-    }
+    // R3-FG-46 (round-3 P10-HCS-001): pre-flight size check + slim
+    // fallback. Multi-NFT pools with UTF-8 multibyte symbols can
+    // blow past the 1024-byte HCS topic ceiling.
+    // R5-FG-102 (P4-012): the slim transformation is now extracted
+    // into a pure helper for testability + so the `slim:1` tag and
+    // the truncation steps are isolated from the side-effecting
+    // submit. R5-FG-110 (P11-011) caps prizes[] count for worst-case
+    // multi-NFT pools.
+    message = slimPoolResult(message, 900);
     await this.submitV2Message(message);
   }
 

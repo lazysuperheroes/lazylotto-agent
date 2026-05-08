@@ -345,6 +345,11 @@ function startLockHeartbeat(
   const schedule = (): void => {
     if (cancelled) return;
     timerHandle = setTimeout(() => void tick(), intervalMs);
+    // R5-FG-104 (P11-012): unref the timer so a forgotten heartbeat
+    // doesn't keep the Node event loop alive in CLI processes.
+    // Vercel Lambdas freeze the event loop on response anyway —
+    // unref is mainly a CLI/dev-process hygiene fix.
+    timerHandle.unref?.();
   };
   const tick = async (): Promise<void> => {
     if (cancelled) return;
