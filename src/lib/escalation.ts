@@ -26,7 +26,11 @@ export interface EscalateUncertainDlInput {
     /** R3-FG-7: refundedOriginals SADD failed after on-chain refund + claim overwrite. */
     | 'refunded_originals_sadd_failed'
     /** R3-FG-17: in-band audit-write failure — withdrawal, operator-fee, strategy. */
-    | 'audit_trail_orphaned';
+    | 'audit_trail_orphaned'
+    /** R4-FG-5: HCS-20 recordDeposit anchor failed after local-store credit landed. */
+    | 'deposit_anchor_failed'
+    /** R4-FG-5: HCS-20 recordRake anchor failed after operator-rake credit landed. */
+    | 'rake_anchor_failed';
   /** The submitted on-chain tx whose status is unknown. */
   uncertainTxId: string;
   /** Affected userId (omit for operator-fee). */
@@ -44,20 +48,43 @@ export async function escalateUncertainDlFailure(
   const url = process.env.RECONCILE_FAILURE_WEBHOOK_URL;
   if (!url) return;
 
+  const rawCauseMsg =
+    input.cause instanceof Error
+      ? input.cause.message
+      : String(input.cause);
+
   // R3-FG-48 (round-3 P10-ESC-001): dedup escalations by txId+kind so
   // a stuck dead-letter doesn't re-page every reconcile pass (24+
   // identical pages per day → operator alert fatigue → real pages
   // get ignored). SET-NX-EX with 6h TTL — first caller wins; sibling
   // callers within the window are no-ops.
+  //
+  // R4-FG-64 (round-4 medium): the dedup key now includes a
+  // cause-class fingerprint. Pre-fix the key was just `kind:txId` and
+  // a single `uncertainTxId` legitimately hitting MULTIPLE distinct
+  // escalation reasons within 6h (malformed-DL → user-lock contention
+  // → SADD failure — all collapse into `kind='audit_trail_orphaned'`)
+  // would only fire ONCE; the second and third pages were silently
+  // suppressed. Including a cause-class hash separates them.
+  // Fingerprint is the error class name + first-token of message so a
+  // single bug doesn't fan out into N pages but two distinct causes
+  // get two pages.
+  const causeClass = input.cause instanceof Error
+    ? input.cause.name
+    : typeof input.cause;
+  // Take just the first whitespace-delimited token of the cause message
+  // (typically the error code or first word); avoids the hash drifting
+  // across runs when the message includes timestamps or random ids.
+  const causeFingerprint = `${causeClass}:${rawCauseMsg.split(/\s+/, 1)[0] ?? ''}`.slice(0, 64);
   try {
     const redis = await getRedis();
-    const dedupKey = `${KEY_PREFIX.escalated}${input.kind}:${input.uncertainTxId}`;
+    const dedupKey = `${KEY_PREFIX.escalated}${input.kind}:${input.uncertainTxId}:${causeFingerprint}`;
     const claimed = await redis.set(dedupKey, '1', {
       nx: true,
       ex: ESCALATION_DEDUP_TTL_SEC,
     });
     if (claimed === null) {
-      // Already escalated within the window.
+      // Already escalated within the window for this same cause class.
       return;
     }
   } catch (e) {
@@ -69,11 +96,6 @@ export async function escalateUncertainDlFailure(
       error: e instanceof Error ? e.message : String(e),
     });
   }
-
-  const rawCauseMsg =
-    input.cause instanceof Error
-      ? input.cause.message
-      : String(input.cause);
 
   // F5 (2026-05-06 audit I-13): neutralize Discord-style group
   // mentions in the cause message. Discord webhooks accept

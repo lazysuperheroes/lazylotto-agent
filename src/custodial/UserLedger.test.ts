@@ -287,6 +287,52 @@ describe('UserLedger', () => {
     assert.equal(failingStore.isTransactionProcessed('tx-no-rollback'), true);
   });
 
+  // revert-proof: R4-FG-5 — `audit_trail_orphaned` upsert in
+  // UserLedger.creditDeposit's recordDeposit-anchor catch block at
+  // src/custodial/UserLedger.ts:168-201. Pre-fix the catch was
+  // `console.warn` + continue, so a failed HCS-20 anchor left the
+  // audit topic without a paired credit op while the local-store
+  // credit was already live → topic-only readers / external auditors
+  // would conclude the user never deposited. Reverting the new
+  // upsertDeadLetter call would let this test see no dead-letter row.
+  it('R4-FG-5: HCS-20 recordDeposit anchor failure produces audit_trail_orphaned dead-letter', async () => {
+    const users = new Map<string, UserAccount>();
+    const user = makeUser({
+      balances: { tokens: { hbar: { available: 100, reserved: 0, totalDeposited: 0, totalWithdrawn: 0, totalRake: 0 } } },
+    });
+    users.set(user.userId, user);
+
+    const failingStore = createMockStore({ users });
+    const upsertCalls: Array<{ transactionId: string; kind?: string; details?: unknown }> = [];
+    (failingStore as unknown as { upsertDeadLetter: (e: unknown) => Promise<void> }).upsertDeadLetter =
+      async (entry: unknown) => {
+        const e = entry as { transactionId: string; kind?: string; details?: unknown };
+        upsertCalls.push({ transactionId: e.transactionId, kind: e.kind, details: e.details });
+      };
+
+    const failingAccounting = createMockAccounting();
+    failingAccounting.recordDeposit = async () => {
+      throw new Error('synthetic HCS-20 recordDeposit failure');
+    };
+    const failingLedger = new UserLedger(failingStore, failingAccounting, AGENT_ACCOUNT);
+
+    // creditDeposit must NOT throw — local credit landed, this is a
+    // recoverable out-of-band repair (replay-deposit endpoint).
+    const balances = await failingLedger.creditDeposit('user-1', 100, 'tx-anchor-fail', 1, 'hbar');
+    assert.equal(balances.tokens.hbar.available, 199, 'local credit must still land despite anchor failure');
+
+    // Acid test: dead-letter row exists with the audit-orphan key.
+    const orphan = upsertCalls.find(
+      (c) =>
+        c.transactionId === 'audit-orphan:in-band:deposit-anchor:tx-anchor-fail' &&
+        c.kind === 'audit_trail_orphaned',
+    );
+    assert.ok(
+      orphan,
+      'R4-FG-5 fix missing: recordDeposit anchor failure did not produce an audit_trail_orphaned dead-letter — topic-only auditors will not see this deposit',
+    );
+  });
+
   // -- reserve ----------------------------------------------------------------
 
   it('reserve moves available to reserved', () => {

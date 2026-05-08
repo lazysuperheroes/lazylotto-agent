@@ -266,6 +266,110 @@ describe('R2-FG-2: processRefund permanent refunded-originals SADD set', () => {
 
     await redis.del(`${KEY_PREFIX.refunded}tx-malformed-claim`);
   });
+
+  // revert-proof: R4-FG-3 — `srem(refundedOriginals, transactionId)` in
+  // the catch block at refund.ts:660-680 (Regimes A + B). Pre-fix the
+  // catch DEL'd only the per-tx claim while the permanent SADD set
+  // retained the txId → permanent ban after a Regime-A pre-submit
+  // failure (e.g. InsufficientPayerBalance, signature error). Reverting
+  // the SREM call lets this test see the txId still in the SADD set
+  // post-failure → assertion fails.
+  it('R4-FG-3: Regime-A pre-submit failure SREMs from refundedOriginals (no permanent ban)', async () => {
+    const fakeClient = {
+      // Calling fake's submit primitives will throw before producing a
+      // response — that's our Regime A trigger.
+      operatorAccountId: { toString: () => '0.0.9999' },
+    } as unknown as import('@hashgraph/sdk').Client;
+
+    // Stub mirror fetch to return a valid HBAR-deposit tx so refund.ts
+    // gets past the mirror-cross-check, into the SADD-then-submit
+    // sequence. The submit then throws (fakeClient cannot execute).
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input);
+      if (url.includes('/transactions/tx-regime-a')) {
+        return new Response(
+          JSON.stringify({
+            transactions: [
+              {
+                transfers: [
+                  { account: '0.0.9999', amount: 1_000_000_000 },
+                  { account: '0.0.5555', amount: -1_000_000_000 },
+                ],
+                token_transfers: [],
+                result: 'SUCCESS',
+                memo_base64: Buffer.from('m').toString('base64'),
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    };
+
+    const fakeStore = {
+      async isDepositCredited(): Promise<boolean> { return true; },
+      async getDepositByTxId() {
+        return {
+          transactionId: 'tx-regime-a',
+          userId: 'u-regime-a',
+          grossAmount: 10,
+          rakeAmount: 0,
+          netAmount: 10,
+          tokenId: null,
+          memo: 'm',
+          timestamp: '2026-05-01T00:00:00Z',
+        };
+      },
+      getUser(userId: string) {
+        if (userId !== 'u-regime-a') return undefined;
+        return {
+          userId: 'u-regime-a',
+          balances: {
+            tokens: {
+              hbar: { available: 10, reserved: 0, totalDeposited: 10, totalWithdrawn: 0, totalRake: 0 },
+            },
+          },
+        };
+      },
+    };
+
+    const { getRedis, KEY_PREFIX } = await import('../auth/redis.js');
+    const redis = await getRedis();
+    // Make sure the SADD set is empty for this txId before the run.
+    await redis.srem(KEY_PREFIX.refundedOriginals, 'tx-regime-a');
+    const before = await redis.sismember(KEY_PREFIX.refundedOriginals, 'tx-regime-a');
+    assert.equal(before, 0, 'pre-condition: txId not in refundedOriginals');
+
+    try {
+      const { processRefund } = await import('./refund.js');
+      await assert.rejects(
+        () =>
+          processRefund(fakeClient, 'tx-regime-a', {
+            store: fakeStore as never,
+            skipMirrorCrossCheck: true,
+          }),
+        // The fake client throws somewhere in submitHbarTransfer;
+        // we don't pin the message because it depends on SDK internals.
+      );
+
+      // After the throw bubbles up, the catch block in refund.ts must
+      // have SREM'd the txId back out of the permanent ban set so the
+      // operator can retry once the underlying issue is resolved.
+      const after = await redis.sismember(KEY_PREFIX.refundedOriginals, 'tx-regime-a');
+      assert.equal(
+        after,
+        0,
+        'R4-FG-3 fix missing: pre-submit SADD lingered in refundedOriginals after Regime-A failure — permanently bans this txId from any future refund',
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      // Clean up so other tests see a fresh slate.
+      await redis.srem(KEY_PREFIX.refundedOriginals, 'tx-regime-a');
+      await redis.del(`${KEY_PREFIX.refunded}tx-regime-a`);
+    }
+  });
 });
 
 describe('R2-FG-0 / F11: processRefund refuses tx without a recorded DepositRecord', () => {
@@ -1269,6 +1373,129 @@ describe('verifyUncertainRefunds dispatch', () => {
       assert.equal(outcomes[0]!.status, 'confirmed');
       assert.equal(updateBalanceCalls, 0, 'pre-marked ledgerAdjustedAt must skip debit');
     } finally {
+      teardown();
+    }
+  });
+
+  // revert-proof: R4-FG-4 — verifier SUCCESS-branch SADD failure must
+  // write `audit_trail_orphaned` AND escalate, mirroring the in-flight
+  // processRefund block at refund.ts:906-953. Pre-fix the verifier
+  // path silently logged + continued (refund.ts:1494-1503), leaving
+  // an invisible 30-day duplicate-refund window after claim TTL.
+  // Reverting the audit_trail_orphaned upsert in
+  // refund.ts:1505-1521 makes this test fail (no
+  // `audit-orphan:refund-verifier-sadd:` row).
+  it('R4-FG-4: verifier SADD failure escalates via audit_trail_orphaned dead-letter', async () => {
+    installMirror(new Map([['refund-tx-sadd-fail', { status: 200, result: 'SUCCESS' }]]));
+    const { state } = installRedis();
+    state.set('lla:testnet:refunded:original-tx-sadd-fail', 'pending');
+
+    // Hijack the in-memory mock so SADD on `refundedOriginals` throws.
+    const { KEY_PREFIX } = await import('../auth/redis.js');
+    const mock = (globalThis as unknown as {
+      __lazylottoRedisClient__?: { sadd(k: string, m: string): Promise<number> };
+    }).__lazylottoRedisClient__!;
+    const originalSadd = mock.sadd.bind(mock);
+    mock.sadd = async (key, member) => {
+      if (key === KEY_PREFIX.refundedOriginals) {
+        throw new Error('synthetic refundedOriginals SADD failure');
+      }
+      return originalSadd(key, member);
+    };
+
+    const dls: Array<{
+      transactionId: string;
+      timestamp: string;
+      error: string;
+      kind: string;
+      memo?: string;
+      sender?: string;
+      details: Record<string, unknown>;
+      resolvedAt?: string;
+    }> = [
+      {
+        transactionId: 'refund-tx-sadd-fail',
+        timestamp: new Date().toISOString(),
+        error: 'x',
+        kind: 'refund_uncertain' as const,
+        memo: 'memo-sadd-fail',
+        sender: '0.0.user-sender',
+        details: {
+          originalTxId: 'original-tx-sadd-fail',
+          refundTxId: 'refund-tx-sadd-fail',
+          humanAmount: 10,
+          tokenKey: 'hbar',
+          agentAccountId: '0.0.9999',
+          claimKey: 'lla:testnet:refunded:original-tx-sadd-fail',
+        },
+      },
+    ];
+    const upsertCalls: Array<{ transactionId: string; kind: string }> = [];
+    const store = {
+      async refreshDeadLetters() {},
+      getDeadLetters() { return dls; },
+      async upsertDeadLetter(entry: typeof dls[number]) {
+        upsertCalls.push({ transactionId: entry.transactionId, kind: entry.kind });
+        const idx = dls.findIndex((d) => d.transactionId === entry.transactionId);
+        if (idx >= 0) dls[idx] = entry;
+        else dls.push(entry);
+      },
+      async flush() {},
+      getUserByMemo() {
+        return {
+          userId: 'u-sadd-fail',
+          balances: { tokens: { hbar: { available: 10, reserved: 0 } } },
+        };
+      },
+      async getDepositByTxId() {
+        return {
+          transactionId: 'original-tx-sadd-fail',
+          userId: 'u-sadd-fail',
+          grossAmount: 10,
+          rakeAmount: 0,
+          netAmount: 10,
+          tokenId: null,
+          memo: 'memo-sadd-fail',
+          timestamp: '2026-05-01T00:00:00Z',
+        };
+      },
+      getUser() {
+        return {
+          userId: 'u-sadd-fail',
+          balances: { tokens: { hbar: { available: 10, reserved: 0 } } },
+        };
+      },
+      updateBalance() { return {} as never; },
+      updateOperator() { return {} as never; },
+    };
+
+    try {
+      const { verifyUncertainRefunds } = await import('./refund.js');
+      const accounting = { async recordRefund(): Promise<void> {} };
+      const outcomes = await verifyUncertainRefunds(
+        undefined as unknown as never,
+        store as never,
+        accounting as never,
+      );
+      // The on-chain refund DID succeed; only the SADD-fence write
+      // failed. Outcome should still be confirmed.
+      assert.equal(outcomes[0]!.status, 'confirmed');
+
+      // The acid test: there must be an `audit_trail_orphaned` entry
+      // keyed `audit-orphan:refund-verifier-sadd:<originalTxId>` so
+      // an operator can see that the permanent fence is missing on
+      // this txId before the 30-day claim TTL expires.
+      const orphan = upsertCalls.find(
+        (c) =>
+          c.transactionId === 'audit-orphan:refund-verifier-sadd:original-tx-sadd-fail' &&
+          c.kind === 'audit_trail_orphaned',
+      );
+      assert.ok(
+        orphan,
+        'R4-FG-4 fix missing: verifier SADD failure did not produce an audit_trail_orphaned dead-letter — the duplicate-refund fence is silently absent',
+      );
+    } finally {
+      mock.sadd = originalSadd;
       teardown();
     }
   });

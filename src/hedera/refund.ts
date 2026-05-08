@@ -161,8 +161,19 @@ export async function processRefund(
     // refund entirely if the lock can't be acquired — better to
     // surface the contention than to fire the on-chain refund and
     // race a concurrent in-band op.
+    //
+    // R4-FG-9 (round-4 high): TTL bumped from 60s → 180s. The lock is
+    // held across mirror cross-check (8s timeout) + refundedOriginals
+    // SADD + submit + awaitReceipt (8s ceiling) + ledger debit + rake
+    // reversal + recordRefund HCS submit + claim overwrite + second
+    // SADD. Conservatively 18-25s on happy path; 60s+ on HCS / mirror
+    // congestion. A 60s TTL guaranteed mid-flight expiry on a slow
+    // mainnet day, after which a parallel in-band withdraw/play could
+    // acquire the same lock and race the still-running refund's
+    // mutations. 180s gives the worst-case work window enough headroom
+    // and is still short enough that genuine wedges are visible.
     outerUserLockUserId = depositRecord.userId;
-    outerUserLockToken = await tryAcquireUserLockWithBackoff(outerUserLockUserId, 60);
+    outerUserLockToken = await tryAcquireUserLockWithBackoff(outerUserLockUserId, 180);
     if (!outerUserLockToken) {
       throw new Error(
         `Refund blocked: per-user lock contention for ${outerUserLockUserId} did not ` +
@@ -660,6 +671,31 @@ export async function processRefund(
     // Regimes A + B: pre-submission OR confirmed on-chain failure.
     // Release the claim so the operator can retry once the underlying
     // issue is resolved.
+    //
+    // R4-FG-3 (round-4 critical): SREM the originalTxId from the
+    // permanent `refundedOriginals` ban set. The pre-submit SADD at
+    // line ~553 is correct insurance against the regime-C window;
+    // however, when the submit later fails pre-consensus (Regime A:
+    // InsufficientPayerBalance, signature, etc.) or the consensus
+    // receipt is non-uncertain FAILURE (Regime B: e.g.
+    // InvalidSignature, TokenNotAssociated), no tokens moved — the
+    // permanent ban must be lifted so the legitimate refund can be
+    // retried after the operator addresses the underlying issue.
+    // Pre-fix: any Regime-A failure permanently locked the deposit
+    // out of any future refund (operator burnt out a permanent slot
+    // by trying to fund a refund before the agent had balance).
+    try {
+      const redis = await getRedis();
+      await redis.srem(KEY_PREFIX.refundedOriginals, transactionId);
+    } catch (sremErr) {
+      logger.error('CRITICAL: refundedOriginals SREM failed after pre-transfer error', {
+        component: 'Refund',
+        event: 'refunded_originals_srem_failed',
+        originalTx: transactionId,
+        claimError: err instanceof Error ? err.message : String(err),
+        sremError: sremErr instanceof Error ? sremErr.message : String(sremErr),
+      });
+    }
     if (redisLockKey) {
       try {
         const redis = await getRedis();
@@ -845,13 +881,49 @@ export async function processRefund(
           : {}),
       });
     } catch (auditErr) {
-      logger.warn('refund HCS-20 audit entry failed', {
+      // R4-FG-14 (round-4 high): audit-anchor failure post-on-chain-
+      // refund is not best-effort; topic-only auditors otherwise see
+      // a phantom credit (deposit mint with no paired refund). Write
+      // audit_trail_orphaned + page operator. Pre-fix this was just
+      // a logger.warn.
+      logger.error('CRITICAL: refund HCS-20 audit entry failed — topic missing the refund anchor', {
         component: 'Refund',
         event: 'refund_audit_failed',
         originalTx: transactionId,
         refundTxId: confirmedRefundTxId,
         error: auditErr instanceof Error ? auditErr.message : String(auditErr),
       });
+      if (options?.store) {
+        try {
+          await options.store.upsertDeadLetter({
+            transactionId: `audit-orphan:refund-anchor:${transactionId}`,
+            timestamp: new Date().toISOString(),
+            error: `refund HCS-20 audit anchor failed after on-chain refund: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
+            kind: 'audit_trail_orphaned',
+            details: {
+              sourceKind: 'refund_post_success_orphan',
+              sourceTxId: transactionId,
+              refundTxId: confirmedRefundTxId,
+              phase: 'audit_anchor_failed',
+            },
+          });
+        } catch {
+          /* logged above */
+        }
+      }
+      try {
+        await escalateUncertainDlFailure({
+          kind: 'audit_trail_orphaned',
+          uncertainTxId: transactionId,
+          userId: depositRecord?.userId,
+          cause: auditErr,
+        });
+      } catch (escErr) {
+        logger.error('refund audit-anchor escalation also failed', {
+          component: 'Refund',
+          error: escErr instanceof Error ? escErr.message : String(escErr),
+        });
+      }
     }
   }
 
@@ -871,7 +943,36 @@ export async function processRefund(
       const redis = await getRedis();
       await redis.set(redisLockKey, confirmedRefundTxId, { ex: 30 * 24 * 60 * 60 });
     } catch (e) {
-      console.warn('[Refund] Failed to overwrite refund marker with refundTxId:', e);
+      // R4-FG-14 (round-4 high): claim overwrite failure leaves the
+      // marker at literal 'pending' for 30 days. Operator retries get
+      // a misleading "in progress on another Lambda" error even though
+      // the refund completed. Surface as audit_trail_orphaned so an
+      // operator can manually reset the marker before TTL.
+      logger.error('CRITICAL: refund claim overwrite failed — duplicate-attempt error message will be misleading', {
+        component: 'Refund',
+        event: 'refund_claim_overwrite_failed',
+        originalTx: transactionId,
+        refundTxId: confirmedRefundTxId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      if (options?.store) {
+        try {
+          await options.store.upsertDeadLetter({
+            transactionId: `audit-orphan:refund-claim-overwrite:${transactionId}`,
+            timestamp: new Date().toISOString(),
+            error: `refund claim overwrite failed: ${e instanceof Error ? e.message : String(e)}`,
+            kind: 'audit_trail_orphaned',
+            details: {
+              sourceKind: 'refund_post_success_orphan',
+              sourceTxId: transactionId,
+              refundTxId: confirmedRefundTxId,
+              phase: 'claim_overwrite_failed',
+            },
+          });
+        } catch {
+          /* logged above */
+        }
+      }
     }
   }
   try {
@@ -990,10 +1091,24 @@ export async function verifyUncertainRefunds(
   // Reload the dead-letter list so we don't act on a stale snapshot.
   await store.refreshDeadLetters().catch(() => undefined);
   const all = store.getDeadLetters();
-  const open = all.filter(
+  const allOpen = all.filter(
     (e) => e.kind === 'refund_uncertain' && !e.resolvedAt,
   );
-  if (open.length === 0) return outcomes;
+  if (allOpen.length === 0) return outcomes;
+  // R4-FG-16 (round-4 high): cap entries per pass so reconcile
+  // doesn't blow the 900s top-level lock TTL on backlogged DLs.
+  const MAX_ENTRIES_PER_PASS = 25;
+  const open = allOpen.slice(0, MAX_ENTRIES_PER_PASS);
+  if (allOpen.length > MAX_ENTRIES_PER_PASS) {
+    logger.warn('verifyUncertainRefunds: deferred entries to next pass', {
+      component: 'Refund',
+      event: 'verifier_pass_capped',
+      kind: 'refund_uncertain',
+      total: allOpen.length,
+      capped: MAX_ENTRIES_PER_PASS,
+      deferred: allOpen.length - MAX_ENTRIES_PER_PASS,
+    });
+  }
 
   for (const entry of open) {
     const refundTxId = entry.transactionId;
@@ -1313,9 +1428,24 @@ export async function verifyUncertainRefunds(
           } else {
             // Queue a pending adjustment if locked — same fallback
             // as the in-flight refund path.
+            //
+            // R4-FG-13 (round-4 high): include the rake reversal in
+            // the queued payload so the drain applies BOTH legs.
+            // Pre-fix the queue applied only `available -= amount`
+            // and the operator silently retained the rake — refund
+            // queued = rake-reversal lost.
             const { queuePendingLedgerAdjustment } = await import(
               '../custodial/pendingLedger.js'
             );
+            const rakeForQueue =
+              depositRecordForVerifier.rakeAmount > 0
+                ? {
+                    rakeReversal: {
+                      tokenKey,
+                      amount: depositRecordForVerifier.rakeAmount,
+                    },
+                  }
+                : {};
             await queuePendingLedgerAdjustment({
               userId: user.userId,
               tokenKey,
@@ -1323,8 +1453,14 @@ export async function verifyUncertainRefunds(
               reason: 'refund',
               sourceTx: originalTxId,
               createdAt: new Date().toISOString(),
+              ...rakeForQueue,
             });
             didAdjustLedger = true;
+            // R4-FG-13: track that rake reversal was deferred so the
+            // audit anchor reflects the queued amount accurately.
+            if (depositRecordForVerifier.rakeAmount > 0) {
+              rakeReversedHere = depositRecordForVerifier.rakeAmount;
+            }
           }
         }
       } catch (e) {
@@ -1414,7 +1550,11 @@ export async function verifyUncertainRefunds(
           });
         }
       } catch (e) {
-        logger.warn('refund_uncertain verification: audit write failed', {
+        // R4-FG-14 (round-4 high): orphan-write present, escalation
+        // absent on the verifier path. Mirror in-flight processRefund:
+        // audit anchor failure post-on-chain-refund must escalate so
+        // an operator can manually replay.
+        logger.error('CRITICAL: refund_uncertain verifier audit write failed — topic missing the refund anchor', {
           component: 'Refund',
           refundTxId,
           error: e instanceof Error ? e.message : String(e),
@@ -1441,6 +1581,18 @@ export async function verifyUncertainRefunds(
         } catch {
           /* logged above */
         }
+        try {
+          await escalateUncertainDlFailure({
+            kind: 'audit_trail_orphaned',
+            uncertainTxId: refundTxId,
+            cause: e,
+          });
+        } catch (escErr) {
+          logger.error('refund verifier audit-anchor escalation also failed', {
+            component: 'Refund',
+            error: escErr instanceof Error ? escErr.message : String(escErr),
+          });
+        }
       }
     }
 
@@ -1461,10 +1613,18 @@ export async function verifyUncertainRefunds(
 
     // R2-FG-2: SADD original txId to the permanent set so a future
     // call after the 30d claim TTL can't fire a duplicate refund.
+    //
+    // R4-FG-4 (round-4 critical): on SADD failure in the verifier
+    // path, write `audit_trail_orphaned` AND page the operator via
+    // `escalateUncertainDlFailure` — full parity with the in-flight
+    // processRefund block at lines 906-953. Pre-fix the verifier
+    // path silently logged + continued, leaving an invisible
+    // 30-day duplicate-refund window after the claim TTL'd.
     if (details.originalTxId) {
+      const sadd_originalTxId = details.originalTxId;
       try {
         const redis = await getRedis();
-        await redis.sadd(KEY_PREFIX.refundedOriginals, details.originalTxId);
+        await redis.sadd(KEY_PREFIX.refundedOriginals, sadd_originalTxId);
       } catch (e) {
         logger.error(
           'CRITICAL: verifier refunded-originals SADD failed; duplicate-refund window opens after claim TTL',
@@ -1472,10 +1632,38 @@ export async function verifyUncertainRefunds(
             component: 'Refund',
             event: 'refunded_originals_sadd_failed',
             refundTxId,
-            originalTxId: details.originalTxId,
+            originalTxId: sadd_originalTxId,
             error: e instanceof Error ? e.message : String(e),
           },
         );
+        try {
+          await store.upsertDeadLetter({
+            transactionId: `audit-orphan:refund-verifier-sadd:${sadd_originalTxId}`,
+            timestamp: new Date().toISOString(),
+            error: `verifier refundedOriginals SADD failed after on-chain refund: ${e instanceof Error ? e.message : String(e)}`,
+            kind: 'audit_trail_orphaned',
+            details: {
+              sourceKind: 'refund_verifier_post_success_orphan',
+              sourceTxId: sadd_originalTxId,
+              refundTxId,
+              phase: 'refunded_originals_sadd_failed',
+            },
+          });
+        } catch {
+          /* logged above */
+        }
+        try {
+          await escalateUncertainDlFailure({
+            kind: 'refunded_originals_sadd_failed',
+            uncertainTxId: sadd_originalTxId,
+            cause: e,
+          });
+        } catch (escErr) {
+          logger.error('verifier refunded-originals SADD escalation also failed', {
+            component: 'Refund',
+            error: escErr instanceof Error ? escErr.message : String(escErr),
+          });
+        }
       }
     }
 

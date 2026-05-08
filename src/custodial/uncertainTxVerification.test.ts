@@ -566,6 +566,87 @@ describe('verifyUncertainWithdrawals', () => {
     assert.equal(det.settledAt, undefined, 'settledAt must NOT be auto-back-filled');
   });
 
+  // revert-proof: if `bumpUserLockContentionAttempts` reverts to
+  // spreading `...entry` (the verifier-loop snapshot) instead of
+  // `...base` (refresh-then-spread), the assertion
+  // `finalEntry.sender === 'planted-sibling'` becomes the original
+  // value because the bump's upsert clobbers the sibling write.
+  it('R4-FG-2: bumpUserLockContentionAttempts preserves sibling top-level mutation', async () => {
+    // Setup: plant a withdrawal_uncertain DL whose mirror returns FAILED
+    // (so the verifier's FAILED branch tries to acquire the user lock).
+    // Pre-acquire the user lock from a "concurrent lambda" so the
+    // verifier's tryAcquireUserLockForVerify returns null and bumps the
+    // contention counter.
+    await store.upsertDeadLetter(makeWithdrawalDl(TX_FAIL));
+    mirror.responses.set(TX_FAIL, {
+      status: 200,
+      body: { transactions: [{ result: 'CONTRACT_REVERT_EXECUTED' }] },
+    });
+
+    const { acquireUserLock, releaseUserLock } = await import('../lib/locks.js');
+    const concurrentToken = await acquireUserLock('user-1', 60);
+    assert.ok(concurrentToken, 'pre-condition: concurrent lock acquired');
+
+    try {
+      // Spy on the in-memory Redis mock's `set` method. The verifier's
+      // `tryAcquireUserLockForVerify` calls `redis.set(lockKey, fence,
+      // {nx,ex})` which returns null when our pre-acquired lock is
+      // present. We piggyback that null-return moment to plant a
+      // sibling top-level write on the entry. The verifier's `entry`
+      // snapshot was captured BEFORE this — so:
+      //   pre-fix: bump's `{...entry}` upsert REPLACES the entry, and
+      //            the planted sender vanishes.
+      //   post-fix: bump refreshes-then-spreads, picking up sender.
+      const redisMock = (globalThis as unknown as {
+        __lazylottoRedisClient__?: {
+          set(k: string, v: string | number, o?: { nx?: boolean; ex?: number }): Promise<unknown>;
+        };
+      }).__lazylottoRedisClient__!;
+      const originalUpsert = store.upsertDeadLetter.bind(store);
+      const originalSet = redisMock.set.bind(redisMock);
+      let plantedSibling = false;
+      redisMock.set = async (key, value, opts) => {
+        const result = await originalSet(key, value, opts);
+        if (
+          !plantedSibling &&
+          opts?.nx &&
+          key.includes('lock:user:user-1') &&
+          result === null
+        ) {
+          plantedSibling = true;
+          // The lock-acquire just failed; bump is about to fire.
+          // Plant the sibling write to the entry NOW so the bump's
+          // refresh-then-spread picks it up.
+          const entry = store
+            .getDeadLetters()
+            .find((x) => x.transactionId === TX_FAIL)!;
+          await originalUpsert({ ...entry, sender: 'planted-sibling' });
+        }
+        return result;
+      };
+
+      await verifyUncertainWithdrawals(store, ledger, noopAccounting());
+
+      const finalEntry = store
+        .getDeadLetters()
+        .find((e) => e.transactionId === TX_FAIL);
+      assert.ok(finalEntry, 'entry must exist post-bump');
+      assert.equal(
+        finalEntry!.sender,
+        'planted-sibling',
+        'bumpUserLockContentionAttempts must NOT clobber sibling top-level mutation',
+      );
+      // Sanity: the bump did land (counter is set in details).
+      const det = (finalEntry!.details ?? {}) as Record<string, unknown>;
+      assert.ok(
+        typeof det.userLockContentionAttempts === 'number' && det.userLockContentionAttempts >= 1,
+        'bump must have stamped the contention counter',
+      );
+    } finally {
+      await releaseUserLock('user-1', concurrentToken!);
+    }
+  });
+
   it('Audit-write failure produces audit_trail_orphaned DL (M16)', async () => {
     await store.upsertDeadLetter(makeWithdrawalDl(TX_OK));
     mirror.responses.set(TX_OK, { status: 200, body: { transactions: [{ result: 'SUCCESS' }] } });
@@ -746,6 +827,49 @@ describe('verifyUncertainOperatorFeeWithdrawals', () => {
     assert.equal(calls.recordOperatorWithdrawal.length, 1);
   });
 
+  // revert-proof: if `markResolved` reverts to spreading `...entry`
+  // (the verifier-loop snapshot) instead of `...base` (refresh-then-
+  // spread), the assertion `det.siblingTopLevelField === 'planted'`
+  // becomes `undefined` because the resolve-write clobbers the
+  // sibling's top-level write with the stale snapshot.
+  it('R4-FG-1: markResolved preserves a sibling writer mutation', async () => {
+    store.updateOperator((op) => ({ ...op, balances: { ...op.balances, hbar: 100 } }));
+    await store.upsertDeadLetter(makeOperatorFeeDl(TX_OK));
+    mirror.responses.set(TX_OK, { status: 200, body: { transactions: [{ result: 'SUCCESS' }] } });
+
+    const originalUpsert = store.upsertDeadLetter.bind(store);
+    let stampedDuringRun = false;
+    // Wrap upsertDeadLetter: as soon as we see the verifier's
+    // operatorDebitedAt stamp land, simulate a sibling writer
+    // mutating a top-level field on the SAME entry. The next
+    // upsertDeadLetter (markResolved) must spread the sibling's
+    // mutation, not the verifier-loop's stale `entry` snapshot.
+    store.upsertDeadLetter = async (e) => {
+      const det = (e.details ?? {}) as Record<string, unknown>;
+      if (!stampedDuringRun && det.operatorDebitedAt) {
+        stampedDuringRun = true;
+        // Apply the verifier's stamp first.
+        await originalUpsert(e);
+        // Now inject a sibling top-level field write on the same entry.
+        const fresh = store.getDeadLetters().find((x) => x.transactionId === TX_OK)!;
+        await originalUpsert({ ...fresh, sender: 'planted-sibling-sender' });
+        return;
+      }
+      return originalUpsert(e);
+    };
+
+    await verifyUncertainOperatorFeeWithdrawals(store, '0.0.9999', noopAccounting());
+
+    const finalEntry = store.getDeadLetters().find((e) => e.transactionId === TX_OK);
+    assert.ok(finalEntry, 'entry must exist post-resolve');
+    assert.equal(finalEntry!.resolvedAt !== undefined, true, 'entry must be resolved');
+    assert.equal(
+      finalEntry!.sender,
+      'planted-sibling-sender',
+      'markResolved must NOT clobber sibling top-level mutation',
+    );
+  });
+
   it('FAILED branch is no-op on operator state', async () => {
     store.updateOperator((op) => ({ ...op, balances: { ...op.balances, hbar: 100 } }));
     await store.upsertDeadLetter(makeOperatorFeeDl(TX_FAIL));
@@ -758,6 +882,45 @@ describe('verifyUncertainOperatorFeeWithdrawals', () => {
 
     const op = store.getOperator();
     assert.equal(op.balances.hbar, 100, 'operator balance untouched on FAILED');
+  });
+
+  // revert-proof: R4-FG-6 — `mutationError` flag + skip-`markResolved`
+  // gate at uncertainTxVerification.ts ~line 1351-1359. Pre-fix the
+  // catch wrote the orphan row but then UNCONDITIONALLY ran
+  // markResolved, leaving the entry resolved with the operator wallet
+  // un-debited. Reverting the gate would let this test see a resolved
+  // entry and a `confirmed` outcome — assertion fails.
+  it('R4-FG-6: operator-fee SUCCESS with audit anchor failure leaves entry unresolved', async () => {
+    store.updateOperator((op) => ({ ...op, balances: { ...op.balances, hbar: 100 } }));
+    await store.upsertDeadLetter(makeOperatorFeeDl(TX_OK));
+    mirror.responses.set(TX_OK, { status: 200, body: { transactions: [{ result: 'SUCCESS' }] } });
+
+    // Force the audit anchor to throw — operator debit lands, anchor fails.
+    const failingAudit = {
+      async recordDeposit(): Promise<void> {},
+      async recordRake(): Promise<void> {},
+      async recordWithdrawal(): Promise<void> {},
+      async recordPlaySession(): Promise<void> {},
+      async recordOperatorWithdrawal(): Promise<void> {
+        throw new Error('synthetic audit anchor failure');
+      },
+      async recordRefund(): Promise<void> {},
+      async deploy(): Promise<string> { return '0.0.0'; },
+    } as unknown as AccountingService;
+
+    const outcomes = await verifyUncertainOperatorFeeWithdrawals(store, '0.0.9999', failingAudit);
+
+    assert.equal(
+      outcomes[0]!.status,
+      'still_uncertain',
+      'R4-FG-6 fix missing: outcome must be still_uncertain when audit anchor fails',
+    );
+    const finalEntry = store.getDeadLetters().find((e) => e.transactionId === TX_OK);
+    assert.equal(
+      finalEntry!.resolvedAt,
+      undefined,
+      'R4-FG-6 fix missing: entry MUST NOT be marked resolved when audit anchor failed',
+    );
   });
 
   it('Idempotent on repeated SUCCESS verification', async () => {
@@ -1125,5 +1288,96 @@ describe('verifyUncertainPlays', () => {
 
     const outcomes = await verifyUncertainPlays(store, ledger);
     assert.equal(outcomes[0]!.status, 'still_uncertain');
+  });
+
+  // revert-proof: if the body-level `idempotencyKey` literal at
+  // uncertainTxVerification.ts:1726 reverts to absent (R3-FG-22 backed
+  // out), the captured controlEvent.details object will not contain
+  // `idempotencyKey: 'play-triage:<tx>'`; this assertion fails.
+  it('R3-FG-22: SUCCESS triage anchor body carries deterministic idempotencyKey play-triage:<txId>', async () => {
+    await store.upsertDeadLetter(makePlayDl(TX_OK));
+    mirror.responses.set(TX_OK, { status: 200, body: { transactions: [{ result: 'SUCCESS' }] } });
+
+    // Tracking accounting that records every recordControlEvent call.
+    const controlCalls: Array<{ event: string; details: Record<string, unknown> }> = [];
+    const trackingAudit = {
+      async recordDeposit(): Promise<void> {},
+      async recordRake(): Promise<void> {},
+      async recordWithdrawal(): Promise<void> {},
+      async recordPlaySession(): Promise<void> {},
+      async recordOperatorWithdrawal(): Promise<void> {},
+      async recordRefund(): Promise<void> {},
+      async recordControlEvent(event: string, details: Record<string, unknown>): Promise<void> {
+        controlCalls.push({ event, details });
+      },
+      async deploy(): Promise<string> { return '0.0.0'; },
+    } as unknown as AccountingService;
+
+    await verifyUncertainPlays(store, ledger, trackingAudit);
+
+    const triage = controlCalls.find(
+      (c) => c.event === 'play_uncertain_success_pending_triage',
+    );
+    assert.ok(triage, 'verifier must call recordControlEvent with the triage event');
+    // The load-bearing assertion: writer-side parity with the
+    // force-release sibling in handlers.ts — both sides emit the
+    // same deterministic key so the reader can dedup.
+    assert.equal(
+      triage.details.idempotencyKey,
+      `play-triage:${TX_OK}`,
+      'verifier must include idempotencyKey=play-triage:<uncertainTxId> in body',
+    );
+    // R3-FG-14 sanity: the actor field is the load-bearing 'reconcile'
+    // string (auditor sees the verifier as the trigger, not the user).
+    assert.equal(triage.details.by, 'reconcile');
+  });
+
+  // revert-proof: if `bumpVerificationAttempts` reverts to spreading
+  // `...entry` (the loop-snapshot) instead of refreshing first, a
+  // sibling field (`siblingField`) the verifier-loop's stale snapshot
+  // doesn't know about will be DROPPED on the bump. The assertion
+  // `det.siblingField === 'present'` would then fail.
+  it('R3-FG-58: bumpVerificationAttempts refresh-then-spread preserves sibling writes', async () => {
+    // Plant a malformed DL — verifier hits the malformed gate which
+    // calls bumpVerificationAttempts. Inject a sibling field that
+    // does NOT exist on the snapshot the verifier captured.
+    const malformed: DeadLetterEntry = {
+      transactionId: 'tx-bump-r3fg58',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'play_uncertain',
+      details: {
+        userId: 'user-1',
+        // tokenReservations DELIBERATELY MISSING → malformed gate fires.
+      },
+    };
+    await store.upsertDeadLetter(malformed);
+
+    // Sibling Lambda landed `siblingField: 'present'` BEFORE the
+    // verifier's bump runs. Stale-spread would clobber it.
+    const dlsBefore = store.getDeadLetters();
+    const fresh = dlsBefore.find((e) => e.transactionId === malformed.transactionId)!;
+    await store.upsertDeadLetter({
+      ...fresh,
+      details: { ...(fresh.details ?? {}), siblingField: 'present' },
+    });
+
+    // Verifier runs with the STALE in-memory `malformed` snapshot
+    // (no siblingField). Pre-fix it would spread `...malformed` over
+    // the freshly written row, dropping siblingField.
+    await verifyUncertainPlays(store, ledger);
+
+    const after = store.getDeadLetters().find((e) => e.transactionId === malformed.transactionId)!;
+    const det = after.details as Record<string, unknown>;
+    // The post-fix refresh-then-spread pattern preserves the sibling
+    // field. Pre-fix this would be undefined.
+    assert.equal(
+      det.siblingField,
+      'present',
+      'sibling Lambda field must survive bumpVerificationAttempts',
+    );
+    // Sanity: bump still happened.
+    assert.equal(typeof det.verificationAttempts, 'number');
+    assert.ok((det.verificationAttempts as number) >= 1);
   });
 });

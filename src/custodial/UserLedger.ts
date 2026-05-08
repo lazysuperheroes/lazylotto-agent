@@ -165,22 +165,99 @@ export class UserLedger {
       // would have to fall back to a LLCRED→HBAR heuristic and lose all
       // LAZY deposits — see the v1 message types section in
       // docs/hcs20-v2-schema.md for the rationale.
+      //
+      // R4-FG-5 (round-4 critical): when the HCS-20 anchor fails, the
+      // local-store credit has already landed (steps 4 + 5) and the
+      // operator-rake credit at line 142 has already landed too. Pre-fix
+      // we silently `console.warn`'d and continued — leaving the audit
+      // topic without a paired credit/rake op, which a topic-only
+      // reader would interpret as the user never having deposited.
+      // Mirror the flush-failure escalation block below: write
+      // `audit_trail_orphaned` AND page the operator via
+      // `escalateUncertainDlFailure`. We do NOT rethrow — the deposit
+      // is real and credited; the audit anchor missing is a recoverable
+      // out-of-band repair (operator can replay from
+      // /api/admin/replay-deposit).
       try {
         await this.accounting.recordDeposit(user.hederaAccountId, netAmount, txId, token);
       } catch (err) {
-        console.warn(
-          `[UserLedger] HCS-20 recordDeposit failed for user ${userId}, txId ${txId}:`,
+        console.error(
+          `[UserLedger] CRITICAL: HCS-20 recordDeposit failed for user ${userId}, txId ${txId} — local credit landed, audit topic missing the pair:`,
           err,
         );
+        try {
+          await this.store.upsertDeadLetter({
+            transactionId: `audit-orphan:in-band:deposit-anchor:${txId}`,
+            timestamp: new Date().toISOString(),
+            error: `recordDeposit anchor failed after local credit: ${err instanceof Error ? err.message : String(err)}`,
+            kind: 'audit_trail_orphaned',
+            details: {
+              sourceKind: 'in_band_deposit_anchor',
+              sourceTxId: txId,
+              userId,
+              netAmount,
+              token,
+              phase: 'recordDeposit_anchor_failed',
+            },
+          });
+        } catch {
+          /* console.error above is the trail */
+        }
+        try {
+          const { escalateUncertainDlFailure } = await import('../lib/escalation.js');
+          await escalateUncertainDlFailure({
+            kind: 'deposit_anchor_failed',
+            uncertainTxId: txId,
+            userId,
+            cause: err,
+          });
+        } catch (escalateErr) {
+          console.error(
+            '[UserLedger] deposit-anchor escalation also failed:',
+            escalateErr,
+          );
+        }
       }
 
       try {
         await this.accounting.recordRake(user.hederaAccountId, this.agentAccountId, rakeAmount, token);
       } catch (err) {
-        console.warn(
-          `[UserLedger] HCS-20 recordRake failed for user ${userId}, txId ${txId}:`,
+        console.error(
+          `[UserLedger] CRITICAL: HCS-20 recordRake failed for user ${userId}, txId ${txId} — operator rake credited, audit topic missing the pair:`,
           err,
         );
+        try {
+          await this.store.upsertDeadLetter({
+            transactionId: `audit-orphan:in-band:rake-anchor:${txId}`,
+            timestamp: new Date().toISOString(),
+            error: `recordRake anchor failed after operator credit: ${err instanceof Error ? err.message : String(err)}`,
+            kind: 'audit_trail_orphaned',
+            details: {
+              sourceKind: 'in_band_rake_anchor',
+              sourceTxId: txId,
+              userId,
+              rakeAmount,
+              token,
+              phase: 'recordRake_anchor_failed',
+            },
+          });
+        } catch {
+          /* console.error above is the trail */
+        }
+        try {
+          const { escalateUncertainDlFailure } = await import('../lib/escalation.js');
+          await escalateUncertainDlFailure({
+            kind: 'rake_anchor_failed',
+            uncertainTxId: txId,
+            userId,
+            cause: err,
+          });
+        } catch (escalateErr) {
+          console.error(
+            '[UserLedger] rake-anchor escalation also failed:',
+            escalateErr,
+          );
+        }
       }
 
       // 7. Flush BEFORE releasing the lock so the next acquirer reads
@@ -239,6 +316,15 @@ export class UserLedger {
               '[UserLedger] CRITICAL: even the escalation webhook failed:',
               escalateErr,
             );
+          }
+          // R4-FG-62 (round-4 medium): tag the throw so callers
+          // (replayDeposit, in particular) can distinguish a
+          // flush-failed-but-paged outcome from generic Redis errors.
+          // The on-chain side is real and the audit row + webhook
+          // already fired, so admin UI should surface a structured
+          // discriminator rather than a 500.
+          if (flushErr instanceof Error) {
+            (flushErr as Error & { name: string }).name = 'DepositCreditFlushFailedError';
           }
           throw flushErr;
         }

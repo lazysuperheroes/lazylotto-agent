@@ -492,11 +492,31 @@ async function bumpUserLockContentionAttempts(
       /* logged above */
     }
   }
+  // R4-FG-2 (round-4 P3-DS-002): refresh-then-spread, mirroring
+  // R3-FG-58 in `bumpVerificationAttempts` and R3-FG-10 in
+  // `stampProgress`. Pre-fix this spread `...entry` (the verifier-loop's
+  // pre-mutation snapshot) — a sibling force-release that just set
+  // `resolvedAt` had it REVERTED, reopening the entry for re-mutation
+  // (double-debit / double-release-reservation).
   try {
+    let base: DeadLetterEntry = entry;
+    try {
+      await store.refreshDeadLetters();
+      const fresh = store
+        .getDeadLetters()
+        .find((e) => e.transactionId === entry.transactionId);
+      if (fresh) base = fresh;
+    } catch {
+      /* fall through with caller-supplied snapshot */
+    }
+    if (base.resolvedAt) {
+      // Already resolved; don't reopen by stamping a counter on it.
+      return;
+    }
     await store.upsertDeadLetter({
-      ...entry,
+      ...base,
       details: {
-        ...(entry.details ?? {}),
+        ...(base.details ?? {}),
         userLockContentionAttempts: next,
       },
     });
@@ -550,8 +570,15 @@ async function recordAuditOrphan(
     // collide. `upsertDeadLetter` is REPLACE — without the salt, a
     // later force-release orphan would obliterate the verifier's
     // earlier orphan history.
+    //
+    // R4-FG-27 (round-4 high): salt by writer phase WAS NOT enough.
+    // Multi-pass mutation failures on the same source tx (e.g. flush
+    // fails on pass 1, audit fails on pass 2 — both verifier-phase)
+    // still collided. Use `mintAuditOrphanId` for a fresh `Date.now()
+    // + uuid8` tail every call.
+    const { mintAuditOrphanId } = await import('../lib/orphanIds.js');
     await store.upsertDeadLetter({
-      transactionId: `audit-orphan:verifier:${sourceTxId}`,
+      transactionId: mintAuditOrphanId('audit-orphan:verifier', sourceTxId),
       timestamp: new Date().toISOString(),
       error: `verifier audit write failed: ${cause instanceof Error ? cause.message : String(cause)}`,
       kind: 'audit_trail_orphaned',
@@ -575,9 +602,32 @@ async function markResolved(
   progress?: Record<string, unknown>,
 ): Promise<void> {
   try {
+    // R4-FG-1 (round-4 P1-001): refresh-then-spread, mirroring R3-FG-10
+    // in `stampProgress`. Pre-fix the upsert spread `...entry` (the
+    // verifier-loop's pre-mutation snapshot) for top-level fields.
+    // A concurrent force-release that wrote a top-level field
+    // (e.g. `sender`, or a future `pendingClaimFence`) between loop
+    // entry and `markResolved` had its write silently REVERTED. Now:
+    // re-read the latest entry, spread that. If the latest entry is
+    // ALREADY resolved, skip the write entirely (someone else got
+    // there first; clobbering would re-open it for our resolver).
+    let base: DeadLetterEntry = entry;
+    try {
+      await store.refreshDeadLetters();
+      const fresh = store
+        .getDeadLetters()
+        .find((e) => e.transactionId === entry.transactionId);
+      if (fresh) base = fresh;
+    } catch {
+      /* fall through with caller-supplied snapshot */
+    }
+    if (base.resolvedAt) {
+      // Already resolved by sibling — don't re-open.
+      return;
+    }
     await store.upsertDeadLetter({
-      ...entry,
-      details: { ...(entry.details ?? {}), ...(progress ?? {}) },
+      ...base,
+      details: { ...(base.details ?? {}), ...(progress ?? {}) },
       resolvedAt: new Date().toISOString(),
       resolvedBy: 'reconcile',
       resolutionTxId,
@@ -689,10 +739,30 @@ export async function verifyUncertainWithdrawals(
   const outcomes: WithdrawalVerificationOutcome[] = [];
 
   await store.refreshDeadLetters().catch(() => undefined);
-  const open = store
+  const allOpen = store
     .getDeadLetters()
     .filter((e) => e.kind === 'withdrawal_uncertain' && !e.resolvedAt);
-  if (open.length === 0) return outcomes;
+  if (allOpen.length === 0) return outcomes;
+
+  // R4-FG-16 (round-4 high): cap entries per pass. Pre-fix the loop
+  // walked every open DL serially. Per-DL cost ~10s with mirror flake
+  // bias; with 90+ open DLs reconcile blows the 900s lock TTL, no
+  // releaseOperatorLock runs (Lambda ceiling kills it), and the next
+  // 14 cron ticks all see "reconcile already in progress" and skip
+  // — insolvency goes undetected for ~3.5h. Now: cap at 25/pass and
+  // log a "deferred N to next pass" warning.
+  const MAX_ENTRIES_PER_PASS = 25;
+  const open = allOpen.slice(0, MAX_ENTRIES_PER_PASS);
+  if (allOpen.length > MAX_ENTRIES_PER_PASS) {
+    logger.warn('verifyUncertainWithdrawals: deferred entries to next pass', {
+      component: 'UncertainTx',
+      event: 'verifier_pass_capped',
+      kind: 'withdrawal_uncertain',
+      total: allOpen.length,
+      capped: MAX_ENTRIES_PER_PASS,
+      deferred: allOpen.length - MAX_ENTRIES_PER_PASS,
+    });
+  }
 
   for (let entry of open) {
     const withdrawTxId = entry.transactionId;
@@ -1067,10 +1137,23 @@ export async function verifyUncertainOperatorFeeWithdrawals(
   const outcomes: OperatorFeeWithdrawVerificationOutcome[] = [];
 
   await store.refreshDeadLetters().catch(() => undefined);
-  const open = store
+  const allOpen = store
     .getDeadLetters()
     .filter((e) => e.kind === 'operator_fee_withdraw_uncertain' && !e.resolvedAt);
-  if (open.length === 0) return outcomes;
+  if (allOpen.length === 0) return outcomes;
+  // R4-FG-16: per-pass cap.
+  const MAX_ENTRIES_PER_PASS = 25;
+  const open = allOpen.slice(0, MAX_ENTRIES_PER_PASS);
+  if (allOpen.length > MAX_ENTRIES_PER_PASS) {
+    logger.warn('verifyUncertainOperatorFeeWithdrawals: deferred entries to next pass', {
+      component: 'UncertainTx',
+      event: 'verifier_pass_capped',
+      kind: 'operator_fee_withdraw_uncertain',
+      total: allOpen.length,
+      capped: MAX_ENTRIES_PER_PASS,
+      deferred: allOpen.length - MAX_ENTRIES_PER_PASS,
+    });
+  }
 
   for (let entry of open) {
     const withdrawTxId = entry.transactionId;
@@ -1160,6 +1243,16 @@ export async function verifyUncertainOperatorFeeWithdrawals(
       // R2-FG-16 + R3-FG-2: fenced release of F24 pending claim on FAILED.
       // Read fence from `details.pendingClaimFence` (R3-FG-2) and
       // compare-and-delete via RELEASE_SCRIPT instead of unfenced DEL.
+      //
+      // R4-FG-33 (round-4 medium): legacy DLs (written before R3-FG-2
+      // deploy) have no `pendingClaimFence`; pre-fix the verifier
+      // silently SKIPPED release, leaving the operator-fees pending
+      // claim wedged for full TTL (30 min) and blocking concurrent
+      // operator fee withdrawals. Operators trained to manually
+      // `redis.del` the claim → standing runbook becomes a double-pay
+      // vector. On confirmed mirror=FAILED with no fence, force-DEL
+      // the claim (operator-acknowledged risk: no on-chain effect on
+      // FAILED so the DEL is safe).
       const failedFence = (details as { pendingClaimFence?: string }).pendingClaimFence;
       if (typeof failedFence === 'string' && failedFence.length > 0) {
         try {
@@ -1177,6 +1270,31 @@ export async function verifyUncertainOperatorFeeWithdrawals(
             },
           );
         }
+      } else if (typeof details.tokenKey === 'string') {
+        // R4-FG-33: legacy-DL fallback. FAILED means the on-chain tx
+        // didn't move tokens, so DELing the pending claim cannot
+        // double-spend. Log loudly so an operator sees the migration
+        // gap.
+        try {
+          const redis = await getRedis();
+          const pendingKey = `${KEY_PREFIX.lockOperator}withdraw-pending:${details.tokenKey}`;
+          await redis.del(pendingKey);
+          logger.warn(
+            'operator_fee_withdraw_uncertain F24 legacy-DL fallback: unfenced DEL on FAILED (no pendingClaimFence)',
+            {
+              component: 'UncertainTx',
+              withdrawTxId,
+              tokenKey: details.tokenKey,
+            },
+          );
+        } catch (e) {
+          logger.warn('legacy-DL F24 unfenced DEL failed', {
+            component: 'UncertainTx',
+            withdrawTxId,
+            tokenKey: details.tokenKey,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
       }
       outcomes.push({
         withdrawTxId,
@@ -1189,6 +1307,15 @@ export async function verifyUncertainOperatorFeeWithdrawals(
     // SUCCESS: debit operator balance + write HCS-20 audit anchor.
     // R-HIGH-1: idempotency markers gate each step so a Lambda crash
     // doesn't double-debit on the next reconcile pass.
+    //
+    // R4-FG-6 (round-4 high): mirror R3-FG-8's `mutationError` flag +
+    // skip-markResolved gating that already lives in the withdrawal
+    // SUCCESS branch (lines 942-1087). Pre-fix this branch wrote the
+    // orphan row in the catch and then UNCONDITIONALLY ran
+    // markResolved at the bottom — entry was marked resolved even
+    // when the operator debit or the audit anchor failed, leaving
+    // the operator wallet credited with un-debited fees and no path
+    // back to retry. Sibling miss in the original R3-FG-8 fix.
     type OperatorProgress = {
       operatorDebitedAt?: string;
       auditWrittenAt?: string;
@@ -1198,6 +1325,7 @@ export async function verifyUncertainOperatorFeeWithdrawals(
       operatorDebitedAt: priorOperatorProgress.operatorDebitedAt,
       auditWrittenAt: priorOperatorProgress.auditWrittenAt,
     };
+    let operatorMutationError: { phase: string; cause: unknown } | null = null;
 
     if (!operatorProgress.operatorDebitedAt) {
       // R2-FG-5 (round-2 G-02 / R-06): stamp BEFORE mutate, mirroring
@@ -1216,7 +1344,38 @@ export async function verifyUncertainOperatorFeeWithdrawals(
       // `operator.balances`. The in-band path holds this same lock
       // around its debit; the verifier was bypassing it → last-write-
       // wins on the in-process operator cache → one debit lost.
+      //
+      // R4-FG-12 (round-4 high): on null acquire (lock held by another
+      // Lambda), the very race the lock was added to prevent reopens.
+      // Pre-fix the code stamped `operatorDebitedAt` and ran
+      // `updateOperator` ANYWAY without the lock. Now: write
+      // audit_trail_orphaned + leave the entry unresolved + bail.
+      // The next reconcile pass retries when the lock is free.
       const opLockToken = await acquireOperatorLock('withdraw-fees', 60);
+      if (!opLockToken) {
+        operatorMutationError = { phase: 'op_lock_unavailable', cause: new Error('withdraw-fees operator-lock contention') };
+        await recordAuditOrphan(
+          store,
+          'operator_fee_withdraw_uncertain',
+          withdrawTxId,
+          {
+            amount: details.amount,
+            tokenKey: details.tokenKey,
+            agentAccountId,
+            recipientAccountId: details.recipientAccountId ?? '',
+            withdrawTxId,
+            phase: 'op_lock_unavailable',
+          },
+          new Error('withdraw-fees operator-lock contention'),
+        );
+        await releaseVerifyLock(withdrawTxId, opLockFence);
+        outcomes.push({
+          withdrawTxId,
+          status: 'still_uncertain',
+          note: 'withdraw-fees operator-lock unavailable; deferring debit to next reconcile pass.',
+        });
+        continue;
+      }
       operatorProgress.operatorDebitedAt = new Date().toISOString();
       await stampProgress(store, entry, operatorProgress);
       try {
@@ -1239,6 +1398,7 @@ export async function verifyUncertainOperatorFeeWithdrawals(
           withdrawTxId,
           error: e instanceof Error ? e.message : String(e),
         });
+        operatorMutationError = { phase: 'operator_debit', cause: e };
         await recordAuditOrphan(
           store,
           'operator_fee_withdraw_uncertain',
@@ -1261,7 +1421,7 @@ export async function verifyUncertainOperatorFeeWithdrawals(
       }
     }
 
-    if (accounting && !operatorProgress.auditWrittenAt) {
+    if (accounting && !operatorProgress.auditWrittenAt && !operatorMutationError) {
       try {
         // F18: include withdrawTxId for reader dedup.
         await accounting.recordOperatorWithdrawal(
@@ -1281,6 +1441,7 @@ export async function verifyUncertainOperatorFeeWithdrawals(
             error: auditErr instanceof Error ? auditErr.message : String(auditErr),
           },
         );
+        operatorMutationError = { phase: 'audit_anchor', cause: auditErr };
         // F19: include all replay params so operator can manually
         // re-emit recordOperatorWithdrawal(agentAccountId, amount, token).
         await recordAuditOrphan(
@@ -1303,6 +1464,20 @@ export async function verifyUncertainOperatorFeeWithdrawals(
       await store.flush();
     } catch {
       /* */
+    }
+    // R4-FG-6: gate markResolved on operatorMutationError (mirrors
+    // R3-FG-8 in the withdrawal SUCCESS branch). If any mutation step
+    // failed, leave the entry unresolved so the next reconcile pass
+    // can retry. The orphan row written above gives operators the
+    // full replay context.
+    if (operatorMutationError) {
+      await releaseVerifyLock(withdrawTxId, opLockFence);
+      outcomes.push({
+        withdrawTxId,
+        status: 'still_uncertain',
+        note: `Mutation step '${operatorMutationError.phase}' failed; entry left unresolved for retry on next pass.`,
+      });
+      continue;
     }
     await markResolved(store, entry, withdrawTxId, operatorProgress);
     // F26: release lock after successful resolve.
@@ -1368,10 +1543,23 @@ export async function verifyUncertainPlays(
   const outcomes: PlayVerificationOutcome[] = [];
 
   await store.refreshDeadLetters().catch(() => undefined);
-  const open = store
+  const allOpen = store
     .getDeadLetters()
     .filter((e) => e.kind === 'play_uncertain' && !e.resolvedAt);
-  if (open.length === 0) return outcomes;
+  if (allOpen.length === 0) return outcomes;
+  // R4-FG-16: per-pass cap.
+  const MAX_ENTRIES_PER_PASS = 25;
+  const open = allOpen.slice(0, MAX_ENTRIES_PER_PASS);
+  if (allOpen.length > MAX_ENTRIES_PER_PASS) {
+    logger.warn('verifyUncertainPlays: deferred entries to next pass', {
+      component: 'UncertainTx',
+      event: 'verifier_pass_capped',
+      kind: 'play_uncertain',
+      total: allOpen.length,
+      capped: MAX_ENTRIES_PER_PASS,
+      deferred: allOpen.length - MAX_ENTRIES_PER_PASS,
+    });
+  }
 
   for (let entry of open) {
     const uncertainTxId = entry.transactionId;
@@ -1509,9 +1697,17 @@ export async function verifyUncertainPlays(
     // spend even if Redis is wiped before manual reconstruction
     // completes. Without this anchor, a topic-only auditor sees the
     // user's full pre-play balance and the operator wallet short by
-    // the spend amount — silent insolvency. Best-effort: a failed
-    // anchor write is logged but does not block resolution. F15's
-    // `successTriagedAt` marker depends on the resolve write below.
+    // the spend amount — silent insolvency. F15's `successTriagedAt`
+    // marker depends on the resolve write below.
+    //
+    // R4-FG-6 (round-4 high): mirror R3-FG-8's `mutationError` flag
+    // here too. Pre-fix the resolve write at line 1614-1624 fired
+    // even when the anchor failed → entry resolved without the
+    // topic capturing the spend → topic-only auditor cannot see the
+    // play happened at all → silent insolvency invisible. Now: on
+    // anchor failure, leave the entry unresolved so the next
+    // reconcile pass retries.
+    let playMutationError: { phase: string; cause: unknown } | null = null;
     if (accounting) {
       try {
         // R3-FG-14 (round-3 P4-003): the verifier is the actor here,
@@ -1530,18 +1726,17 @@ export async function verifyUncertainPlays(
           idempotencyKey: `play-triage:${uncertainTxId}`,
         });
       } catch (anchorErr) {
+        playMutationError = { phase: 'success_triage_anchor', cause: anchorErr };
         logger.warn('play_uncertain SUCCESS triage anchor write failed', {
           component: 'UncertainTx',
           uncertainTxId,
           error: anchorErr instanceof Error ? anchorErr.message : String(anchorErr),
         });
         try {
+          // R4-FG-27: mintAuditOrphanId for collision-free retries.
+          const { mintAuditOrphanId: mintId } = await import('../lib/orphanIds.js');
           await store.upsertDeadLetter({
-            // R2-FG-17: salt by writer phase (`verifier:`) — same source
-            // tx may also have a force-release orphan or creditDeposit
-            // orphan; without the salt, REPLACE-semantics in
-            // upsertDeadLetter would clobber the earlier history.
-            transactionId: `audit-orphan:verifier:${uncertainTxId}`,
+            transactionId: mintId('audit-orphan:verifier', uncertainTxId),
             timestamp: new Date().toISOString(),
             error: `play_uncertain SUCCESS triage anchor write failed: ${anchorErr instanceof Error ? anchorErr.message : String(anchorErr)}`,
             kind: 'audit_trail_orphaned',
@@ -1567,6 +1762,20 @@ export async function verifyUncertainPlays(
         'play_uncertain confirmed SUCCESS — settlement state must be reconstructed manually from dApp pool state',
       ),
     });
+    // R4-FG-6: gate the resolve write on anchor success. Pre-fix the
+    // resolve write fired even when the anchor failed → entry shows
+    // resolved with no topic record → topic-only auditor sees no
+    // play, no spend, no triage → silent insolvency.
+    if (playMutationError) {
+      await releaseVerifyLock(uncertainTxId, playLockFence);
+      outcomes.push({
+        uncertainTxId,
+        userId,
+        status: 'still_uncertain',
+        note: `Mutation step '${playMutationError.phase}' failed; entry left unresolved for retry on next pass.`,
+      });
+      continue;
+    }
     try {
       await store.upsertDeadLetter({
         ...entry,
