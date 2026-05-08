@@ -23,12 +23,21 @@ export async function OPTIONS() {
 
 export async function GET(request: Request) {
   try {
-    if (!(await checkRateLimit({ request, action: 'admin-users', limit: 60, windowSec: 60 }))) {
-      return rateLimitResponse(60);
-    }
-
+    // R5-FG-71: authenticate first, rate-limit by accountId.
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
+
+    if (
+      !(await checkRateLimit({
+        request,
+        action: 'admin-users',
+        limit: 60,
+        windowSec: 60,
+        identity: auth.accountId,
+      }))
+    ) {
+      return rateLimitResponse(60);
+    }
 
     const store = await getStore();
 

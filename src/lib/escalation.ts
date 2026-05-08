@@ -39,6 +39,15 @@ export interface EscalateUncertainDlInput {
   userId?: string;
   /** The original error that prevented dead-letter write. */
   cause: unknown;
+  /**
+   * R5-FG-69 (P6-013): related on-chain tx so the page text can
+   * cross-reference. Used by deposit/rake anchor failures — both
+   * fire as separate escalations with the same `uncertainTxId`
+   * but different kinds; including `relatedTxId` (the deposit txId
+   * the anchor is supposed to cover) and the partner kind in the
+   * page lets the operator grasp it's one incident, not two.
+   */
+  relatedTxId?: string;
 }
 
 /** R3-FG-48: skip the page if we've already escalated this txId in the last 6h. */
@@ -74,10 +83,24 @@ export async function escalateUncertainDlFailure(
   const causeClass = input.cause instanceof Error
     ? input.cause.name
     : typeof input.cause;
-  // Take just the first whitespace-delimited token of the cause message
-  // (typically the error code or first word); avoids the hash drifting
-  // across runs when the message includes timestamps or random ids.
-  const causeFingerprint = `${causeClass}:${rawCauseMsg.split(/\s+/, 1)[0] ?? ''}`.slice(0, 64);
+  // R5-FG-67 (P2-009 + P1-012): hash the WHOLE truncated cause
+  // message instead of just the first whitespace token. Pre-fix the
+  // first-token approach broke for two common SDK shapes:
+  //   - "0.0.123@456: receipt timeout" → first token includes the
+  //     txId, so EVERY error with txId-at-start got a unique
+  //     fingerprint per txId → dedup window collapsed to per-txId
+  //     and operator got a page on every bounce.
+  //   - "Error: ECONNRESET" / "Error: ETIMEDOUT" → first token
+  //     "Error:" identical, so five different network errors
+  //     collapsed into one fingerprint (under-dedup hides errors).
+  // Hashing the full message (truncated to 256 chars to bound cost)
+  // separates distinct error contents while keeping a stable
+  // fingerprint across runs.
+  const { createHash } = await import('node:crypto');
+  const causeFingerprint = `${causeClass}:${createHash('sha256')
+    .update(rawCauseMsg.slice(0, 256))
+    .digest('hex')
+    .slice(0, 16)}`;
   try {
     const redis = await getRedis();
     const dedupKey = `${KEY_PREFIX.escalated}${input.kind}:${input.uncertainTxId}:${causeFingerprint}`;
@@ -120,6 +143,10 @@ export async function escalateUncertainDlFailure(
     `On-chain tx ${input.uncertainTxId} status is UNKNOWN and the ` +
     `recovery anchor was lost. ` +
     (input.userId ? `User: ${input.userId}. ` : '') +
+    // R5-FG-69: reference the related tx so paired-escalation
+    // incidents (deposit + rake anchor failures for one deposit)
+    // are visibly linked.
+    (input.relatedTxId ? `Related tx: ${input.relatedTxId}. ` : '') +
     `Cause: ${causeMsg}. ` +
     `Manual triage required — verify the tx on the mirror node and ` +
     `reconstruct the dead-letter row by hand.`;

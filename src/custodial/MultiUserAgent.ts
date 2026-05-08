@@ -869,6 +869,17 @@ export class MultiUserAgent {
               prizeCount: transferOutcome.prizeCount,
               attemptsLog: transferOutcome.attemptsLog,
               ownerEoa: transferOutcome.ownerEoa,
+              // R5-FG-65 + R5-FG-66: preserve the receipt-uncertain
+              // signal + last-submitted contract txId so the
+              // recovery script (recover-stuck-prizes.ts) can
+              // mirror-check BEFORE re-submitting. Pre-fix the
+              // recovery script read pendingPrizesCount and
+              // double-submitted when the original receipt-uncertain
+              // tx had actually landed.
+              ...(transferOutcome.receiptUncertain ? { receiptUncertain: true } : {}),
+              ...(transferOutcome.lastSubmittedTxId
+                ? { lastSubmittedTxId: transferOutcome.lastSubmittedTxId }
+                : {}),
             },
           });
           logger.error('prize transfer dead-lettered', {

@@ -244,7 +244,7 @@ export async function transferAllPrizesWithRetry(
   ownerEvmAddress: string,
   prizeCount: number,
 ): Promise<PrizeTransferRetryResult> {
-  const attemptsLog: { attempt: number; gas: number; error?: string }[] = [];
+  const attemptsLog: { attempt: number; gas: number; error?: string; lastSubmittedTxId?: string }[] = [];
 
   for (let i = 0; i < PRIZE_TRANSFER_RETRY.attempts.length; i++) {
     const ladder = PRIZE_TRANSFER_RETRY.attempts[i]!;
@@ -259,11 +259,25 @@ export async function transferAllPrizesWithRetry(
         prizeCount,
         perPrizeGas: ladder.perPrize,
       });
-      attemptsLog.push({ attempt: i + 1, gas });
+      attemptsLog.push({ attempt: i + 1, gas, lastSubmittedTxId: result.transactionId });
       return { result, attempt: i + 1, gasUsed: gas, attemptsLog };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      attemptsLog.push({ attempt: i + 1, gas, error: message });
+      // R5-FG-65 (P3-011): extract the transactionId from
+      // ReceiptUncertainError / PostSubmitError so the DL records
+      // which on-chain tx the recovery script must mirror-check
+      // before re-submitting. Pre-fix the message string was the
+      // only signal; recovery proceeded blindfold.
+      const errTxId =
+        err instanceof Error && typeof (err as { transactionId?: string }).transactionId === 'string'
+          ? (err as { transactionId: string }).transactionId
+          : undefined;
+      attemptsLog.push({
+        attempt: i + 1,
+        gas,
+        error: message,
+        ...(errTxId ? { lastSubmittedTxId: errTxId } : {}),
+      });
 
       // R4-FG-17 (round-4 high): rethrow ReceiptUncertainError
       // immediately. Pre-fix the retry catch only short-circuited on
@@ -283,9 +297,14 @@ export async function transferAllPrizesWithRetry(
         const wrapped = new Error(
           `Prize transfer receipt uncertain on attempt ${i + 1}: ${message}`,
         );
-        (wrapped as Error & { attemptsLog: typeof attemptsLog; receiptUncertain: true }).attemptsLog =
-          attemptsLog;
-        (wrapped as Error & { attemptsLog: typeof attemptsLog; receiptUncertain: true }).receiptUncertain = true;
+        const w = wrapped as Error & {
+          attemptsLog: typeof attemptsLog;
+          receiptUncertain: true;
+          lastSubmittedTxId?: string;
+        };
+        w.attemptsLog = attemptsLog;
+        w.receiptUncertain = true;
+        if (errTxId) w.lastSubmittedTxId = errTxId;
         throw wrapped;
       }
 

@@ -1054,8 +1054,18 @@ describe('verifyUncertainOperatorFeeWithdrawals', () => {
     const det = fresh.details as Record<string, unknown>;
     // The verifier added `operatorDebitedAt` (R2-FG-5 stamp first).
     assert.ok(det.operatorDebitedAt, 'expected operatorDebitedAt');
-    // R2-FG-12: verificationAttempts must NOT be lost during the merge.
-    assert.equal(det.verificationAttempts, 7);
+    // R2-FG-12: stampProgress refresh-then-merge preserves concurrent
+    // writes during INTERMEDIATE stamps. R5-FG-76 resets counters on
+    // markResolved (success signal). Net behavior post-R5: the
+    // intermediate-stamp invariant holds in stampProgress, but the
+    // final markResolved sets verificationAttempts back to 0.
+    // `lastVerificationAttemptAt` is NOT reset (no need — it's a
+    // timestamp, not a counter).
+    assert.equal(
+      det.verificationAttempts,
+      0,
+      'R5-FG-76: markResolved resets the counter',
+    );
     assert.equal(det.lastVerificationAttemptAt, '2026-05-06T00:00:00Z');
     // Sanity: original fields survive.
     assert.equal(det.amount, 25);

@@ -51,11 +51,6 @@ export async function GET() {
 
 export const POST = withStore(async (request: Request) => {
   try {
-    // Rate limit: same budget as MCP (30/min per identity)
-    if (!(await checkRateLimit({ request, action: 'a2a', limit: 30, windowSec: 60 }))) {
-      return rateLimitResponse(60);
-    }
-
     const rawBody = await request.text();
 
     // Extract auth token from Authorization header (same as MCP).
@@ -66,6 +61,27 @@ export const POST = withStore(async (request: Request) => {
     const authToken = authHeader?.startsWith('Bearer ')
       ? authHeader.slice(7)
       : undefined;
+
+    // R5-FG-72 (P7-007): bind rate-limit identity to a hash of the
+    // bearer token (or fall back to IP). Pre-fix the call ran with
+    // no `identity` so checkRateLimit defaulted to the bearer
+    // PREFIX, letting token rotation defeat the 30/min cap.
+    let rlIdentity: string | undefined;
+    if (authToken) {
+      const { createHash } = await import('node:crypto');
+      rlIdentity = `a2a:${createHash('sha256').update(authToken).digest('hex').slice(0, 16)}`;
+    }
+    if (
+      !(await checkRateLimit({
+        request,
+        action: 'a2a',
+        limit: 30,
+        windowSec: 60,
+        identity: rlIdentity,
+      }))
+    ) {
+      return rateLimitResponse(60);
+    }
 
     // The callTool function bridges A2A → MCP by calling the REAL
     // MCP endpoint via HTTP. This guarantees identical behavior by

@@ -265,6 +265,20 @@ export async function applyPendingLedgerForUser(
       const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
       await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
 
+      // R5-FG-61 (P5-RU-002): flush after lrem so a sibling Lambda
+      // or cold-start reads the post-mutation state. Pre-fix the
+      // periodic drain flushed but the eager path didn't; sibling
+      // Lambdas could read stale Redis with the queue entry already
+      // applied locally but not yet persisted.
+      await store.flush().catch((flushErr) => {
+        logger.warn('eager pending ledger flush failed', {
+          component: 'PendingLedger',
+          userId: entry.userId,
+          sourceTx: entry.sourceTx,
+          error: flushErr instanceof Error ? flushErr.message : String(flushErr),
+        });
+      });
+
       applied++;
       logger.info('pending ledger adjustment applied (eager)', {
         component: 'PendingLedger',

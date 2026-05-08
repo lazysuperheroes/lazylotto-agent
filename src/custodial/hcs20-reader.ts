@@ -867,6 +867,9 @@ async function reconstructSession(
   let strategy: string | undefined;
   let boostBps: number | undefined;
   let prizeTransfer: PlaySessionCloseMessage['prizeTransfer'] | undefined;
+  // R5-FG-59: extract strategyDeviation from close OR aborted.
+  const strategyDeviation =
+    bucket.close?.strategyDeviation ?? bucket.aborted?.strategyDeviation;
   let firstSeq = Number.MAX_SAFE_INTEGER;
   let lastSeq = -1;
 
@@ -1104,6 +1107,14 @@ async function reconstructSession(
     warnings,
     firstSeq,
     lastSeq,
+    // R5-FG-58: expose the session-open's sequence so verify-audit
+    // can compare strategy_changes against the user's PLAY-INITIATION
+    // time, not against `firstSeq` (which is the minimum sequence
+    // across the entire bucket and could be a pool message in
+    // out-of-order edge cases).
+    ...(bucket.open?.sequence != null ? { openSeq: bucket.open.sequence } : {}),
+    // R5-FG-59: surface strategyDeviation from the writer.
+    ...(strategyDeviation ? { strategyDeviation } : {}),
   };
 }
 

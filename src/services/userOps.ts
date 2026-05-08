@@ -614,6 +614,26 @@ export async function replayDeposit(
         // Logged elsewhere; not credited result is still safe to surface.
       }
     }
+    // R5-FG-53 (P4-011 + P6-011): mirror R4-FG-34's self-heal for
+    // the `flush_failed_paged` outcome. Pre-fix `credited:true` with
+    // `status:'flush_failed_paged'` counted as success and cached
+    // for 24h; an operator who fixed the Redis issue and retried
+    // got the cached `flush_failed_paged` returned without ever
+    // re-attempting the flush. The on-chain side already landed +
+    // R5-FG-45 wrote the on-chain orphan, so DELing the idempotency
+    // claim and letting the retry attempt the flush again is safe.
+    if (
+      'status' in idempotent.result &&
+      idempotent.result.status === 'flush_failed_paged'
+    ) {
+      try {
+        const { getRedis, KEY_PREFIX } = await import('../auth/redis.js');
+        const redis = await getRedis();
+        await redis.del(`${KEY_PREFIX.idempotency}replay-deposit:${canonicalTxId}`);
+      } catch {
+        /* surfacing the cached result is still safe */
+      }
+    }
     return { kind: 'duplicate', result: idempotent.result };
   }
   return { kind: 'ok', result: idempotent.result };

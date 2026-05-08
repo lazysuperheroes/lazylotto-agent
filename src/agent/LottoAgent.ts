@@ -69,7 +69,25 @@ export type PrizeTransferOutcome =
       prizeCount: number;
       ownerEoa: string;
       error: string;
-      attemptsLog: { attempt: number; gas: number; error?: string }[];
+      attemptsLog: { attempt: number; gas: number; error?: string; lastSubmittedTxId?: string }[];
+      /**
+       * R5-FG-66 (P3-003): when the underlying error came back as
+       * receipt-uncertain (the SDK submitted a tx but the receipt
+       * timed out — the on-chain effect MAY have landed), this flag
+       * is set so the recovery script can mirror-query the
+       * lastSubmittedTxId BEFORE re-submitting. Without this, the
+       * recovery path reads `pendingPrizesCount > 0` and submits a
+       * SECOND `transferPendingPrizes`, double-paying when the first
+       * actually landed.
+       */
+      receiptUncertain?: boolean;
+      /**
+       * R5-FG-65 (P3-011): contract tx id of the last attempt that
+       * was submitted (regardless of receipt outcome). Lets recovery
+       * cross-check the on-chain effect via mirror node before
+       * re-submitting.
+       */
+      lastSubmittedTxId?: string;
     };
 
 // ── Prerequisite shape returned by MCP check_prerequisites ────
@@ -745,18 +763,34 @@ export class LottoAgent {
       return await this.transferAllPrizes(accountId);
     } catch (e) {
       const message = errorMsg(e);
-      const attemptsLog =
-        (e as Error & { attemptsLog?: { attempt: number; gas: number; error?: string }[] }).attemptsLog ?? [];
+      const errAny = e as Error & {
+        attemptsLog?: { attempt: number; gas: number; error?: string; lastSubmittedTxId?: string }[];
+        // R5-FG-66: receipt-uncertain wrapper from R4-FG-17.
+        receiptUncertain?: boolean;
+        lastSubmittedTxId?: string;
+      };
+      const attemptsLog = errAny.attemptsLog ?? [];
       console.error(`  Prize transfer failed: ${message}`);
       // The strategy may not have an ownerAddress (single-user CLI
       // mode) — preserve outcome contract for that path.
       const ownerEoa = this.strategyEngine.getOwnerAddress() ?? '';
+      // R5-FG-65 + R5-FG-66 (P3-011 + P3-003): preserve the
+      // last-submitted txId AND the receiptUncertain signal on the
+      // DL. Pre-fix `errorMsg(e)` collapsed both into a string and
+      // the recovery script lost any way to distinguish "INSUFFICIENT
+      // _GAS exhausted" (safe to retry) from "receipt uncertain — tx
+      // may have landed" (must mirror-check before retry).
+      const lastSubmittedTxId =
+        errAny.lastSubmittedTxId ??
+        attemptsLog.find((a) => typeof a.lastSubmittedTxId === 'string')?.lastSubmittedTxId;
       return {
         status: 'failed',
         prizeCount: 0, // unknown, may have been read or may have failed before read
         ownerEoa,
         error: message,
         attemptsLog,
+        ...(errAny.receiptUncertain ? { receiptUncertain: true } : {}),
+        ...(lastSubmittedTxId ? { lastSubmittedTxId } : {}),
       };
     }
   }

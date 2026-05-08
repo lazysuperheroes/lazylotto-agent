@@ -1,0 +1,18 @@
+# R5-FG-83 (P10-CFG-003): force LF line endings across the repo.
+# Pre-fix Windows clones got CRLF while Vercel CI got LF, producing
+# phantom diffs throughout R4 work. `text=auto` lets Git classify
+# files as text vs binary; `eol=lf` forces LF on checkout regardless
+# of platform.
+
+* text=auto eol=lf
+
+# Binary files Git should never touch line endings on.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tar binary

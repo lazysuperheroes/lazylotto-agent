@@ -768,6 +768,39 @@ on any deployment.
 
 ---
 
+## Required headers for mutating endpoints
+
+Five mutating routes hard-fail with HTTP 400 unless every request
+carries an `Idempotency-Key` header. The header lets the server
+collapse duplicate retries (network retry, browser refresh during
+in-flight, R5-FG-3 receipt-uncertain auto-retry) into a single
+on-chain action — no Idempotency-Key, no on-chain side effect.
+
+| Route | Reason |
+|-------|--------|
+| `POST /api/user/play` | Buys lottery entries — non-idempotent on chain. |
+| `POST /api/user/withdraw` | Burns user balance + transfers HBAR/token. |
+| `POST /api/admin/refund` | Operator-initiated on-chain refund. |
+| `POST /api/admin/withdraw-fees` | Operator withdraws accumulated fees. |
+| `POST /api/admin/replay-deposit` | Re-runs a dead-lettered deposit. |
+
+Use any unique value per logical operation. UUID is conventional:
+
+```bash
+curl -X POST https://testnet-agent.lazysuperheroes.com/api/user/withdraw \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"amount": 10, "token": "HBAR"}'
+```
+
+The response is cached against the key for 24h — a second request
+with the same key returns the original result without re-executing.
+Cross-origin browser callers also need `Idempotency-Key` in
+`Access-Control-Allow-Headers` (R5-FG-36 added this).
+
+---
+
 ## Web Dashboard
 
 The agent includes a Next.js frontend for browser-based interaction.

@@ -173,13 +173,21 @@ export function buildAgentCard(): AgentCard {
       : 'https://testnet-agent.lazysuperheroes.com';
 
   // R4-FG-56 (round-4 medium): version sourced from the imported
-  // package.json so it can never drift. Env var fallback retained for
-  // bespoke deployments that override (e.g., a fork running its own
-  // build pipeline).
+  // package.json so it can never drift.
+  //
+  // R5-FG-56 (P4-008): invert the fallback chain so the immutable
+  // build-time import wins. Pre-fix `process.env.NEXT_PUBLIC_APP_VERSION
+  // ?? process.env.npm_package_version ?? PACKAGE_VERSION` made
+  // env-var values win whenever they were set; build-time inlining
+  // drift (operator deploys via `next build && next start` without
+  // rebuilding) left env stale at the previously-built value while
+  // package.json moved on. The fallback NEVER fired. Now: build-time
+  // import wins; env vars are an explicit-override path for forks.
   const version =
+    PACKAGE_VERSION ??
     process.env.NEXT_PUBLIC_APP_VERSION ??
     process.env.npm_package_version ??
-    PACKAGE_VERSION;
+    '0.0.0-unknown';
 
   return {
     name: 'LazyLotto Agent',

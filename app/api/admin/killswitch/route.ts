@@ -48,8 +48,17 @@ export const GET = withStore(async (request: Request) => {
   const auth = await requireTier(request, 'admin');
   if (isErrorResponse(auth)) return auth;
 
+  // R5-FG-70 (P7-004): admin-tier GET returns a sanitized view —
+  // strip `enabledBy` and `enabledAt`. Admin tier (WalletConnect-
+  // authenticated address in ADMIN_ACCOUNTS) and operator tier
+  // (MCP_AUTH_TOKEN bearer) are not the same population. Pre-fix
+  // an admin's curiosity (or compromise) yielded the operator's
+  // primary Hedera account via `enabledBy`. Operator tier still
+  // sees the full state via the MCP `operator_killswitch_status`
+  // tool path — that surface is bearer-authenticated.
   const state = await getKillSwitchState();
-  return NextResponse.json(state, { headers: CORS_HEADERS });
+  const { enabledBy: _enabledBy, enabledAt: _enabledAt, ...safe } = state;
+  return NextResponse.json(safe, { headers: CORS_HEADERS });
 });
 
 export const POST = withStore(async (request: Request) => {

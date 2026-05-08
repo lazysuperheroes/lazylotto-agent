@@ -422,7 +422,15 @@ export class AccountingService {
     userAccountId: string;
     agentAccountId: string;
     prizesTransferred: number;
-    /** Per-token totals computed from local sessions, if available. */
+    /**
+     * Per-token totals computed from local sessions.
+     * R5-FG-89 (P12-313): now always serialized, even when empty
+     * (`{}`). Pre-fix the field was spread only when defined, so a
+     * mix of "carries token detail" and "carries only count" events
+     * made conservation math best-effort. Emitting `{}` makes the
+     * absence of detail explicit (different from "this version of
+     * the writer didn't know about the field at all").
+     */
     prizesByToken?: Record<string, number>;
     /** Hedera contract tx ID returned by transferPendingPrizes. */
     contractTxId: string;
@@ -445,7 +453,10 @@ export class AccountingService {
       user: details.userAccountId,
       agent: details.agentAccountId,
       prizesTransferred: details.prizesTransferred,
-      ...(details.prizesByToken ? { prizesByToken: details.prizesByToken } : {}),
+      // R5-FG-89: always emit prizesByToken (defaulting to `{}`) so
+      // the reader can distinguish "writer chose not to specify"
+      // from "this writer doesn't know the field".
+      prizesByToken: details.prizesByToken ?? {},
       contractTxId: details.contractTxId,
       reason: details.reason,
       performedBy: details.performedBy,

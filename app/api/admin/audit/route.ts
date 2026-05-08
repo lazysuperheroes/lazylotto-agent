@@ -352,13 +352,24 @@ export async function OPTIONS() {
 
 export async function GET(request: Request) {
   try {
-    // Mirror node topic scan — tighter limit
-    if (!(await checkRateLimit({ request, action: 'admin-audit', limit: 20, windowSec: 60 }))) {
-      return rateLimitResponse(60);
-    }
-
+    // R5-FG-71 + R5-FG-74: authenticate first, rate-limit by
+    // accountId so token rotation can't bypass the cap. Mirror node
+    // topic scan is expensive — tight per-account limit + a per-
+    // account audit-aggregation budget (R5-FG-74) bounds amplification.
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
+
+    if (
+      !(await checkRateLimit({
+        request,
+        action: 'admin-audit',
+        limit: 20,
+        windowSec: 60,
+        identity: auth.accountId,
+      }))
+    ) {
+      return rateLimitResponse(60);
+    }
 
     const topicId = process.env.HCS20_TOPIC_ID;
 

@@ -74,12 +74,21 @@ export async function OPTIONS() {
 
 export async function GET(request: Request) {
   try {
-    if (!(await checkRateLimit({ request, action: 'admin-monitoring', limit: 20, windowSec: 60 }))) {
-      return rateLimitResponse(60);
-    }
-
+    // R5-FG-71: authenticate first, rate-limit by accountId.
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
+
+    if (
+      !(await checkRateLimit({
+        request,
+        action: 'admin-monitoring',
+        limit: 20,
+        windowSec: 60,
+        identity: auth.accountId,
+      }))
+    ) {
+      return rateLimitResponse(60);
+    }
 
     const topicId = process.env.HCS20_TOPIC_ID;
     if (!topicId) {
@@ -96,7 +105,14 @@ export async function GET(request: Request) {
     // Walk the topic
     const messages: RawTopicMessage[] = [];
     let nextPath: string | null = `/topics/${topicId}/messages?limit=100&order=asc`;
-    while (nextPath) {
+    // R5-FG-73 (P7-011): cap pagination at MAX_PAGES (matches the
+    // R4-FG-46 cap on the audit endpoints). Pre-fix `while(nextPath)`
+    // with no page limit could fetch a 1M-message topic at 8s/page,
+    // easily blowing the 60s function ceiling.
+    const MAX_PAGES = 1000;
+    let pageCount = 0;
+    while (nextPath && pageCount < MAX_PAGES) {
+      pageCount++;
       const url = nextPath.startsWith('/api/v1')
         ? `${mirrorBase.replace(/\/api\/v1$/, '')}${nextPath}`
         : `${mirrorBase}${nextPath}`;

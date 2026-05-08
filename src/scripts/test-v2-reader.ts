@@ -41,9 +41,21 @@ async function main() {
     for (const m of data.messages ?? []) {
       try {
         const payload = JSON.parse(Buffer.from(m.message, 'base64').toString('utf-8'));
+        // R5-FG-85 (P10-CLI-001): preserve nanosecond precision in
+        // consensus_timestamp. Pre-fix `split('.')[0] * 1000` discarded
+        // the fractional part, so two messages sharing the same integer
+        // second collapsed to identical Date.toISOString() output and
+        // sub-second order was lost. Mirror responses are
+        // `<seconds>.<nanoseconds>`; convert to ISO via Number * 1000
+        // (millisecond precision is sufficient for ordering, but we
+        // preserve down to ms instead of truncating to s).
+        const tsParts = m.consensus_timestamp.split('.');
+        const seconds = Number(tsParts[0] ?? 0);
+        const nanos = Number(tsParts[1] ?? 0);
+        const ms = seconds * 1000 + Math.floor(nanos / 1_000_000);
         allMessages.push({
           sequence: m.sequence_number,
-          timestamp: new Date(Number(m.consensus_timestamp.split('.')[0]) * 1000).toISOString(),
+          timestamp: new Date(ms).toISOString(),
           payload,
         });
       } catch {

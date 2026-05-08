@@ -211,6 +211,9 @@ export class UserLedger {
             uncertainTxId: txId,
             userId,
             cause: err,
+            // R5-FG-69: link to the rake side so a flood of HCS
+            // failures doesn't read as two separate incidents.
+            relatedTxId: txId,
           });
         } catch (escalateErr) {
           console.error(
@@ -255,6 +258,9 @@ export class UserLedger {
             uncertainTxId: txId,
             userId,
             cause: err,
+            // R5-FG-69: link to the deposit side so a flood of HCS
+            // failures doesn't read as two separate incidents.
+            relatedTxId: txId,
           });
         } catch (escalateErr) {
           console.error(

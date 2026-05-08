@@ -163,6 +163,15 @@ export interface PlaySessionCloseMessage {
     gasUsed?: number;
     lastError?: string;
   };
+  /**
+   * R5-FG-59 (P12-309): when the agent legitimately deviated from
+   * the strategy snapshotted at session-open (budget exhaustion,
+   * killswitch mid-play, per-pool fee filter), this field records
+   * the deviation reason. R4-FG-60 detects only disagreement
+   * between `strategy_change` and `session_open`, NOT between
+   * `session_open` and actual play behavior.
+   */
+  strategyDeviation?: { reason: string; field?: string };
   ts: string;
 }
 
@@ -203,6 +212,8 @@ export interface PlaySessionAbortedMessage {
   reason: string;
   /** Truncated error message (max ~200 chars to stay within size budget). */
   lastError?: string;
+  /** R5-FG-59: optional deviation marker (see PlaySessionCloseMessage). */
+  strategyDeviation?: { reason: string; field?: string };
   abortedAt: string;
 }
 
@@ -325,6 +336,29 @@ export interface NormalizedSession {
   /** First and last sequence numbers observed for this session. */
   firstSeq: number;
   lastSeq: number;
+  /**
+   * R5-FG-58 (P12-311): the sequence number of the
+   * `play_session_open` message, distinct from `firstSeq` (the
+   * minimum seq across the whole session bucket). For an
+   * out-of-order session — rare but possible — `firstSeq` could
+   * equal a pool message's sequence. A strategy_change between
+   * open's logical time and firstSeq's actual time would be applied
+   * incorrectly. `verify-audit`'s strategy cross-check uses
+   * `openSeq` so the check compares to the strategy that was active
+   * when the user *initiated* the play (the open), not when the
+   * first pool happened to land on the topic.
+   */
+  openSeq?: number;
+  /**
+   * R5-FG-59 (P12-309): when the agent legitimately deviated from
+   * the strategy snapshotted at session-open (budget exhaustion,
+   * killswitch mid-play, per-pool fee filter), the close/aborted
+   * message can carry this field so an auditor sees session
+   * behavior diverged from the recorded strategy intentionally.
+   * Surfaced by verify-audit as an `info` alert (NOT a critical
+   * mismatch — the field's presence is the explanation).
+   */
+  strategyDeviation?: { reason: string; field?: string };
 }
 
 export interface NormalizedPool {

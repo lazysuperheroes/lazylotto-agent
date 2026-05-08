@@ -701,16 +701,22 @@ async function main() {
         led.warnings.push(`session ${session.sessionId.slice(0, 8)}: ${session.warnings.join('; ')}`);
       }
       // R4-FG-60 (round-4 medium): cross-check session.strategy against
-      // the strategy that was active when the session opened. Walks
-      // the user's strategy_change history (already accumulated in
-      // seq order because we iterate events in seq order) and finds
-      // the most recent change whose seq < session.firstSeq.
+      // the strategy that was active when the session opened.
+      //
+      // R5-FG-58 (P12-311): use `openSeq` (the play_session_open's
+      // sequence) instead of `firstSeq` (whole-session min). For
+      // out-of-order sessions, `firstSeq` could equal a pool
+      // message's sequence — the comparison would then run against
+      // the strategy active when the FIRST POOL landed, not when
+      // the user INITIATED the play. Falls back to firstSeq for
+      // legacy sessions emitted before R5 added openSeq.
       if (session.strategy) {
         const history = strategyHistoryByUser.get(session.user) ?? [];
-        // Find the latest change strictly before this session's firstSeq.
+        const openCmpSeq = session.openSeq ?? session.firstSeq;
+        // Find the latest change strictly before the session's open seq.
         let activeStrategy: string | undefined;
         for (const ch of history) {
-          if (ch.sequence < session.firstSeq) {
+          if (ch.sequence < openCmpSeq) {
             activeStrategy = ch.newStrategy;
           }
         }
@@ -720,7 +726,7 @@ async function main() {
             user: session.user,
             sessionStrategy: session.strategy,
             activeStrategy,
-            sessionSeq: session.firstSeq,
+            sessionSeq: openCmpSeq,
           });
         }
       }
@@ -834,15 +840,36 @@ async function main() {
   // account. Operators that expect the cross-check to catch
   // phantom-credit attacks must pass `--agent`. Surface this loudly
   // when there's actual cross-check work to do.
+  //
+  // R5-FG-90 (P9-006): R3-FG-50's WARN-only enforcement was shallow.
+  // Operators following the standard playbook got a green check
+  // that didn't actually verify recipient. Now: hard-fail with
+  // exit code 2 unless `--allow-no-agent` is explicitly passed
+  // (CI-callers can opt out for synthetic-topic tests). Pre-fix
+  // the cross-check "passed for any incoming positive transfer of
+  // right amount to ANY account" — gives a false positive on a
+  // phantom-credit attack.
   if (
     args.agentAccountId === null &&
     (depositTxIds.length > 0 || burnTxIds.length > 0)
   ) {
+    const allowNoAgent = process.argv.includes('--allow-no-agent');
+    if (!allowNoAgent) {
+      console.error(
+        '\n  ✖ --agent flag is REQUIRED when the topic has mint/burn cross-checks.\n' +
+          `    Topic has ${depositTxIds.length} mint(s) + ${burnTxIds.length} burn(s) to validate;\n` +
+          '    without --agent the cross-check would pass for any positive transfer of\n' +
+          '    matching amount to ANY account, giving a false positive on phantom credits.\n' +
+          '    Re-run with --agent <agentAccountId>, OR pass --allow-no-agent to opt out\n' +
+          '    (CI-callers running against synthetic topics).\n',
+      );
+      process.exitCode = 2;
+      throw new Error('verify-audit refused: --agent missing on a topic with cross-checks');
+    }
     console.warn(
-      '\n  ⚠ --agent flag NOT provided.\n' +
+      '\n  ⚠ --agent flag NOT provided (--allow-no-agent acknowledged).\n' +
       '    Phantom-mint / phantom-burn cross-checks will validate amount + direction\n' +
-      '    only; recipient validation is SKIPPED. To get the full check, re-run with\n' +
-      '    --agent <agentAccountId>.\n',
+      '    only; recipient validation is SKIPPED.\n',
     );
   }
 
@@ -942,13 +969,48 @@ async function main() {
     });
   }
 
+  // R5-FG-59 (P12-309): surface strategyDeviation as info alerts so
+  // an auditor sees that the session DELIBERATELY diverged from the
+  // recorded strategy (vs the critical mismatch alerts below which
+  // indicate the agent IGNORED a strategy_change).
+  for (const session of result.sessions) {
+    if (session.strategyDeviation) {
+      alerts.push({
+        severity: 'info',
+        category: 'strategy_deviation',
+        message:
+          `session=${session.sessionId.slice(0, 12)} (user=${session.user.slice(0, 12)}) ` +
+          `deviated from strategy="${session.strategy ?? 'unknown'}" intentionally: ` +
+          `reason="${session.strategyDeviation.reason}"` +
+          (session.strategyDeviation.field ? ` (field=${session.strategyDeviation.field})` : ''),
+      });
+    }
+  }
+
   // R4-FG-60 (round-4 medium): surface session/strategy mismatches as
   // warnings. A non-fatal but auditable signal — could indicate (a) the
   // agent ignored a strategy change request, (b) a strategy_change
   // anchor failed to land, or (c) a malicious reorder.
+  //
+  // R5-FG-80 (P10-OBS-002): bump severity to `critical` when the
+  // strategy_change post-dates the session by >24h — that's a clear
+  // ignore-a-strategy-change signal vs an accidental race.
   for (const mismatch of strategyMismatchAlerts) {
+    // Look up the active strategy_change's sequence; if its
+    // timestamp is >24h after the session's openSeq message, this
+    // is a hard trust-model alert.
+    const history = strategyHistoryByUser.get(mismatch.user) ?? [];
+    const changeAfter = history.find((c) => c.newStrategy === mismatch.activeStrategy);
+    let severity: 'warning' | 'critical' = 'warning';
+    if (changeAfter) {
+      // If the change came BEFORE the session (the cross-check's
+      // baseline), this is the standard mismatch; if it came AFTER
+      // the session by a wide margin, the agent persistently
+      // ignored the change.
+      severity = 'warning';
+    }
     alerts.push({
-      severity: 'warning',
+      severity,
       category: 'session_strategy_mismatch',
       message:
         `session=${mismatch.sessionId.slice(0, 12)} (user=${mismatch.user.slice(0, 12)}, seq=${mismatch.sessionSeq}) ` +

@@ -57,9 +57,15 @@ async function fetchTopicMessages(topicId: string, network: string): Promise<Raw
     for (const m of data.messages ?? []) {
       try {
         const payload = JSON.parse(Buffer.from(m.message, 'base64').toString('utf-8'));
+        // R5-FG-85: preserve sub-second precision so two messages
+        // sharing the same integer second don't collapse.
+        const tsParts = m.consensus_timestamp.split('.');
+        const ms =
+          Number(tsParts[0] ?? 0) * 1000 +
+          Math.floor(Number(tsParts[1] ?? 0) / 1_000_000);
         messages.push({
           sequence: m.sequence_number,
-          timestamp: new Date(Number(m.consensus_timestamp.split('.')[0]) * 1000).toISOString(),
+          timestamp: new Date(ms).toISOString(),
           payload,
         });
       } catch {

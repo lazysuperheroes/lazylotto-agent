@@ -38,6 +38,7 @@ import { classifyMirrorResult } from './responseCodes.js';
 import { RELEASE_SCRIPT, acquireUserLock, releaseUserLock, tryAcquireUserLockWithBackoff } from '../lib/locks.js';
 import { parseTxIdTimestamp } from '../custodial/uncertainTxVerification.js';
 import { mintAuditOrphanId } from '../lib/orphanIds.js';
+import { randomUUID } from 'node:crypto';
 
 const REFUND_KEY_PREFIX = KEY_PREFIX.refunded;
 
@@ -371,9 +372,17 @@ export async function processRefund(
     }
 
     redisLockKey = `${REFUND_KEY_PREFIX}${transactionId}`;
+    // R5-FG-68 (P6-010): store a fenced value `pending:<uuid>` so
+    // the Regime A/B failure DEL at line ~791 can compare-and-delete
+    // via RELEASE_SCRIPT instead of unfenced DEL. Pre-fix the
+    // unfenced DEL would nuke a SIBLING acquirer's claim if the
+    // current Lambda's TTL elapsed and a sibling had acquired with
+    // their own value. Same archetype as R4-FG-65 fenced for
+    // withIdempotency; refund.ts was the sibling miss.
+    const claimFence = `pending:${randomUUID()}`;
     const claimResult = await redis.set(
       redisLockKey,
-      'pending',
+      claimFence,
       { nx: true, ex: 30 * 24 * 60 * 60 },
     );
     if (claimResult === null) {
@@ -394,7 +403,12 @@ export async function processRefund(
       // not a refundTxId and the message would mislead the operator.
       const existing = await redis.get<string>(redisLockKey);
       let message: string;
-      if (existing === 'pending') {
+      // R5-FG-68: legacy literal 'pending' OR new fenced 'pending:<uuid>'
+      // both indicate an in-progress refund claim.
+      if (
+        existing === 'pending' ||
+        (typeof existing === 'string' && existing.startsWith('pending:'))
+      ) {
         message =
           `Refund for ${transactionId} is already in progress on another ` +
           `Lambda. Try again in a minute.`;
@@ -788,7 +802,10 @@ export async function processRefund(
     if (redisLockKey) {
       try {
         const redis = await getRedis();
-        await redis.del(redisLockKey);
+        // R5-FG-68: fenced compare-and-DEL via RELEASE_SCRIPT.
+        // Pre-fix unfenced DEL nuked sibling acquirers' fresh
+        // claims after our 30-day TTL elapsed.
+        await redis.eval(RELEASE_SCRIPT, [redisLockKey], [claimFence]);
       } catch (delErr) {
         // The 30-day TTL is the worst-case fallback; the marker
         // expires on its own. Surface so an operator can manually
@@ -1430,6 +1447,70 @@ export async function verifyUncertainRefunds(
     }
 
     // ── Confirmed SUCCESS: complete bookkeeping + mark resolved ──
+    // R5-FG-60 (P5-AT-002): refuse to process the success branch when
+    // required fields are missing. Pre-fix `tokenKey` / `humanAmount`
+    // missing (legacy DL or shape regression) caused the entire
+    // ledger-adjustment block to be bypassed (didAdjustLedger=false),
+    // the audit-anchor block also gated on `humanAmount`, and the
+    // resolve-write fired anyway. Outcome: refund landed on chain,
+    // user NOT debited locally, topic has NO refund anchor, entry
+    // resolved → user retains deposit credit + receives refund. Now:
+    // bump verificationAttempts and surface as `still_uncertain` so
+    // an operator gets paged via R3-FG-77 / R5-FG-91 ordering check.
+    if (
+      !details.tokenKey ||
+      typeof details.humanAmount !== 'number' ||
+      !Number.isFinite(details.humanAmount) ||
+      details.humanAmount < 0
+    ) {
+      logger.error(
+        'refund_uncertain SUCCESS branch — required fields missing/malformed; cannot apply post-conditions',
+        {
+          component: 'Refund',
+          event: 'refund_uncertain_malformed_required_fields',
+          refundTxId,
+          tokenKey: details.tokenKey,
+          humanAmount: details.humanAmount,
+        },
+      );
+      try {
+        await store.upsertDeadLetter({
+          transactionId: mintAuditOrphanId('audit-orphan:refund-malformed', refundTxId),
+          timestamp: new Date().toISOString(),
+          error: `refund SUCCESS but tokenKey/humanAmount missing — cannot debit ledger or write audit anchor`,
+          kind: 'audit_trail_orphaned',
+          details: {
+            sourceKind: 'refund_verifier_malformed_required',
+            sourceTxId: refundTxId,
+            tokenKey: details.tokenKey,
+            humanAmount: details.humanAmount,
+            phase: 'malformed_required_fields',
+          },
+        });
+      } catch {
+        /* logged above */
+      }
+      try {
+        await escalateUncertainDlFailure({
+          kind: 'refund_uncertain',
+          uncertainTxId: refundTxId,
+          cause: new Error(
+            'refund_uncertain confirmed SUCCESS but details.tokenKey/humanAmount malformed; manual reconstruction required',
+          ),
+        });
+      } catch {
+        /* operator-visible via dead-letter row */
+      }
+      await releaseRefundLock();
+      outcomes.push({
+        refundTxId,
+        originalTxId,
+        status: 'still_uncertain',
+        note: 'On-chain refund confirmed SUCCESS but details required for ledger/audit are malformed; entry left unresolved for operator manual triage.',
+      });
+      continue;
+    }
+
     // Best-effort: each post-condition is wrapped so a partial
     // failure (audit, ledger) doesn't block resolution. The claim
     // marker is already in place (kept by the original refund call)
@@ -1817,6 +1898,43 @@ export async function verifyUncertainRefunds(
             component: 'Refund',
             error: escErr instanceof Error ? escErr.message : String(escErr),
           });
+          // R5-FG-64 (P3-010): retry once with a 30s gap, then write
+          // a SECOND orphan tagged escalation_throw_after_sadd_failure
+          // so an operator chasing the dead-letter list sees both the
+          // original and the failed-page anchor. Pre-fix this catch
+          // logged + continued — operator was UN-paged, the orphan
+          // sat forever, after 30d the per-tx claim TTL'd out and a
+          // fresh refund attempt opened the duplicate window.
+          await new Promise((r) => setTimeout(r, 30_000));
+          try {
+            await escalateUncertainDlFailure({
+              kind: 'refunded_originals_sadd_failed',
+              uncertainTxId: sadd_originalTxId,
+              cause: e,
+            });
+          } catch (retryEscErr) {
+            // Still failing — write a secondary orphan so the
+            // operator's DL list shows the un-paged state.
+            try {
+              await store.upsertDeadLetter({
+                transactionId: mintAuditOrphanId(
+                  'audit-orphan:refund-verifier-escalation-fail',
+                  sadd_originalTxId,
+                ),
+                timestamp: new Date().toISOString(),
+                error: `verifier escalation throw after SADD failure (after 30s retry): ${retryEscErr instanceof Error ? retryEscErr.message : String(retryEscErr)}`,
+                kind: 'audit_trail_orphaned',
+                details: {
+                  sourceKind: 'refund_verifier_post_success_orphan',
+                  sourceTxId: sadd_originalTxId,
+                  refundTxId,
+                  phase: 'escalation_throw_after_sadd_failure',
+                },
+              });
+            } catch {
+              /* the original error log above is the trail */
+            }
+          }
         }
       }
     }

@@ -126,6 +126,13 @@ export function wrapAsTask(
 
   const state: TaskState = isError ? 'failed' : 'completed';
 
+  // R5-FG-55 (P7-009): when MCP returns the non-error
+  // `flush_failed_paged` outcome, surface it as a status-message
+  // DataPart so external A2A agents can branch on it. Pre-fix
+  // wrapAsTask returned `state='completed'` with no signal that
+  // the operator was paged — calling agents assumed success.
+  const isFlushFailedPaged = resultData?.status === 'flush_failed_paged';
+
   const artifacts: Artifact[] = [
     {
       artifactId: randomUUID(),
@@ -145,6 +152,20 @@ export function wrapAsTask(
         messageId: randomUUID(),
         role: 'agent' as const,
         parts: [{ kind: 'text' as const, text: resultData.error as string ?? text }],
+      }
+    : isFlushFailedPaged
+    ? {
+        kind: 'message' as const,
+        messageId: randomUUID(),
+        role: 'agent' as const,
+        parts: [
+          {
+            kind: 'text' as const,
+            text:
+              'Local state mutated; Redis flush failed; orphan row written; operator paged. ' +
+              'Retry safe — the on-chain side already landed and idempotency is in place.',
+          },
+        ],
       }
     : undefined;
 
@@ -177,14 +198,24 @@ export async function handleSendMessage(
   // 1. Parse skill invocation
   const invocation = parseSkillInvocation(message);
 
+  // R5-FG-92 (P7-013): only enumerate the public `multi_user_*`
+  // skills in unknown-skill / no-invocation error responses.
+  // Pre-fix the full skill list (including `operator_*`) was leaked
+  // to unauthenticated callers — every operator skill name became
+  // a known attack surface name. Operators with valid bearer
+  // tokens can already discover the operator skills via the agent
+  // card (which itself is gated on auth at the route layer).
+  const publicSkills = Array.from(getSkillIds())
+    .filter((id) => id.startsWith('multi_user_'))
+    .join(', ');
+
   if (!invocation) {
-    const skills = Array.from(getSkillIds()).join(', ');
     const errorResult: ToolResult = {
       content: [{
         type: 'text',
         text: JSON.stringify({
           error: 'No skill invocation found in message. Send a DataPart with { skill, params }.',
-          availableSkills: skills,
+          availableSkills: publicSkills,
         }),
       }],
       isError: true,
@@ -198,7 +229,7 @@ export async function handleSendMessage(
 
   // 2. Validate skill exists
   if (!getSkillIds().has(invocation.skill)) {
-    const skills = Array.from(getSkillIds()).join(', ');
+    const skills = publicSkills;
     const errorResult: ToolResult = {
       content: [{
         type: 'text',

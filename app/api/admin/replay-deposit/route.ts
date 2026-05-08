@@ -108,7 +108,26 @@ export const POST = withStore(async (request: Request) => {
             { status: 409, headers: CORS_HEADERS },
           );
         case 'duplicate':
-        case 'ok':
+        case 'ok': {
+          // R5-FG-54 (P12-312): surface flush_failed_paged with
+          // HTTP 207 + a warning so the admin UI can banner the
+          // paged condition. Pre-fix the switch fell through with
+          // credited:true and no signal — operator saw "replayed
+          // ok" with no indication that local state mutated, Redis
+          // flush failed, and they had been paged.
+          if (opResult.result.status === 'flush_failed_paged') {
+            return NextResponse.json(
+              {
+                transactionId: opResult.result.transactionId,
+                credited: opResult.result.credited,
+                status: opResult.result.status,
+                warning:
+                  'Local state mutated; Redis flush failed; orphan row written; operator paged. Run reconcile to confirm topic-side anchor.',
+                ...(opResult.kind === 'duplicate' ? { replayed: true } : {}),
+              },
+              { status: 207, headers: { ...CORS_HEADERS, ...replayedHeader } },
+            );
+          }
           return NextResponse.json(
             {
               transactionId: opResult.result.transactionId,
@@ -118,6 +137,7 @@ export const POST = withStore(async (request: Request) => {
             },
             { headers: { ...CORS_HEADERS, ...replayedHeader } },
           );
+        }
         // Replay-deposit doesn't currently use user lock; access checks
         // happen at requireTier level. These cases shouldn't fire.
         case 'lock_held':

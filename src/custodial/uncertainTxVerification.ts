@@ -164,9 +164,20 @@ function validateProgressOrdering(
   const details = (entry.details ?? {}) as Record<string, unknown>;
   let sawUnset = false;
   for (const marker of order) {
-    const set = typeof details[marker] === 'string';
+    const value = details[marker];
+    const set = typeof value === 'string';
     if (set && sawUnset) {
       return `inconsistent progress markers: ${marker} set without prior step`;
+    }
+    // R5-FG-91 (P9-005): a string that ISN'T a valid ISO-8601
+    // timestamp should be treated as malformed. Pre-fix R3-FG-77
+    // only checked typeof === 'string', so an attacker-controlled
+    // (or buggy-writer) literal like 'pending' passed the gate.
+    // Combined with R3-FG-3's gate-on-truthiness pattern this
+    // caused the verifier to skip mutation steps that should have
+    // run.
+    if (set && Number.isNaN(Date.parse(value as string))) {
+      return `progress marker ${marker} is not a valid ISO-8601 timestamp: ${(value as string).slice(0, 32)}`;
     }
     if (!set) sawUnset = true;
   }
@@ -536,18 +547,35 @@ async function bumpUserLockContentionAttempts(
         attempts: next,
       },
     );
-    await escalateUncertainDlFailure({
-      kind: (entry.kind ?? 'withdrawal_uncertain') as
-        | 'withdrawal_uncertain'
-        | 'operator_fee_withdraw_uncertain'
-        | 'play_uncertain'
-        | 'refund_uncertain',
-      uncertainTxId: entry.transactionId,
-      userId: entry.details?.userId as string | undefined,
-      cause: new Error(
-        `Verifier deferred ${next} consecutive passes — per-user lock held by long-running in-band op or runaway play loop`,
-      ),
-    });
+    // R5-FG-75 (P5-WU-002): refuse to escalate when entry.kind is
+    // undefined. Pre-fix `entry.kind ?? 'withdrawal_uncertain'`
+    // routed malformed legacy DLs under the wrong category, so the
+    // operator runbook keyed on `kind` mis-routed.
+    if (
+      entry.kind === 'withdrawal_uncertain' ||
+      entry.kind === 'operator_fee_withdraw_uncertain' ||
+      entry.kind === 'play_uncertain' ||
+      entry.kind === 'refund_uncertain'
+    ) {
+      await escalateUncertainDlFailure({
+        kind: entry.kind,
+        uncertainTxId: entry.transactionId,
+        userId: entry.details?.userId as string | undefined,
+        cause: new Error(
+          `Verifier deferred ${next} consecutive passes — per-user lock held by long-running in-band op or runaway play loop`,
+        ),
+      });
+    } else {
+      logger.error(
+        'user-lock contention threshold reached on entry with unrecognized kind — refusing to escalate',
+        {
+          component: 'UncertainTx',
+          event: 'user_lock_contention_unknown_kind',
+          kind: entry.kind ?? '(undefined)',
+          txId: entry.transactionId,
+        },
+      );
+    }
   }
 }
 
@@ -601,6 +629,18 @@ async function markResolved(
   resolutionTxId: string,
   progress?: Record<string, unknown>,
 ): Promise<void> {
+  // R5-FG-76 (P5-AT-003): clear contention/attempt counters on
+  // resolve. Pre-fix `userLockContentionAttempts` and
+  // `verificationAttempts` only ever incremented; if an operator
+  // cleared `resolvedAt` to re-run a previously-resolved entry,
+  // the next pass started near the threshold and could fire a
+  // page on the FIRST contention hit. Resolution is a success
+  // signal; reset counters so a future re-run starts fresh.
+  const cleanedProgress: Record<string, unknown> = {
+    ...(progress ?? {}),
+    userLockContentionAttempts: 0,
+    verificationAttempts: 0,
+  };
   try {
     // R4-FG-1 (round-4 P1-001): refresh-then-spread, mirroring R3-FG-10
     // in `stampProgress`. Pre-fix the upsert spread `...entry` (the
@@ -627,7 +667,7 @@ async function markResolved(
     }
     await store.upsertDeadLetter({
       ...base,
-      details: { ...(base.details ?? {}), ...(progress ?? {}) },
+      details: { ...(base.details ?? {}), ...cleanedProgress },
       resolvedAt: new Date().toISOString(),
       resolvedBy: 'reconcile',
       resolutionTxId,
@@ -1748,14 +1788,25 @@ export async function verifyUncertainPlays(
       }
     }
 
-    await escalateUncertainDlFailure({
-      kind: 'play_uncertain',
-      uncertainTxId,
-      userId: details.userId,
-      cause: new Error(
-        'play_uncertain confirmed SUCCESS — settlement state must be reconstructed manually from dApp pool state',
-      ),
-    });
+    // R5-FG-77 (P5-PU-004): only escalate on FIRST encounter. Pre-fix
+    // this fired every reconcile pass for the same entry; if a
+    // force-release later cleared `resolvedAt`, the verifier would
+    // re-walk and re-page with no new info. Gate on
+    // `!entry.details.successTriagedAt` so the first pass pages
+    // (anchor either landed successfully → triage stamp set; or
+    // anchor failed → playMutationError set + no triage stamp; the
+    // page still fires); subsequent passes after the stamp lands
+    // skip the page since the operator already has it.
+    if (!entry.details?.successTriagedAt) {
+      await escalateUncertainDlFailure({
+        kind: 'play_uncertain',
+        uncertainTxId,
+        userId: details.userId,
+        cause: new Error(
+          'play_uncertain confirmed SUCCESS — settlement state must be reconstructed manually from dApp pool state',
+        ),
+      });
+    }
     // R4-FG-6: gate the resolve write on anchor success. Pre-fix the
     // resolve write fired even when the anchor failed → entry shows
     // resolved with no topic record → topic-only auditor sees no
