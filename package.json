@@ -30,6 +30,7 @@
     "wizard": "node --import tsx src/index.ts --wizard",
     "read-accounting": "node --import tsx src/cli/read-accounting.ts",
     "smoke-test": "node --import tsx src/cli/smoke-test.ts",
+    "revert-proof:update-baseline": "node --import tsx src/scripts/update-revert-proof-baseline.ts",
     "dev:http": "node --import tsx src/index.ts --mcp-server --http",
     "dev:multi-http": "node --import tsx src/index.ts --multi-user --mcp-server --http",
     "test": "node --test --import tsx src/**/*.test.ts src/__tests__/*.test.ts",
