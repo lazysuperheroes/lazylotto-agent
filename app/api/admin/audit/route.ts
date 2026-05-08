@@ -364,15 +364,32 @@ export async function GET(request: Request) {
     const mirrorBase = getMirrorBase();
 
     // Fetch all topic messages with pagination
+    //
+    // R4-FG-46 (round-4 medium): each mirror fetch carries an 8s
+    // AbortSignal timeout so a slowloris response can't wedge the
+    // Lambda for the full function ceiling. R3-FG-42 added timeouts
+    // to the monitoring path; the audit endpoints' pagination was a
+    // sibling miss. Plus a hard MAX_PAGES cap (1000 pages × 100
+    // messages = 100K messages) so a runaway `links.next` chain
+    // can't loop forever.
+    const FETCH_TIMEOUT_MS = 8_000;
+    const MAX_PAGES = 1000;
     const allMessages: TopicMessage[] = [];
     let nextPath: string | null = `/topics/${topicId}/messages?limit=100&order=asc`;
+    let pages = 0;
 
     while (nextPath) {
+      if (pages >= MAX_PAGES) {
+        throw new Error(
+          `Mirror pagination exceeded MAX_PAGES=${MAX_PAGES}; aborting to prevent function-ceiling timeout`,
+        );
+      }
+      pages++;
       const fetchUrl = nextPath.startsWith('/api/v1')
         ? `${mirrorBase.replace(/\/api\/v1$/, '')}${nextPath}`
         : `${mirrorBase}${nextPath}`;
 
-      const res = await fetch(fetchUrl);
+      const res = await fetch(fetchUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
       if (!res.ok) {
         if (res.status === 404) {
           return NextResponse.json(

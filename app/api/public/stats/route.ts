@@ -100,7 +100,13 @@ export async function GET() {
         },
         tvl: tvlRounded,
         hcs20TopicId: config.hcs20TopicId,
-        operatorWithdrawAddress: process.env.OPERATOR_WITHDRAW_ADDRESS || null,
+        // R4-FG-41 (round-4 medium): operatorWithdrawAddress removed
+        // from the public payload. It's an internal config field
+        // whose purpose is to lock operator-fee withdrawals to a
+        // specific destination — publishing it focuses social-
+        // engineering / key-recovery attacks on a known target.
+        // The address is observable on-chain via the agent's
+        // withdrawal history; we don't need to advertise it.
         // User-facing operational status
         acceptingOperations,
         statusMessage,

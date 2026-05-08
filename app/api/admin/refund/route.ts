@@ -5,7 +5,9 @@
  * transaction on the mirror node, identifies the sender, and transfers
  * the same amount back.
  *
- * Requires 'operator' tier auth.
+ * Requires 'admin' tier auth (closes R3-FG-40 — runtime check below
+ * uses `requireTier(request, 'admin')`; doc was 'operator' pre-fix).
+ * R4-FG-61 doc fix.
  */
 
 import { NextResponse } from 'next/server';
@@ -30,13 +32,24 @@ export async function OPTIONS() {
 
 export const POST = withStore(async (request: Request) => {
   try {
-    // Refund moves real money — strict rate limit
-    if (!(await checkRateLimit({ request, action: 'admin-refund', limit: 10, windowSec: 60 }))) {
-      return rateLimitResponse(60);
-    }
-
+    // R4-FG-44 (round-4 medium): rate-limit AFTER requireTier so the
+    // bucket is keyed on the authenticated `auth.accountId`, not the
+    // raw bearer-prefix fallback. Pre-fix an admin who rotated session
+    // tokens got a fresh bucket per rotation, blowing past the
+    // documented per-account cap. Refund moves real money so this
+    // gate must actually bound per-operator request volume.
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
+
+    if (!(await checkRateLimit({
+      request,
+      action: 'admin-refund',
+      limit: 10,
+      windowSec: 60,
+      identity: auth.accountId,
+    }))) {
+      return rateLimitResponse(60);
+    }
 
     const body = (await request.json()) as { transactionId?: string };
     if (!body.transactionId) {

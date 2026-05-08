@@ -493,7 +493,19 @@ export async function withdrawOperatorFees(
 export interface ReplayDepositOk {
   transactionId: string;
   credited: boolean;
-  status: 'credited' | 'not_credited' | 'already_processed' | 'rejected_revalidated';
+  /**
+   * R4-FG-62 (round-4 medium): added `flush_failed_paged` so a flush
+   * failure in `creditDeposit` (which already wrote local state +
+   * paged the operator via R3-FG-6) surfaces as a structured outcome
+   * instead of being lost behind a generic 500. Operators see the
+   * paged status in the admin UI directly.
+   */
+  status:
+    | 'credited'
+    | 'not_credited'
+    | 'already_processed'
+    | 'rejected_revalidated'
+    | 'flush_failed_paged';
 }
 
 export async function replayDeposit(
@@ -525,9 +537,15 @@ export async function replayDeposit(
     canonicalTxId,
     async () => {
       // Fetch tx from mirror node + hand off to DepositWatcher.
+      // R4-FG-35 (round-4 medium): 8s AbortSignal timeout. Pre-fix
+      // the in-flight branch held the idempotency lock for the full
+      // Vercel function ceiling on a wedged mirror, blocking sibling
+      // retries for 24h if the first Lambda died.
       const { getMirrorBaseUrl } = await import('../hedera/mirror.js');
       const mirrorBase = getMirrorBaseUrl();
-      const res = await fetch(`${mirrorBase}/transactions/${canonicalTxId}`);
+      const res = await fetch(`${mirrorBase}/transactions/${canonicalTxId}`, {
+        signal: AbortSignal.timeout(8_000),
+      });
       if (!res.ok) {
         throw new ReplayDepositMirrorError(
           `Transaction ${canonicalTxId} not found on mirror node (${res.status})`,
@@ -540,27 +558,64 @@ export async function replayDeposit(
       }
 
       const watcher = deps.multiUser.getDepositWatcher();
-      const credited = await watcher.processTransaction(
-        tx as Parameters<typeof watcher.processTransaction>[0],
-      );
+      try {
+        const credited = await watcher.processTransaction(
+          tx as Parameters<typeof watcher.processTransaction>[0],
+        );
 
-      // R3-FG-32 (round-3 P4-004): pre-fix collapsed every false-return
-      // reason (already-processed, tx not SUCCESS, malformed memo, no
-      // matching user, validation failure) into the misleading
-      // `'already_processed'`. Operators now get a more honest
-      // catch-all that doesn't pretend the deposit was successfully
-      // handled. A discriminated-union refactor is deferred (D-12).
-      return {
-        transactionId: canonicalTxId,
-        credited,
-        status: credited ? 'credited' : 'not_credited',
-      };
+        // R3-FG-32 (round-3 P4-004): pre-fix collapsed every false-return
+        // reason (already-processed, tx not SUCCESS, malformed memo, no
+        // matching user, validation failure) into the misleading
+        // `'already_processed'`. Operators now get a more honest
+        // catch-all that doesn't pretend the deposit was successfully
+        // handled. A discriminated-union refactor is deferred (D-12).
+        return {
+          transactionId: canonicalTxId,
+          credited,
+          status: credited ? 'credited' : 'not_credited',
+        };
+      } catch (creditErr) {
+        // R4-FG-62 (round-4 medium): the R3-FG-6 escalation path in
+        // `UserLedger.creditDeposit` throws a flushErr tagged with
+        // name='DepositCreditFlushFailedError' AFTER writing the
+        // audit-orphan row + paging the operator. Surface that as a
+        // structured outcome so the admin UI sees `flush_failed_paged`
+        // (the on-chain side is real, the operator was paged) rather
+        // than a generic 500 that hides the page event behind a stack
+        // trace.
+        if (creditErr instanceof Error && creditErr.name === 'DepositCreditFlushFailedError') {
+          return {
+            transactionId: canonicalTxId,
+            credited: true, // local state mutated; Redis is the lagging side
+            status: 'flush_failed_paged',
+          };
+        }
+        throw creditErr;
+      }
     },
   );
 
   if (idempotent.kind === 'in-flight') return { kind: 'in_flight' };
-  if (idempotent.kind === 'duplicate')
+  if (idempotent.kind === 'duplicate') {
+    // R4-FG-34 (round-4 medium): when the cached result is
+    // `not_credited`, the underlying issue (token registry miss,
+    // malformed memo, no matching user) is fixable. Pre-fix the 24h
+    // idempotency cache turned every retry within 24h into
+    // `{kind:'duplicate', credited:false}` — operator UI showed
+    // `replayed:true` but the deposit was never actually credited
+    // and the cache prevented the retry from running. DEL the
+    // idempotency claim so the next admin click re-runs.
+    if (idempotent.result.credited === false) {
+      try {
+        const { getRedis, KEY_PREFIX } = await import('../auth/redis.js');
+        const redis = await getRedis();
+        await redis.del(`${KEY_PREFIX.idempotency}replay-deposit:${canonicalTxId}`);
+      } catch {
+        // Logged elsewhere; not credited result is still safe to surface.
+      }
+    }
     return { kind: 'duplicate', result: idempotent.result };
+  }
   return { kind: 'ok', result: idempotent.result };
 }
 

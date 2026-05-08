@@ -68,11 +68,20 @@ export async function GET() {
   // Kill switch — best-effort. If Redis is unreachable, getKillSwitchState
   // already swallows the error and returns { enabled: false }; we surface
   // a third 'unknown' state by re-running the lower-level check ourselves.
-  let killSwitch: { state: 'enabled' | 'disabled' | 'unknown'; reason?: string };
+  //
+  // R4-FG-40 (round-4 medium): drop `reason` from the public health
+  // payload. /api/health is unauthenticated. Pre-fix, attackers
+  // polling could learn (a) when an incident starts, (b) the
+  // operator's free-text incident description verbatim — free recon
+  // for window-of-opportunity attacks. /api/public/stats already
+  // serves the disabled/enabled state for client-side gates;
+  // operator-only views (admin dashboard) should fetch reason from
+  // an admin-tier endpoint.
+  let killSwitch: { state: 'enabled' | 'disabled' | 'unknown' };
   try {
     const ks = await getKillSwitchState();
     killSwitch = ks.enabled
-      ? { state: 'enabled', ...(ks.reason ? { reason: ks.reason } : {}) }
+      ? { state: 'enabled' }
       : { state: 'disabled' };
   } catch {
     killSwitch = { state: 'unknown' };

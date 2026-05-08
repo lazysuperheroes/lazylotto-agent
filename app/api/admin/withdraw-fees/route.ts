@@ -28,12 +28,21 @@ export async function OPTIONS() {
 
 export const POST = withStore(async (request: Request) => {
   try {
-    if (!(await checkRateLimit({ request, action: 'admin-withdraw-fees', limit: 5, windowSec: 60 }))) {
-      return rateLimitResponse(60);
-    }
-
+    // R4-FG-44 (round-4 medium): rate-limit AFTER requireTier with
+    // identity bound to auth.accountId — withdraw-fees moves real
+    // money so the per-account cap must hold across token rotations.
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
+
+    if (!(await checkRateLimit({
+      request,
+      action: 'admin-withdraw-fees',
+      limit: 5,
+      windowSec: 60,
+      identity: auth.accountId,
+    }))) {
+      return rateLimitResponse(60);
+    }
 
     const body = (await request.json().catch(() => ({}))) as {
       amount?: number;

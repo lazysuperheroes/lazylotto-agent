@@ -350,6 +350,42 @@ async function main() {
   };
   /** Collisions across kinds — same txId claimed by both a user burn AND an operator burn. */
   const crossKindBurnCollisions: Array<{ txId: string }> = [];
+  /**
+   * R4-FG-59 (round-4 medium): track refund anchors by their
+   * `originalDepositTxId` so two refund events referencing the same
+   * deposit don't double-credit `totalRefunded` for that user. F18
+   * shipped burn-dedup via `seenWithdrawTxIdsByKind`; refunds were
+   * the sibling miss. This catches the "operator runs the refund
+   * cycle twice for one deposit" failure mode that the in-band
+   * `refundedOriginals` SADD prevents at write time but a topic-only
+   * auditor would otherwise have to take on faith.
+   */
+  const seenRefundedOriginals = new Set<string>();
+  /** Refund duplicates the auditor caught (and skipped) — surfaces as a critical. */
+  const duplicateRefundOriginals: Array<{ txId: string }> = [];
+  /**
+   * R4-FG-60 (round-4 medium): per-user strategy timeline. Pre-fix the
+   * verifier ignored `strategy_change` anchors entirely so a topic-only
+   * auditor couldn't determine which strategy was active when each
+   * session ran. Now: track changes in seq order and surface mismatches
+   * between the strategy named in `play_session_open` and the most
+   * recent `strategy_change` for that user.
+   */
+  const strategyHistoryByUser = new Map<
+    string,
+    Array<{ sequence: number; previousStrategy: string; newStrategy: string; performedBy: string }>
+  >();
+  /**
+   * Mismatches between session.strategy and the active strategy at
+   * session-open time. Surfaced as warnings.
+   */
+  const strategyMismatchAlerts: Array<{
+    sessionId: string;
+    user: string;
+    sessionStrategy: string;
+    activeStrategy: string;
+    sessionSeq: number;
+  }> = [];
   const depositTxIds: Array<{
     sequence: number;
     timestamp: string;
@@ -557,6 +593,21 @@ async function main() {
       }
       addToToken(operatorLedger.totalWithdrawnByOperator, tokenN, event.amount);
     } else if (event.type === 'refund') {
+      // R4-FG-59 (round-4 medium): dedup on `originalDepositTxId` so a
+      // second refund anchor referencing the same deposit can't
+      // double-credit the user's `totalRefunded` or double-reverse
+      // operator rake. R4-FG-58 added reader-side dedup on `refundTxId`
+      // (covers Lambda-freeze retries that reuse the same refundTxId);
+      // this dedup catches the orthogonal failure mode of two distinct
+      // refundTxIds for the same originalDepositTxId.
+      const orig = (event as { originalDepositTxId?: string }).originalDepositTxId;
+      if (orig) {
+        if (seenRefundedOriginals.has(orig)) {
+          duplicateRefundOriginals.push({ txId: orig });
+          continue;
+        }
+        seenRefundedOriginals.add(orig);
+      }
       const led = getOrCreateLedger(event.user);
       led.totalRefunded += event.amount;
       addToToken(led.totalRefundedByToken, normalizeLegacyToken(event.token), event.amount);
@@ -589,6 +640,42 @@ async function main() {
       if (session.warnings.length > 0) {
         led.warnings.push(`session ${session.sessionId.slice(0, 8)}: ${session.warnings.join('; ')}`);
       }
+      // R4-FG-60 (round-4 medium): cross-check session.strategy against
+      // the strategy that was active when the session opened. Walks
+      // the user's strategy_change history (already accumulated in
+      // seq order because we iterate events in seq order) and finds
+      // the most recent change whose seq < session.firstSeq.
+      if (session.strategy) {
+        const history = strategyHistoryByUser.get(session.user) ?? [];
+        // Find the latest change strictly before this session's firstSeq.
+        let activeStrategy: string | undefined;
+        for (const ch of history) {
+          if (ch.sequence < session.firstSeq) {
+            activeStrategy = ch.newStrategy;
+          }
+        }
+        if (activeStrategy && activeStrategy !== session.strategy) {
+          strategyMismatchAlerts.push({
+            sessionId: session.sessionId,
+            user: session.user,
+            sessionStrategy: session.strategy,
+            activeStrategy,
+            sessionSeq: session.firstSeq,
+          });
+        }
+      }
+    } else if (event.type === 'strategy_change') {
+      // R4-FG-60 (round-4 medium): track strategy changes per-user in
+      // seq order so we can validate session.strategy claims against
+      // the active strategy at session-open time.
+      const arr = strategyHistoryByUser.get(event.user) ?? [];
+      arr.push({
+        sequence: event.sequence,
+        previousStrategy: event.previousStrategy,
+        newStrategy: event.newStrategy,
+        performedBy: event.performedBy,
+      });
+      strategyHistoryByUser.set(event.user, arr);
     } else if (event.type === 'control') {
       // F20: surface load-bearing control events as alerts.
       const desc = `seq=${event.sequence} ${event.event} by=${event.by}` +
@@ -777,6 +864,37 @@ async function main() {
         `withdrawTxId=${collision.txId} is cited by BOTH a user withdrawal AND an operator withdrawal. ` +
         `Cross-kind collisions are unexpected — pre-fix dedup would have suppressed one silently. ` +
         `Inspect the topic to determine which is legitimate.`,
+    });
+  }
+
+  // R4-FG-59 (round-4 medium): surface duplicate refund originals as
+  // critical. Two refund anchors referencing the same `originalDepositTxId`
+  // is either a bug (verifier retry path missing dedup) or a malicious
+  // double-credit attempt; either way the operator should investigate.
+  for (const dup of duplicateRefundOriginals) {
+    alerts.push({
+      severity: 'critical',
+      category: 'duplicate_refund_original',
+      message:
+        `originalDepositTxId=${dup.txId} is referenced by more than one refund event. ` +
+        `Pre-fix this would have double-credited totalRefunded for the user. ` +
+        `Inspect the topic to determine which refund is legitimate.`,
+    });
+  }
+
+  // R4-FG-60 (round-4 medium): surface session/strategy mismatches as
+  // warnings. A non-fatal but auditable signal — could indicate (a) the
+  // agent ignored a strategy change request, (b) a strategy_change
+  // anchor failed to land, or (c) a malicious reorder.
+  for (const mismatch of strategyMismatchAlerts) {
+    alerts.push({
+      severity: 'warning',
+      category: 'session_strategy_mismatch',
+      message:
+        `session=${mismatch.sessionId.slice(0, 12)} (user=${mismatch.user.slice(0, 12)}, seq=${mismatch.sessionSeq}) ` +
+        `claims strategy="${mismatch.sessionStrategy}" but the most recent strategy_change for ` +
+        `this user named "${mismatch.activeStrategy}". Pre-R4-FG-60 the verifier ignored ` +
+        `strategy_change events; this is the cross-check.`,
     });
   }
 

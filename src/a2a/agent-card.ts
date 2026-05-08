@@ -13,12 +13,37 @@
  */
 
 import type { AgentCard, AgentSkill } from '@a2a-js/sdk';
+// R4-FG-56 (round-4 medium): import package.json's version field
+// directly. Pre-fix the chain `NEXT_PUBLIC_APP_VERSION ?? npm_package_version
+// ?? '0.2.0'` left production stuck on the '0.2.0' fallback because
+// neither env var is reliably set at runtime on Vercel. Both tsconfigs
+// have `resolveJsonModule: true`. Cast to a typed snippet so we don't
+// pull the entire package.json into the type signature.
+import packageJson from '../../package.json' with { type: 'json' };
+const PACKAGE_VERSION = (packageJson as { version: string }).version;
 
 // ── Skills derived from MCP tools ──────────────────────────────
 //
 // Each entry maps directly to a registered MCP tool. The `id` field
 // is the tool name (multi_user_play, operator_health, etc.) so the
 // A2A adapter can resolve skill → tool without a lookup table.
+//
+// R4-FG-39 (round-4 medium): single-user CLI tools (the `agent_*`
+// family in `src/mcp/tools/single-user.ts`) are deliberately ABSENT
+// from this card. They are only registered in the stdio CLI server
+// (`src/mcp/server.ts`), NOT in the hosted serverless deployment
+// (`app/api/_lib/mcp.ts`) that the A2A endpoint adapts to. Listing
+// them on the card would advertise capabilities the deployed agent
+// doesn't expose, breaking discovery semantics for any agent that
+// dispatches by skill id. The parity smoke test
+// (`npm run check-protocols`) and the `agent-card.test.ts` drift
+// gate both source their expected set from `ALL_REMOTE_TOOL_NAMES`,
+// which intentionally excludes the single-user surface.
+//
+// If you add `agent_*` tools to the hosted surface, add the tool to
+// `ALL_REMOTE_TOOL_NAMES` in `src/mcp/tool-names.ts` first, then add
+// matching skill entries here. Don't add them in isolation — drift
+// breaks the parity gate.
 
 const MULTI_USER_SKILLS: AgentSkill[] = [
   {
@@ -147,10 +172,14 @@ export function buildAgentCard(): AgentCard {
       ? 'https://agent.lazysuperheroes.com'
       : 'https://testnet-agent.lazysuperheroes.com';
 
+  // R4-FG-56 (round-4 medium): version sourced from the imported
+  // package.json so it can never drift. Env var fallback retained for
+  // bespoke deployments that override (e.g., a fork running its own
+  // build pipeline).
   const version =
     process.env.NEXT_PUBLIC_APP_VERSION ??
     process.env.npm_package_version ??
-    '0.2.0';
+    PACKAGE_VERSION;
 
   return {
     name: 'LazyLotto Agent',

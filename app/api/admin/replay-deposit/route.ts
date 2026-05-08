@@ -23,6 +23,7 @@ import { getAgentContext } from '../../_lib/mcp';
 import { withStore } from '../../_lib/withStore';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { replayDeposit, ReplayDepositMirrorError } from '~/services/userOps';
+import { withIdempotency } from '~/lib/idempotency';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -36,27 +37,65 @@ export async function OPTIONS() {
 
 export const POST = withStore(async (request: Request) => {
   try {
-    if (!(await checkRateLimit({ request, action: 'admin-replay-deposit', limit: 10, windowSec: 60 }))) {
-      return rateLimitResponse(60);
-    }
-
+    // R4-FG-44 (round-4 medium): rate-limit AFTER requireTier with
+    // identity bound to auth.accountId.
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
 
+    if (!(await checkRateLimit({
+      request,
+      action: 'admin-replay-deposit',
+      limit: 10,
+      windowSec: 60,
+      identity: auth.accountId,
+    }))) {
+      return rateLimitResponse(60);
+    }
+
     const body = (await request.json().catch(() => ({}))) as { transactionId?: string };
+
+    // R4-FG-43 (round-4 medium): require Idempotency-Key matching the
+    // refund / withdraw-fees pattern (R3-FG-41). Pre-fix this route
+    // relied solely on `replayDeposit`'s internal SET-NX-EX claim —
+    // sufficient for the exact-same-txId race, but a Lambda timeout
+    // post-SET-NX-release would let a second admin click re-process.
+    // Belt + braces: route-level idempotency by header, function-level
+    // by transactionId.
+    const idempotencyKey = request.headers.get('Idempotency-Key');
+    if (!idempotencyKey) {
+      return NextResponse.json(
+        { error: 'Missing required header: Idempotency-Key' },
+        { status: 400, headers: CORS_HEADERS },
+      );
+    }
 
     // 0.3.4: delegate to userOps.replayDeposit. transactionId format
     // validation, mirror-fetch, idempotency-by-txId all live there.
     const store = await getStore();
     const { multiUser } = await getAgentContext();
     try {
-      const opResult = await replayDeposit(
-        { store, multiUser },
-        {
-          transactionId: body.transactionId ?? '',
-          performedBy: auth.accountId,
-        },
+      const idempotent = await withIdempotency(
+        `admin-replay:${body.transactionId ?? ''}`,
+        idempotencyKey,
+        () =>
+          replayDeposit(
+            { store, multiUser },
+            {
+              transactionId: body.transactionId ?? '',
+              performedBy: auth.accountId,
+            },
+          ),
       );
+      if (idempotent.kind === 'in-flight') {
+        return NextResponse.json(
+          { error: 'Replay already in flight on another Lambda; retry shortly.' },
+          { status: 409, headers: CORS_HEADERS },
+        );
+      }
+      const opResult = idempotent.result;
+      const replayedHeader = idempotent.kind === 'duplicate'
+        ? { 'X-Idempotent-Replayed': 'true' }
+        : {};
       switch (opResult.kind) {
         case 'invalid_input':
           return NextResponse.json(
@@ -77,7 +116,7 @@ export const POST = withStore(async (request: Request) => {
               status: opResult.result.status,
               ...(opResult.kind === 'duplicate' ? { replayed: true } : {}),
             },
-            { headers: CORS_HEADERS },
+            { headers: { ...CORS_HEADERS, ...replayedHeader } },
           );
         // Replay-deposit doesn't currently use user lock; access checks
         // happen at requireTier level. These cases shouldn't fire.

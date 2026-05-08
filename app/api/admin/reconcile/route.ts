@@ -4,7 +4,9 @@
  * Triggers on-chain balance reconciliation against the internal ledger.
  * Processes any pending deposits first to ensure fresh data.
  *
- * Requires 'operator' tier auth.
+ * Requires 'admin' tier auth (closes R3-FG-40 — runtime check below
+ * uses `requireTier(request, 'admin')`; doc was 'operator' pre-fix).
+ * R4-FG-61 doc fix.
  */
 
 import { NextResponse } from 'next/server';
@@ -31,13 +33,21 @@ export async function OPTIONS() {
 // the 0.3.3 adversarial audit.
 export const POST = withStore(async (request: Request) => {
   try {
-    // Reconcile is expensive (mirror node + Redis pipeline) — modest limit
-    if (!(await checkRateLimit({ request, action: 'admin-reconcile', limit: 6, windowSec: 60 }))) {
-      return rateLimitResponse(60);
-    }
-
+    // R4-FG-44 (round-4 medium): rate-limit AFTER requireTier with
+    // identity bound to auth.accountId.
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
+
+    // Reconcile is expensive (mirror node + Redis pipeline) — modest limit
+    if (!(await checkRateLimit({
+      request,
+      action: 'admin-reconcile',
+      limit: 6,
+      windowSec: 60,
+      identity: auth.accountId,
+    }))) {
+      return rateLimitResponse(60);
+    }
 
     // Operator lock so two concurrent reconciles (cron + admin click,
     // or two admin clicks landing on different Lambdas) don't both

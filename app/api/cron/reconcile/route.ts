@@ -36,7 +36,7 @@
 import { NextResponse } from 'next/server';
 import { getStore } from '../../_lib/store';
 import { getAgentContext } from '../../_lib/mcp';
-import { acquireOperatorLock, releaseOperatorLock } from '../../_lib/locks';
+import { acquireOperatorLock, releaseOperatorLock, startOperatorLockHeartbeat } from '../../_lib/locks';
 import { withStore } from '../../_lib/withStore';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import type { ReconciliationResult } from '~/custodial/Reconciliation';
@@ -79,18 +79,23 @@ export const GET = withStore(async (request: Request) => {
   // letter and fans out mirror-node fetches). Identity is the
   // cron secret prefix so all legitimate cron calls share one
   // bucket.
+  // R4-FG-45 (round-4 medium): explicitly compute identity from
+  // x-forwarded-for. Pre-fix R3-FG-63 omitted `identity` expecting
+  // checkRateLimit's `identityFor(request)` fallback to bucket by
+  // source IP — but identityFor checks the Authorization header
+  // BEFORE x-forwarded-for, so `Authorization: Bearer
+  // $CRON_SECRET` lumped every cron call into one shared
+  // bucket-by-bearer-prefix. Compute the IP-bucket directly so the
+  // documented "buckets by source IP" actually holds.
+  const xff = request.headers.get('x-forwarded-for');
+  const clientIp = xff?.split(',')[0]?.trim() ?? 'cron-unknown-ip';
   if (
     !(await checkRateLimit({
       request,
       action: 'cron-reconcile',
       limit: 30,
       windowSec: 60,
-      // R3-FG-63 (round-3 P7-012): omit identity so checkRateLimit
-      // buckets by source IP. Pre-fix `identity: 'cron'` lumped
-      // legitimate Vercel Cron + manual curl + admin reconcile into
-      // one global bucket — a single misbehaving caller blocked the
-      // legitimate cron firing. Limit raised 10→30 since each call
-      // is auth'd against CRON_SECRET (no unauthenticated amplification).
+      identity: `cron:${clientIp}`,
     }))
   ) {
     return rateLimitResponse(60);
@@ -109,6 +114,14 @@ export const GET = withStore(async (request: Request) => {
     );
   }
 
+  // R4-FG-66 (round-4 low): heartbeat the reconcile lock so a slow
+  // walk doesn't TTL the lock and let a sibling reconcile mutate
+  // overlapping state. R3-FG-29 raised the TTL from 300s → 900s but
+  // didn't add a heartbeat — at scale (90+ open DLs × ~10s mirror
+  // bias) reconcile can blow 900s; the heartbeat keeps the lock
+  // alive for as long as we're actually running. Cleared in finally.
+  const heartbeat = startOperatorLockHeartbeat('reconcile', lockToken, 60_000, 900);
+
   let result: ReconciliationResult;
   try {
     // Process any pending deposits before reconciling so the ledger
@@ -126,6 +139,7 @@ export const GET = withStore(async (request: Request) => {
     // withdrawal_uncertain settle/release).
     result = await multiUser.reconcile();
   } catch (err) {
+    heartbeat.cancel();
     await releaseOperatorLock('reconcile', lockToken);
     const message = err instanceof Error ? err.message : String(err);
     console.error('[cron/reconcile] reconcile threw:', err);
@@ -139,6 +153,7 @@ export const GET = withStore(async (request: Request) => {
   }
   // Release the lock once reconcile + insolvency check are done.
   // Webhook firing happens after, but doesn't need to hold the lock.
+  heartbeat.cancel();
   await releaseOperatorLock('reconcile', lockToken);
 
   // Webhook on failure (best-effort, never blocks the response).

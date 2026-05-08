@@ -358,15 +358,27 @@ export async function GET(request: Request) {
     const hederaAccountId = user.hederaAccountId;
 
     // Fetch all topic messages with pagination
+    //
+    // R4-FG-46 (round-4 medium): 8s AbortSignal timeout per fetch +
+    // MAX_PAGES cap. Mirrors the admin/audit fix (sibling route).
+    const FETCH_TIMEOUT_MS = 8_000;
+    const MAX_PAGES = 1000;
     const allMessages: TopicMessage[] = [];
     let nextPath: string | null = `/topics/${topicId}/messages?limit=100&order=asc`;
+    let pages = 0;
 
     while (nextPath) {
+      if (pages >= MAX_PAGES) {
+        throw new Error(
+          `Mirror pagination exceeded MAX_PAGES=${MAX_PAGES}; aborting to prevent function-ceiling timeout`,
+        );
+      }
+      pages++;
       const url = nextPath.startsWith('/api/v1')
         ? `${mirrorBase.replace(/\/api\/v1$/, '')}${nextPath}`
         : `${mirrorBase}${nextPath}`;
 
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
       if (!res.ok) {
         if (res.status === 404) {
           return NextResponse.json(

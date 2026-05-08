@@ -72,11 +72,17 @@ function buildAgentProfile(hcs11: any) {
     ? 'https://agent.lazysuperheroes.com'
     : 'https://testnet-agent.lazysuperheroes.com';
 
+  // R4-FG-57 (round-4 medium): only advertise capabilities backed by
+  // a real surface. Pre-fix WORKFLOW_AUTOMATION + MULTI_AGENT_COORDINATION
+  // were on the list but neither was implemented — discovery clients
+  // dispatching by capability would call into endpoints that don't
+  // exist. NegotiationHandler is best-effort and undocumented; not
+  // strong enough to back MULTI_AGENT_COORDINATION. Re-add either
+  // capability when (a) a real surface ships AND (b) a skill entry
+  // for it exists in `src/a2a/agent-card.ts`.
   const capabilities = [
-    AIAgentCapability.TRANSACTION_ANALYTICS,
-    AIAgentCapability.WORKFLOW_AUTOMATION,
-    AIAgentCapability.MARKET_INTELLIGENCE,
-    AIAgentCapability.MULTI_AGENT_COORDINATION,
+    AIAgentCapability.TRANSACTION_ANALYTICS, // /api/admin/audit + /api/user/audit
+    AIAgentCapability.MARKET_INTELLIGENCE,    // EV-scoring strategy engine
   ];
 
   const bio =
