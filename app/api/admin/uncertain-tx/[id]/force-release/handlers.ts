@@ -459,6 +459,51 @@ async function handleOperatorFee(
     // F14: stamp first.
     progress.operatorDebitedAt = new Date().toISOString();
     await stamp();
+    // R5-FG-10 (round-5 critical): acquire `withdraw-fees`
+    // operator-lock around the operator-balance RMW. R3-FG-12 added
+    // this lock to the verifier's matching mutation
+    // (`uncertainTxVerification.ts:1354`); R4-FG-12 hardened the
+    // null-acquire branch. The force-release SIBLING for the SAME
+    // mutation acquired NO lock — a concurrent in-band
+    // `operatorWithdrawFees` on a DIFFERENT token RMW races the
+    // force-release's debit on `op.balances` (last-write-wins on
+    // the JS object spread); one debit is silently lost. Mirror the
+    // verifier's contract exactly, including the null-acquire orphan.
+    const { acquireOperatorLock, releaseOperatorLock } = await import(
+      '~/lib/locks'
+    );
+    const opLockToken = await acquireOperatorLock('withdraw-fees', 60);
+    if (!opLockToken) {
+      // R4-FG-12: lock contention → write orphan, skip mutation, leave
+      // entry unresolved. Surface as ok=false so the route's resolve
+      // step doesn't run.
+      try {
+        await ctx.store.upsertDeadLetter({
+          transactionId: uniqueForceReleaseOrphanId(entry.transactionId),
+          timestamp: new Date().toISOString(),
+          error: 'force-release operator-fee blocked: withdraw-fees lock held by sibling',
+          kind: 'audit_trail_orphaned',
+          details: {
+            sourceKind: 'operator_fee_withdraw_uncertain',
+            sourceTxId: entry.transactionId,
+            amount: details.amount,
+            tokenKey: details.tokenKey,
+            phase: 'op_lock_unavailable',
+          },
+        });
+      } catch {
+        /* logged below */
+      }
+      ctx.log.warn('force-release operator-fee withdraw-fees lock contended', {
+        component: 'AdminForceRelease',
+        uncertainTxId: entry.transactionId,
+      });
+      return {
+        ok: false,
+        status: 409,
+        error: 'withdraw-fees lock contention — sibling operator-fee operation in flight; retry shortly',
+      };
+    }
     try {
       const tokenKey = details.tokenKey;
       const amount = details.amount;
@@ -510,6 +555,16 @@ async function handleOperatorFee(
         uncertainTxId: entry.transactionId,
         error: e instanceof Error ? e.message : String(e),
       });
+    } finally {
+      // R5-FG-10: always release the withdraw-fees lock.
+      try {
+        await releaseOperatorLock('withdraw-fees', opLockToken);
+      } catch (releaseErr) {
+        ctx.log.warn('force-release withdraw-fees lock release failed', {
+          component: 'AdminForceRelease',
+          error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
+        });
+      }
     }
   }
 

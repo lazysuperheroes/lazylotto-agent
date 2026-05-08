@@ -661,8 +661,41 @@ export class AccountingService {
       // flag so this warm Lambda resumes v2 writes alongside its
       // sibling Lambdas. Also drop the cached init promise so the
       // next write triggers a fresh seed scan.
+      //
+      // R5-FG-5 (round-5 critical): pre-fix the cleared init promise
+      // was lazily picked up on the NEXT call, but the CURRENT call
+      // had already passed the `agentSeqInitPromises.has(...)` guard
+      // at the top of `nextAgentSeq`. Falling through to
+      // `this.store.nextAgentSeq(agentAccountId)` issued an INCR
+      // against the cluster Redis counter that was last seeded
+      // before the failure — possibly never. Result: agent emits
+      // `agentSeq=0` for a topic where the highest existing v2
+      // message has `agentSeq=147`. Reader's de-dup code rejects
+      // this as `corrupt`, breaking the audit-topic invariant. Fix
+      // is to re-run the seed scan synchronously HERE, before the
+      // INCR.
       this.agentSeqSeedFailed.delete(agentAccountId);
       this.agentSeqInitPromises.delete(agentAccountId);
+      try {
+        await this.initializeAgentSeq(agentAccountId);
+      } catch (reseedErr) {
+        // Re-seed failed (mirror still degraded). Re-flag locally;
+        // initializeAgentSeq itself sets the cluster Redis flag on
+        // its catch path. Subsequent calls bounce off the
+        // `redisSaysFlagged` check above. Do not throw a different
+        // error than the post-flag-check throw below — let the
+        // existing flow surface the failure.
+        if (
+          reseedErr instanceof Error &&
+          reseedErr.message.startsWith('AGENT_SEQ_SEED_FAILED')
+        ) {
+          throw reseedErr;
+        }
+        throw new Error(
+          `AGENT_SEQ_SEED_FAILED: re-seed after cluster flag clear failed: ` +
+          `${reseedErr instanceof Error ? reseedErr.message : String(reseedErr)}`,
+        );
+      }
     }
     if (redisSaysFlagged) {
       // Belt-and-braces: also stamp local so subsequent calls in this

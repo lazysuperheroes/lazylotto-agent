@@ -695,6 +695,49 @@ export async function processRefund(
         claimError: err instanceof Error ? err.message : String(err),
         sremError: sremErr instanceof Error ? sremErr.message : String(sremErr),
       });
+      // R5-FG-12 (round-5 critical): write `audit_trail_orphaned` +
+      // escalate so the operator gets a runbook for clearing the
+      // stuck `refundedOriginals` membership. Pre-fix R4-FG-3's
+      // SREM-failure path was pure logging — the user could never
+      // be refunded again because subsequent refund attempts hit
+      // `sismember=1` from the unreverted SADD. Reconcile cron's
+      // `verifyUncertainRefunds` does NOT walk this orphan kind, so
+      // the operator must replay manually; the runbook entry is a
+      // dead-letter row + a webhook page documenting the txId to
+      // SREM by hand.
+      try {
+        const { mintAuditOrphanId } = await import('../lib/orphanIds.js');
+        await store.upsertDeadLetter({
+          transactionId: mintAuditOrphanId(
+            'audit-orphan:refund-srem',
+            transactionId,
+          ),
+          timestamp: new Date().toISOString(),
+          error: `refundedOriginals SREM failed after Regime-A submit error: ${sremErr instanceof Error ? sremErr.message : String(sremErr)}`,
+          kind: 'audit_trail_orphaned',
+          details: {
+            sourceKind: 'refunded_originals_srem_failed',
+            sourceTxId: transactionId,
+            phase: 'srem_failed',
+            claimError: err instanceof Error ? err.message : String(err),
+          },
+        });
+      } catch {
+        /* logged above */
+      }
+      try {
+        const { escalateUncertainDlFailure } = await import('../lib/escalation.js');
+        await escalateUncertainDlFailure({
+          kind: 'refunded_originals_sadd_failed',
+          uncertainTxId: transactionId,
+          cause: sremErr,
+        });
+      } catch (escErr) {
+        logger.error('refundedOriginals SREM escalation also failed', {
+          component: 'Refund',
+          error: escErr instanceof Error ? escErr.message : String(escErr),
+        });
+      }
     }
     if (redisLockKey) {
       try {

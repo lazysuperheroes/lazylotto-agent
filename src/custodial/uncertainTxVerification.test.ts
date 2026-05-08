@@ -647,18 +647,42 @@ describe('verifyUncertainWithdrawals', () => {
     }
   });
 
-  it('Audit-write failure produces audit_trail_orphaned DL (M16)', async () => {
+  // revert-proof: if mutationError assignment in the audit-anchor
+  // catch (R5-FG-9) is removed, this test fails because outcomes[0]
+  // becomes 'confirmed' instead of 'still_uncertain'. Pre-fix
+  // behaviour was R2-FG-0 archetype: audit failure → orphan written
+  // BUT entry was still markResolved → topic-only auditor saw burn
+  // missing AND no retry path. Now the entry stays unresolved for
+  // the next reconcile pass to retry.
+  it('R5-FG-9: audit-write failure leaves entry unresolved (still_uncertain) + writes orphan', async () => {
     await store.upsertDeadLetter(makeWithdrawalDl(TX_OK));
     mirror.responses.set(TX_OK, { status: 200, body: { transactions: [{ result: 'SUCCESS' }] } });
     const { audit } = trackingAccounting(/* throws */ true);
 
     const outcomes = await verifyUncertainWithdrawals(store, ledger, audit);
 
-    assert.equal(outcomes[0]!.status, 'confirmed');
+    // R5-FG-9: audit-anchor failure now sets `mutationError` →
+    // resolve gate keeps the entry as `still_uncertain` for retry.
+    assert.equal(
+      outcomes[0]!.status,
+      'still_uncertain',
+      'audit-anchor failure must leave entry unresolved (R5-FG-9)',
+    );
     const orphans = store
       .getDeadLetters()
       .filter((e) => e.kind === 'audit_trail_orphaned');
     assert.equal(orphans.length, 1, 'failed audit write must produce audit_trail_orphaned DL');
+    // The original entry must NOT be resolved — next reconcile pass
+    // retries the audit submit.
+    const original = store
+      .getDeadLetters()
+      .find((e) => e.transactionId === TX_OK);
+    assert.ok(original, 'original DL still present');
+    assert.equal(
+      original!.resolvedAt,
+      undefined,
+      'original DL must remain unresolved so reconcile re-tries',
+    );
   });
 
   // ── R-HIGH-1: idempotency-marker tests ─────────────────────────

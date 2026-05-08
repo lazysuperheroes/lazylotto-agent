@@ -1056,24 +1056,18 @@ export async function verifyUncertainWithdrawals(
           withdrawTxId,
           error: auditErr instanceof Error ? auditErr.message : String(auditErr),
         });
-        // F19 (2026-05-06 audit A-04): orphan must carry every
-        // parameter needed to manually replay
-        // `accounting.recordWithdrawal` — recipientAccountId is the
-        // first arg, dropping it forces the operator to JOIN against
-        // the original DL row (fragile if purged).
-        await recordAuditOrphan(
-          store,
-          'withdrawal_uncertain',
-          withdrawTxId,
-          {
-            userId: details.userId,
-            amount: details.amount,
-            tokenKey: details.tokenKey,
-            recipientAccountId: details.recipientAccountId ?? '',
-            withdrawTxId,
-          },
-          auditErr,
-        );
+        // R5-FG-9 (round-5 critical): set `mutationError` so the
+        // resolve gate at line ~1091 (a) writes a single orphan with
+        // phase='audit_anchor_failed' AND (b) keeps the entry
+        // unresolved for retry. Pre-fix the catch wrote its OWN
+        // orphan AND ran markResolved unconditionally, leaving the
+        // entry with `auditWrittenAt` UNSET while resolved=true.
+        // Topic-only auditor reconstructed balance with deposit but
+        // no withdrawal; no retry path. We deliberately DO NOT call
+        // recordAuditOrphan here any more — the gate is the single
+        // owner of the orphan + still_uncertain outcome to avoid
+        // double-orphaning.
+        mutationError = { phase: 'audit_anchor', cause: auditErr };
       }
     }
 

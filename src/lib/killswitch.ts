@@ -221,7 +221,19 @@ export async function enableKillSwitch(
     enabledAt: new Date().toISOString(),
     enabledBy,
   };
-  const claimed = await redis.set(KILL_KEY, JSON.stringify(state), { nx: true });
+  // R5-FG-7 (round-5 critical): R4-FG-47's comment claimed "SET NX
+  // EX" but the call was `{ nx: true }` only — no TTL. Once flipped,
+  // the kill flag was permanent until an explicit `disableKillSwitch`.
+  // A future operator engaging again with a NEW reason silently
+  // no-ops below — second-engagement reason+by lost from Redis AND
+  // the topic. With 24h TTL, engagements auto-expire so the topic +
+  // Redis state stay honest about the current operator intent.
+  // Operators who need a longer engagement re-call this every <24h.
+  const KILLSWITCH_TTL_SEC = 24 * 60 * 60;
+  const claimed = await redis.set(KILL_KEY, JSON.stringify(state), {
+    nx: true,
+    ex: KILLSWITCH_TTL_SEC,
+  });
   if (claimed === null) {
     // SET NX no-op: another caller owns the engagement. Idempotent
     // return — caller can read state to confirm.
@@ -256,6 +268,14 @@ export async function enableKillSwitch(
       // anchor and can replay manually. Without this, the killswitch
       // engagement evidence is invisible to a topic-only auditor in a
       // DR scenario.
+      //
+      // R5-FG-6 (round-5 critical): track whether BOTH the orphan
+      // write AND the escalation succeeded. If neither lands, the
+      // operator + topic + DL queue have ZERO record of the engagement
+      // while Redis says enabled. Better to revert the Redis flip and
+      // fail loudly than ship into a state with no evidence trail.
+      let orphanWritten = false;
+      let escalationFired = false;
       try {
         const { createStore } = await import('../custodial/createStore.js');
         const { mintAuditOrphanId } = await import('./orphanIds.js');
@@ -275,6 +295,7 @@ export async function enableKillSwitch(
             phase: 'killswitch_anchor_failed_pre_engage',
           },
         });
+        orphanWritten = true;
       } catch (orphanErr) {
         logger.error('killswitch enable orphan-write also failed', {
           component: 'KillSwitch',
@@ -288,11 +309,38 @@ export async function enableKillSwitch(
           uncertainTxId: `killswitch-enable:${Date.now()}`,
           cause: result.cause,
         });
+        escalationFired = true;
       } catch (escErr) {
         logger.error('killswitch enable escalation also failed', {
           component: 'KillSwitch',
           error: escErr instanceof Error ? escErr.message : String(escErr),
         });
+      }
+      if (!orphanWritten && !escalationFired) {
+        // R5-FG-6: triple-fault. Revert the Redis flip and fail
+        // loudly. Operator must retry; better to know we're broken
+        // than to engage silently. The route's catch surfaces the
+        // throw to the operator UI.
+        try {
+          await redis.del(KILL_KEY);
+        } catch (revertErr) {
+          logger.error(
+            'CRITICAL: killswitch triple-fault — Redis revert ALSO failed; agent may be in killed state with no evidence',
+            {
+              component: 'KillSwitch',
+              error: revertErr instanceof Error ? revertErr.message : String(revertErr),
+            },
+          );
+          // Even revert failed; rethrow the ORIGINAL anchor cause so
+          // the route sees a 5xx and the operator retries.
+          throw result.cause instanceof Error
+            ? result.cause
+            : new Error(`killswitch triple-fault: ${result.reason}`);
+        }
+        throw new Error(
+          `killswitch_engagement_aborted: HCS anchor failed (${result.reason}) and ` +
+          'BOTH orphan-write and escalation also failed. Redis flip reverted. Retry.',
+        );
       }
     }
   }

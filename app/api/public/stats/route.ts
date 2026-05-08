@@ -110,7 +110,14 @@ export async function GET() {
         // User-facing operational status
         acceptingOperations,
         statusMessage,
-        statusReason: killState.enabled ? (killState.reason ?? null) : null,
+        // R5-FG-11 (round-5 critical): `statusReason` was a sibling
+        // miss to R4-FG-40 — that fix dropped the operator's free-text
+        // killswitch reason from `/api/health` because anonymous polling
+        // could read incident descriptions verbatim. This route inherits
+        // the same public-cacheable nature (`Cache-Control: public,
+        // max-age=15` below) and the SAME leak survived R4. Removed.
+        // Operator-friendly status pills in the dashboard read the
+        // reason via `/api/admin/killswitch` (admin-tier authenticated).
       },
       {
         headers: {

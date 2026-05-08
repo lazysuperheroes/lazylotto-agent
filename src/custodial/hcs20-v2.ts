@@ -385,7 +385,16 @@ export async function computePoolsRoot(
 
   const sorted = [...pools].sort((a, b) => a.poolId - b.poolId);
   const lines = sorted.map((p) => {
-    const prizesCanonical = JSON.stringify(canonicalizePrizes(p.prizes));
+    // R5-FG-1 (round-5 critical): the canonical form intentionally
+    // OMITS NFT display metadata (`sym`). The slim-fallback path in
+    // `recordPlayPoolResult` (R3-FG-46) truncates `sym` to 8 chars
+    // when an oversized message needs to fit under the 1024-byte HCS
+    // cap; pre-fix the writer hashed the FULL untruncated `sym`
+    // while the reader recomputed from the WIRE-FORMAT (truncated)
+    // `sym` — Merkle roots disagreed, every multi-NFT branded-prize
+    // pool was marked corrupt. `sym` is display metadata; only token
+    // id + serial set are load-bearing for tamper-evidence.
+    const prizesCanonical = JSON.stringify(canonicalizePrizesForHash(p.prizes));
     const prizesHash = createHash('sha256').update(prizesCanonical).digest('hex');
     return `${p.poolId}|${p.spent}|${p.spentToken}|${p.wins}|${prizesHash}`;
   });
@@ -397,11 +406,25 @@ export async function computePoolsRoot(
 }
 
 /**
- * Canonicalize a prizes array for hashing: sort fungible by token,
- * then NFTs by token + sorted serials. Strips key ordering noise
- * from JSON.stringify.
+ * Canonicalize a prizes array for HASHING. Returns a stripped form:
+ * fungible = `{t, tk, amt}`; nft = `{t, tk, ser}` (NO `sym`).
+ *
+ * R5-FG-1 (round-5 critical): pre-fix this returned `PrizeEntry[]`
+ * including the NFT `sym` display field. The slim-fallback in
+ * `AccountingService.recordPlayPoolResult` truncates `sym` to 8 chars
+ * to fit the 1024-byte HCS cap — but the writer ALREADY computed the
+ * Merkle root over the FULL untruncated form. The reader recomputed
+ * from the WIRE-FORMAT (truncated) form. Roots disagreed → every
+ * multi-NFT-prize pool with branded symbols silently corrupted the
+ * audit trail. The fix is to make `sym` non-load-bearing for hashing.
+ * The wire format keeps `sym` for display; the canonical form for
+ * tamper-evidence drops it.
  */
-function canonicalizePrizes(prizes: PrizeEntry[]): PrizeEntry[] {
+type CanonicalPrizeForHash =
+  | { t: 'ft'; tk: string; amt: number }
+  | { t: 'nft'; tk: string; ser: number[] };
+
+function canonicalizePrizesForHash(prizes: PrizeEntry[]): CanonicalPrizeForHash[] {
   const ft = prizes
     .filter((p): p is Extract<PrizeEntry, { t: 'ft' }> => p.t === 'ft')
     .map((p) => ({ t: 'ft' as const, tk: p.tk, amt: p.amt }))
@@ -411,7 +434,7 @@ function canonicalizePrizes(prizes: PrizeEntry[]): PrizeEntry[] {
     .map((p) => ({
       t: 'nft' as const,
       tk: p.tk,
-      sym: p.sym,
+      // sym intentionally omitted (R5-FG-1)
       ser: [...p.ser].sort((a, b) => a - b),
     }))
     .sort((a, b) => a.tk.localeCompare(b.tk));
