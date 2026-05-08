@@ -72,7 +72,22 @@ export function loadStrategy(name: string): Strategy {
     }
   }
 
-  // Treat as file path
+  // R4-FG-71 (round-4 low): refuse path-shaped names with traversal
+  // segments. Pre-fix any non-built-in `name` was passed to
+  // `readFileSync(resolve(name))`, which combined with operator
+  // misconfiguration of `STRATEGY=../../etc/passwd` (or a future
+  // user-controlled call site) would read arbitrary files. The CLI
+  // should use an explicit `--strategy-file <path>` flag — which we
+  // don't have today, so for now the hardening here is to reject
+  // `..` segments and absolute paths.
+  if (name.includes('..') || name.startsWith('/') || /^[A-Za-z]:[\\/]/.test(name)) {
+    throw new Error(
+      `Strategy "${name}" rejected: path traversal segments + absolute paths ` +
+      `are not allowed via the strategy name. Use a built-in (${BUILT_IN.join(', ')}) ` +
+      `or add an explicit --strategy-file flag for arbitrary paths (R4-FG-71).`,
+    );
+  }
+  // Treat as file path (relative; resolved against CWD).
   const raw = JSON.parse(readFileSync(resolve(name), 'utf-8'));
   return resolveTokenAliases(StrategySchema.parse(raw));
 }

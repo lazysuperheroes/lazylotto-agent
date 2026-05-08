@@ -240,3 +240,55 @@ export async function releaseOperatorLock(
     console.warn('[locks] operator release failed:', err);
   }
 }
+
+/**
+ * R4-FG-66 (round-4 low): heartbeat-extend an operator lock to keep
+ * it alive across long-running work that would otherwise outrun the
+ * acquire-time TTL. Returns a `cancel` handle the caller MUST call
+ * in their `finally`. The handle clears the timer.
+ *
+ * The fence token gates the EXPIRE — only the original acquirer's
+ * heartbeat can extend the lock; a sibling acquisition with a
+ * different token can't be silently extended by stale Lambdas.
+ *
+ * Use case: reconcile cron pass over many DLs where a single mirror
+ * flake could push the walk past the 900s TTL acquired up front.
+ */
+const HEARTBEAT_RELEASE_OR_EXTEND_SCRIPT = `
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('expire', KEYS[1], ARGV[2])
+else
+  return 0
+end
+`.trim();
+
+export function startOperatorLockHeartbeat(
+  scope: string,
+  token: string,
+  /** Re-extend interval, ms. */
+  intervalMs: number,
+  /** TTL to set on each heartbeat, seconds. */
+  ttlSec: number,
+): { cancel: () => void } {
+  const key = `${OPERATOR_LOCK_PREFIX}${scope}`;
+  let cancelled = false;
+  const tick = async (): Promise<void> => {
+    if (cancelled) return;
+    try {
+      const redis = await getRedis();
+      await redis.eval(HEARTBEAT_RELEASE_OR_EXTEND_SCRIPT, [key], [token, String(ttlSec)]);
+    } catch {
+      // Best-effort. If heartbeat fails, the lock will TTL out at the
+      // last successful extension; the work continues until done.
+    }
+  };
+  const handle = setInterval(() => {
+    void tick();
+  }, intervalMs);
+  return {
+    cancel(): void {
+      cancelled = true;
+      clearInterval(handle);
+    },
+  };
+}

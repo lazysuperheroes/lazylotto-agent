@@ -20,6 +20,15 @@ interface MockRedis {
   set(key: string, value: string | number, options?: { nx?: boolean; ex?: number }): Promise<string | null>;
   get<T = unknown>(key: string): Promise<T | null>;
   del(key: string): Promise<number>;
+  /**
+   * R4-FG-65: minimal eval shim. The production code uses
+   * `redis.eval(RELEASE_SCRIPT, [key], [token])` for fenced
+   * compare-and-DEL. The script is "if redis.call('get', KEYS[1])
+   * == ARGV[1] then return redis.call('del', KEYS[1]) else return 0".
+   * The mock implements the fence-check behaviour directly (we don't
+   * run real Lua here).
+   */
+  eval(script: string, keys: string[], args: string[]): Promise<number>;
 }
 
 function makeMockRedis(): MockRedis {
@@ -46,6 +55,18 @@ function makeMockRedis(): MockRedis {
     },
     async del(key) {
       return store.delete(key) ? 1 : 0;
+    },
+    async eval(_script, keys, args) {
+      // Fence-check + delete. The script we substitute for is the
+      // canonical RELEASE_SCRIPT from src/lib/locks.ts.
+      const key = keys[0]!;
+      const expected = args[0]!;
+      const actual = store.get(key);
+      if (actual === expected) {
+        store.delete(key);
+        return 1;
+      }
+      return 0;
     },
   };
 }
@@ -136,10 +157,13 @@ describe('withIdempotency: PreserveClaim retention', () => {
         ReceiptUncertainError,
       );
       // The pending claim must remain — pre-fix, the catch DEL'd it.
-      assert.equal(
-        mock.store.get('lla:testnet:idem:withdraw:userX:idem-uncertain'),
-        'pending',
-        'claim must persist as "pending" so retries are bounced as in-flight',
+      // R4-FG-65: claim is now `pending:<uuid>` (fenced) instead of
+      // the literal `'pending'`; assert by prefix to remain
+      // tolerant of either form.
+      const v = mock.store.get('lla:testnet:idem:withdraw:userX:idem-uncertain');
+      assert.ok(
+        typeof v === 'string' && v.startsWith('pending'),
+        `claim must persist as "pending*" so retries are bounced as in-flight (got ${String(v)})`,
       );
     });
   });
@@ -165,10 +189,11 @@ describe('withIdempotency: PreserveClaim retention', () => {
         () => withIdempotency('withdraw:userY', 'idem-custom', body),
         CustomPreserveError,
       );
-      assert.equal(
-        mock.store.get('lla:testnet:idem:withdraw:userY:idem-custom'),
-        'pending',
-        'PreserveClaimError subclass must retain the claim',
+      // R4-FG-65: claim is now fenced; assert by prefix.
+      const v = mock.store.get('lla:testnet:idem:withdraw:userY:idem-custom');
+      assert.ok(
+        typeof v === 'string' && v.startsWith('pending'),
+        `PreserveClaimError subclass must retain the claim (got ${String(v)})`,
       );
     });
   });
@@ -191,10 +216,11 @@ describe('withIdempotency: PreserveClaim retention', () => {
         () => withIdempotency('withdraw:userZ', 'idem-fake', body),
         (err: unknown) => err === fakeUncertain,
       );
-      assert.equal(
-        mock.store.get('lla:testnet:idem:withdraw:userZ:idem-fake'),
-        'pending',
-        'name-based fallback must retain claim for cross-module ReceiptUncertainError',
+      // R4-FG-65: claim is now fenced; assert by prefix.
+      const v = mock.store.get('lla:testnet:idem:withdraw:userZ:idem-fake');
+      assert.ok(
+        typeof v === 'string' && v.startsWith('pending'),
+        `name-based fallback must retain claim (got ${String(v)})`,
       );
     });
   });

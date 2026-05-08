@@ -85,6 +85,17 @@ export async function verifyChallenge(
     if (!sigMap.sigPair || sigMap.sigPair.length === 0) {
       throw new Error('No signature pairs in SignatureMap');
     }
+    // R4-FG-72 (round-4 low): require exactly one signature pair.
+    // Pre-fix we silently took `sigPair[0]` and ignored any extras,
+    // which would let a wallet that bundles multiple signatures
+    // (e.g., one valid + one decoy) authenticate against the first
+    // entry while the protocol contract is "the user signed once".
+    // Hardening for the auth boundary.
+    if (sigMap.sigPair.length !== 1) {
+      throw new Error(
+        `SignatureMap must contain exactly one signature pair (got ${sigMap.sigPair.length})`,
+      );
+    }
 
     const sigPair = sigMap.sigPair[0]!;
     const rawSig = sigPair.ed25519 ?? sigPair.ECDSASecp256k1;

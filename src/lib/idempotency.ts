@@ -21,8 +21,10 @@
  * operation; a UUID per submit click is fine.
  */
 
+import { randomUUID } from 'node:crypto';
 import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 import { PreserveClaimError } from '../hedera/transfers.js';
+import { RELEASE_SCRIPT } from './locks.js';
 
 export type IdempotencyResult<T> =
   | { kind: 'fresh'; result: T }
@@ -92,8 +94,20 @@ export async function withIdempotency<T>(
   // would return testnet's response on a mainnet call.
   const fullKey = `${KEY_PREFIX.idempotency}${scope}:${key}`;
 
-  // Atomic claim — first caller wins.
-  const claim = await redis.set(fullKey, 'pending', { nx: true, ex: ttlSec });
+  // R4-FG-65 (round-4 low): fenced claim. Pre-fix the claim value was
+  // the literal `'pending'`; on body failure the catch did
+  // `redis.del(fullKey)` UNCONDITIONALLY. Same fence-less DEL
+  // pattern that F25/F26 had to fix on the lock helpers. Failure
+  // mode: Lambda A acquires claim → freezes → claim TTL is long
+  // (24h default) so realistically TTL doesn't help → caller gives up
+  // and retries → some condition (TTL bug, Redis flush, manual ops
+  // intervention) lets Lambda B re-acquire → Lambda A unfreezes and
+  // its catch path DELs the now-Lambda-B claim. Lambda B's in-flight
+  // body remains running but its idempotency guarantee is gone.
+  // With a fenced value, the catch's compare-and-DEL only fires if
+  // we still own the claim.
+  const fence = `pending:${randomUUID()}`;
+  const claim = await redis.set(fullKey, fence, { nx: true, ex: ttlSec });
 
   if (claim === null) {
     // Already claimed by a previous request. Read back the stored value.
@@ -106,7 +120,12 @@ export async function withIdempotency<T>(
     // `in-flight`, defeating the whole replay-protection contract this file
     // was added to enforce.
     const existing = await redis.get<unknown>(fullKey);
-    if (!existing || existing === 'pending') {
+    if (!existing) {
+      return { kind: 'in-flight' };
+    }
+    // R4-FG-65: 'pending' (legacy) and 'pending:<uuid>' (fenced)
+    // both mean in-flight. Anything else is a stored result.
+    if (typeof existing === 'string' && existing.startsWith('pending')) {
       return { kind: 'in-flight' };
     }
     try {
@@ -122,6 +141,9 @@ export async function withIdempotency<T>(
   // We won the claim. Execute, store result, return fresh.
   try {
     const result = await fn();
+    // R4-FG-65: result write OVERWRITES the fence (claim is now
+    // 'complete'). Use plain SET — duplicates need to read this back
+    // unconditionally; only the in-flight DEL path needs fencing.
     await redis.set(fullKey, JSON.stringify(result), { ex: ttlSec });
     return { kind: 'fresh', result };
   } catch (err) {
@@ -136,11 +158,13 @@ export async function withIdempotency<T>(
     if (isPreserveClaim(err)) {
       throw err;
     }
-    // Confirmed failure (no on-chain effect, or on-chain effect
-    // confirmed reverted). Release the claim so a retry can run
-    // cleanly.
+    // R4-FG-65: fenced compare-and-DEL via RELEASE_SCRIPT. Only
+    // releases if our `fence` value still matches what's stored.
+    // If a sibling Lambda (somehow) acquired the claim with a
+    // different fence between our SET and now, we leave their claim
+    // alone and let the 24h TTL be the worst-case fallback.
     try {
-      await redis.del(fullKey);
+      await redis.eval(RELEASE_SCRIPT, [fullKey], [fence]);
     } catch {
       // The 24h TTL is the worst-case fallback. Operator can DEL
       // manually if they want a faster retry.

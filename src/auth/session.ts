@@ -116,7 +116,15 @@ export async function destroySession(token: string): Promise<boolean> {
       accountId = session.accountId;
     }
   } catch (e) {
-    console.warn('[session] destroy: failed to read session before delete:', e);
+    // R4-FG-74 (round-4 low): stringify the error message rather than
+    // logging the raw object. Raw Error objects in console.warn surface
+    // properties like `cause` and stack traces verbatim, which can
+    // include token fragments or other secrets when the underlying
+    // failure was an HTTP error from Upstash echoing the request body.
+    console.warn(
+      '[session] destroy: failed to read session before delete:',
+      e instanceof Error ? e.message : String(e),
+    );
   }
 
   // Now delete the session entry
@@ -127,7 +135,11 @@ export async function destroySession(token: string): Promise<boolean> {
     try {
       await redis.srem(`${KEY_PREFIX.accountSessions}${accountId}`, hashedKey);
     } catch (e) {
-      console.warn('[session] destroy: failed to clean account-sessions set:', e);
+      // R4-FG-74: stringify only the message; see comment above.
+      console.warn(
+        '[session] destroy: failed to clean account-sessions set:',
+        e instanceof Error ? e.message : String(e),
+      );
     }
   }
 

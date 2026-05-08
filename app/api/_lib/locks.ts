@@ -11,4 +11,5 @@ export {
   withUserLock,
   acquireOperatorLock,
   releaseOperatorLock,
+  startOperatorLockHeartbeat,
 } from '~/lib/locks';
