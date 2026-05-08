@@ -70,14 +70,25 @@ export const CONTRACT_RECEIPT_TIMEOUT_MS = Math.max(
  * stays at `'pending'` until a reconcile pass or admin tool resolves
  * the on-chain outcome.
  *
- * Subclass this for any future failure mode where the body has
- * already submitted an irreversible on-chain action whose status is
- * unknown to the catch (network blip reading the receipt, OOM after
- * tx.execute returns, etc.). The current concrete subclass is
- * `ReceiptUncertainError`.
+ * R6 (Phase 1 structural fix): every subclass MUST set
+ * `transactionId` (the on-chain tx whose status is unknown). This
+ * lets callers do `instanceof PreserveClaimError` and access
+ * `err.transactionId` with proper TypeScript narrowing — no need
+ * to widen to `instanceof ReceiptUncertainError || instanceof
+ * PostSubmitError` per call site. The lint rule
+ * `no-direct-preserve-claim-subclass` (enforced by
+ * `src/__tests__/sibling-archetype-gate.test.ts`) forbids any
+ * `instanceof ReceiptUncertainError` or `instanceof PostSubmitError`
+ * outside this file — every gate must be on the parent class.
+ *
+ * Subclass for any future failure mode where the body has already
+ * submitted an irreversible on-chain action whose status is unknown
+ * (network blip reading receipt, OOM after tx.execute returns, etc.).
+ * Current concrete subclasses: `ReceiptUncertainError`, `PostSubmitError`.
  */
-export class PreserveClaimError extends Error {
+export abstract class PreserveClaimError extends Error {
   readonly __preserveIdempotencyClaim = true as const;
+  abstract readonly transactionId: string;
 }
 
 /**

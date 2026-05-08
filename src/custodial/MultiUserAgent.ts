@@ -27,9 +27,7 @@ import { HBAR_TOKEN_KEY } from '../config/strategy.js';
 import {
   transferHbar,
   transferToken,
-  ReceiptUncertainError,
   PreserveClaimError,
-  PostSubmitError,
 } from '../hedera/transfers.js';
 import { escalateUncertainDlFailure } from '../lib/escalation.js';
 import { mintAuditOrphanId } from '../lib/orphanIds.js';
@@ -996,7 +994,6 @@ export class MultiUserAgent {
             // matching what the topic actually has. PreserveClaim
             // shapes (ReceiptUncertain / PostSubmit) leave the count
             // optimistic since the topic likely has the message.
-            const { PreserveClaimError } = await import('../hedera/transfers.js');
             if (!(poolErr instanceof PreserveClaimError)) {
               v2WrittenPools = Math.max(0, v2WrittenPools - 1);
             }
@@ -1142,15 +1139,9 @@ export class MultiUserAgent {
 
       return session;
     } catch (error) {
-      // R6-FG-2 (P1-001 + P3-003): broaden the gate to ANY
-      // PreserveClaimError subclass — both ReceiptUncertainError
-      // (timeout) AND PostSubmitError (signer disposed, V8 OOM,
-      // network reset between execute() and awaitReceipt). Pre-fix
-      // PostSubmitError fell through to releaseReserve over every
-      // reservation → on-chain may have landed → fresh-key retry
-      // lets the user re-play with healed balance → operator pays
-      // for two plays.
-      if (error instanceof ReceiptUncertainError || error instanceof PostSubmitError) {
+      // R6-FG-2 (P1-001 + P3-003): gate on parent PreserveClaimError
+      // so any subclass preserves reservations uniformly.
+      if (error instanceof PreserveClaimError) {
         const uncertainTxId = error.transactionId;
         // Receipt-uncertain or post-submit error on a contract
         // submission. The on-chain action MAY have landed; releasing
@@ -1419,17 +1410,14 @@ export class MultiUserAgent {
           transactionId = result.transactionId;
         }
       } catch (transferError) {
-        // R6-FG-1 (P1-002 + P3-001 + P10-002): broaden the gate to
-        // ANY PreserveClaimError subclass — ReceiptUncertainError OR
-        // PostSubmitError. Pre-fix this only caught the receipt-timeout
-        // shape; R5-FG-3's PostSubmitError (covers signer-disposed,
-        // V8 OOM, network reset between execute() and awaitReceipt)
-        // fell through to the release-reserve branch → on-chain may
-        // have landed → fresh-key retry double-spends.
-        if (
-          transferError instanceof ReceiptUncertainError ||
-          transferError instanceof PostSubmitError
-        ) {
+        // R6-FG-1 (P1-002 + P3-001 + P10-002): gate on parent
+        // `PreserveClaimError` so any subclass (ReceiptUncertainError,
+        // PostSubmitError, future) preserves the reserve uniformly.
+        // Pre-fix only ReceiptUncertainError preserved → PostSubmitError
+        // (signer disposed, V8 OOM, network reset between execute()
+        // and awaitReceipt) fell through to releaseReserve → on-chain
+        // may have landed → fresh-key retry double-spends.
+        if (transferError instanceof PreserveClaimError) {
           const uncertainTxId = transferError.transactionId;
           // Audit finding C24 applied to withdraw: if we release the
           // reserve here, a retry with a fresh idempotency key (or
@@ -1801,14 +1789,11 @@ export class MultiUserAgent {
         transactionId = result.transactionId;
       }
     } catch (transferError) {
-      // R6-FG-3 (P1-003 + P3-002): broaden BOTH gates to catch
-      // PostSubmitError as well as ReceiptUncertainError. Pre-fix
-      // PostSubmitError (R5-FG-3 introduced) was treated as
-      // pre-submit failure → claim DELed → fresh-key retry passed
-      // SET-NX → operator double-pay if original landed.
-      const isUncertain =
-        transferError instanceof ReceiptUncertainError ||
-        transferError instanceof PostSubmitError;
+      // R6-FG-3 (P1-003 + P3-002): gate on parent PreserveClaimError.
+      // Pre-fix only ReceiptUncertainError preserved the F24 claim;
+      // PostSubmitError DELed it → fresh-key retry passed SET-NX
+      // → operator double-pay if original landed.
+      const isUncertain = transferError instanceof PreserveClaimError;
       // F24: pre-submit / confirmed-failure path — release the
       // per-token claim so a retry can run. PreserveClaim shapes
       // (uncertain + post-submit) retain the claim for verifier

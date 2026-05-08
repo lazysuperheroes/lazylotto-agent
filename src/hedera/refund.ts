@@ -21,8 +21,7 @@ import {
   submitHbarTransfer,
   submitTokenTransfer,
   safeSubmit,
-  ReceiptUncertainError,
-  PostSubmitError,
+  PreserveClaimError,
 } from './transfers.js';
 import { getMirrorBaseUrl } from './mirror.js';
 import { getOperatorAccountId } from './wallet.js';
@@ -647,10 +646,11 @@ export async function processRefund(
     );
     refundTxId = submitResult.transactionId;
   } catch (err) {
-    // R5-FG-3: ANY post-submit error (ReceiptUncertainError or the
-    // new PostSubmitError) takes the uncertain regime — keep claim,
-    // dead-letter, escalate. Pre-fix only ReceiptUncertainError did.
-    if (err instanceof ReceiptUncertainError || err instanceof PostSubmitError) {
+    // R5-FG-3 + R6 Phase 1: gate on parent PreserveClaimError so
+    // any subclass (ReceiptUncertainError, PostSubmitError, future)
+    // takes the uncertain regime uniformly — keep claim, dead-letter,
+    // escalate.
+    if (err instanceof PreserveClaimError) {
       // Regime C: tx submitted, outcome unknown. KEEP claim. Persist a
       // refund_uncertain dead-letter so reconcile (or an admin tool)
       // can resolve via the mirror node without double-refunding.
