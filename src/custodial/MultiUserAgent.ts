@@ -30,6 +30,7 @@ import {
   ReceiptUncertainError,
 } from '../hedera/transfers.js';
 import { escalateUncertainDlFailure } from '../lib/escalation.js';
+import { mintAuditOrphanId } from '../lib/orphanIds.js';
 
 // ── HCS-20 v2 helpers ─────────────────────────────────────────────
 //
@@ -449,7 +450,9 @@ export class MultiUserAgent {
       );
       try {
         await this.store.upsertDeadLetter({
-          transactionId: `audit-orphan:strategy:${userId}:${Date.now()}`,
+          // R4-FG-28: bare Date.now() collides on millisecond ties;
+          // use mintAuditOrphanId for the uuid-suffixed tail.
+          transactionId: mintAuditOrphanId('audit-orphan:strategy', userId),
           timestamp: new Date().toISOString(),
           error: `strategy_change audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
           kind: 'audit_trail_orphaned',
@@ -965,6 +968,11 @@ export class MultiUserAgent {
         }
 
         // 3. Close — compute Merkle root from the canonical pool data
+        // R4-FG-23 (round-4 high): bind sessionId/user/agent into the
+        // root so two sessions with identical pool data produce
+        // distinct roots. Without the binding a compromised operator
+        // (or replay-window attacker) could swap a `play_session_close`
+        // between sessions whose pool sequences happen to match.
         const poolsRoot = await computePoolsRoot(
           playedPools.map((p) => ({
             poolId: p.poolId,
@@ -973,6 +981,11 @@ export class MultiUserAgent {
             wins: p.wins,
             prizes: convertPrizeDetailsToV2(p.prizeDetails ?? []),
           })),
+          {
+            sessionId: session.sessionId,
+            user: user.hederaAccountId,
+            agent: agentAccountId,
+          },
         );
         await this.accounting.recordPlaySessionClose({
           sessionId: session.sessionId,
@@ -993,12 +1006,48 @@ export class MultiUserAgent {
         console.warn(
           `[MultiUserAgent] HCS-20 v2 sequence failed (wrote ${v2WrittenPools}/${playedPools.length} pools): ${errMsg}`,
         );
+        // R4-FG-24 (round-4 high): compute Merkle root over the pools
+        // that DID get emitted before the v2 sequence failed. Without
+        // this a compromised operator could write an aborted message
+        // claiming `completedPools: 0` for a session whose pool
+        // messages already wrote — verify-audit would treat it as
+        // aborted, ignore the spend, and reconstruct user spent=0
+        // while operator pocketed the spend. Best-effort: if the root
+        // computation throws (shouldn't, pure crypto over local data),
+        // emit aborted without it and the reader falls back to the
+        // legacy completedPools count check.
+        let abortedPoolsRoot: string | undefined;
+        try {
+          const completed = playedPools.slice(0, v2WrittenPools);
+          if (completed.length > 0) {
+            abortedPoolsRoot = await computePoolsRoot(
+              completed.map((p) => ({
+                poolId: p.poolId,
+                spent: p.amountSpent,
+                spentToken: poolFeeTokenForAudit(p.feeTokenId),
+                wins: p.wins,
+                prizes: convertPrizeDetailsToV2(p.prizeDetails ?? []),
+              })),
+              {
+                sessionId: session.sessionId,
+                user: user.hederaAccountId,
+                agent: agentAccountId,
+              },
+            );
+          }
+        } catch (rootErr) {
+          console.warn(
+            '[MultiUserAgent] aborted-poolsRoot computation failed:',
+            rootErr instanceof Error ? rootErr.message : String(rootErr),
+          );
+        }
         try {
           await this.accounting.recordPlaySessionAborted({
             sessionId: session.sessionId,
             user: user.hederaAccountId,
             agent: agentAccountId,
             completedPools: v2WrittenPools,
+            ...(abortedPoolsRoot ? { poolsRoot: abortedPoolsRoot } : {}),
             reason: 'v2_write_failure',
             lastError: errMsg,
           });
@@ -1133,7 +1182,8 @@ export class MultiUserAgent {
       if (settleHappened && Object.keys(partialSpendByToken).length > 0) {
         try {
           await this.store.upsertDeadLetter({
-            transactionId: `audit-orphan:in-band:play-settle:${userId}:${Date.now()}`,
+            // R4-FG-28: bare Date.now() collides on millisecond ties.
+            transactionId: mintAuditOrphanId('audit-orphan:in-band:play-settle', userId),
             timestamp: new Date().toISOString(),
             error:
               `playForUser threw between settle and v2 anchor: ` +
@@ -1241,7 +1291,12 @@ export class MultiUserAgent {
    * `processWithdrawal`. The in-process mutex alone is not sufficient
    * in serverless — two warm Lambdas would each hold their OWN mutex.
    */
-  async processWithdrawal(userId: string, amount: number, token: string = 'hbar'): Promise<WithdrawalRecord> {
+  // R4-FG-37 (round-4 medium): `token` is required. The string-literal
+  // default 'hbar' violated the project's "always match by token ID"
+  // rule (CLAUDE.md security rule #1) — a caller that forgot to pass
+  // `token` would silently process an HBAR withdrawal when the user
+  // intended a token withdrawal.
+  async processWithdrawal(userId: string, amount: number, token: string): Promise<WithdrawalRecord> {
     await this.acquireLock(userId);
     try {
       const user = this.store.getUser(userId);
@@ -1423,9 +1478,9 @@ export class MultiUserAgent {
         });
         try {
           await this.store.upsertDeadLetter({
-            // R2-FG-17: salt by writer phase (`in-band`) so orphans
-            // from different layers don't collide.
-            transactionId: `audit-orphan:in-band:${transactionId}`,
+            // R4-FG-27: salt by writer phase + UUID-tail so multi-pass
+            // failures for the same source don't collide.
+            transactionId: mintAuditOrphanId('audit-orphan:in-band:withdrawal', transactionId),
             timestamp: new Date().toISOString(),
             error: `in-band withdrawal audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
             kind: 'audit_trail_orphaned',
@@ -1816,8 +1871,8 @@ export class MultiUserAgent {
       });
       try {
         await this.store.upsertDeadLetter({
-          // R2-FG-17: salt by writer phase (`in-band`).
-          transactionId: `audit-orphan:in-band:${transactionId}`,
+          // R4-FG-27: salt by writer phase + UUID-tail.
+          transactionId: mintAuditOrphanId('audit-orphan:in-band:operator-fee-withdraw', transactionId),
           timestamp: new Date().toISOString(),
           error: `in-band operator-fee withdraw audit write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
           kind: 'audit_trail_orphaned',
@@ -2151,13 +2206,52 @@ export class MultiUserAgent {
       });
       hcs20RecoveryRecorded = true;
     } catch (auditErr) {
-      logger.warn('prize recovery HCS-20 audit failed', {
+      // R4-FG-19 (round-4 high): contract tx already shifted prize
+      // ownership; recovery is a real state change. Pre-fix this only
+      // logged warn — topic-only auditor has no record an emergency
+      // operator-initiated recovery happened. Now: write
+      // audit_trail_orphaned + page operator so the missing anchor is
+      // visible and replayable.
+      logger.error('CRITICAL: prize recovery HCS-20 audit failed — topic missing the prize_recovery anchor', {
         component: 'MultiUserAgent',
         event: 'prize_recovery_audit_failed',
         userId,
         contractTxId: txResult.result.transactionId,
         error: auditErr instanceof Error ? auditErr.message : String(auditErr),
       });
+      try {
+        await this.store.upsertDeadLetter({
+          transactionId: `audit-orphan:prize-recovery:${txResult.result.transactionId}`,
+          timestamp: new Date().toISOString(),
+          error: `prize_recovery audit failed after on-chain recovery: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
+          kind: 'audit_trail_orphaned',
+          details: {
+            sourceKind: 'prize_recovery_post_success_orphan',
+            sourceTxId: txResult.result.transactionId,
+            userId,
+            userAccountId: user.hederaAccountId,
+            prizesTransferred: agentState.pendingPrizesCount,
+            affectedSessions,
+            phase: 'prize_recovery_audit_failed',
+          },
+        });
+      } catch {
+        /* logged above */
+      }
+      try {
+        const { escalateUncertainDlFailure } = await import('../lib/escalation.js');
+        await escalateUncertainDlFailure({
+          kind: 'audit_trail_orphaned',
+          uncertainTxId: txResult.result.transactionId,
+          userId,
+          cause: auditErr,
+        });
+      } catch (escErr) {
+        logger.error('prize-recovery audit escalation also failed', {
+          component: 'MultiUserAgent',
+          error: escErr instanceof Error ? escErr.message : String(escErr),
+        });
+      }
     }
 
     // 8. Mark dead-letter entries as resolved. `upsertDeadLetter` is a

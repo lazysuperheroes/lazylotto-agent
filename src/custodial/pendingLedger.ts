@@ -47,6 +47,19 @@ export interface PendingLedgerAdjustment {
   sourceTx: string;
   /** ISO timestamp when queued. */
   createdAt: string;
+  /**
+   * R4-FG-13 (round-4 high): operator-rake reversal for refunds that
+   * originally credited rake. Pre-fix the queue applied only
+   * `available -= amount`; the corresponding reduction of
+   * `operator.balances[token]` was lost when the verifier path
+   * couldn't acquire the inner lock and queued instead. Operator
+   * silently kept the rake despite the refund. Optional because
+   * not every refund had rake (e.g. legacy 0% deposits).
+   */
+  rakeReversal?: {
+    tokenKey: string;
+    amount: number;
+  };
 }
 
 // ── Keys ────────────────────────────────────────────────────────
@@ -208,6 +221,24 @@ export async function applyPendingLedgerForUser(
         return b;
       });
 
+      // R4-FG-13: apply the operator-rake reversal too. Pre-fix the
+      // operator silently retained rake when the refund was queued.
+      if (entry.rakeReversal && entry.rakeReversal.amount > 0) {
+        const rakeKey = entry.rakeReversal.tokenKey;
+        const rakeAmt = entry.rakeReversal.amount;
+        store.updateOperator((op) => ({
+          ...op,
+          balances: {
+            ...op.balances,
+            [rakeKey]: Math.max(0, (op.balances[rakeKey] ?? 0) - rakeAmt),
+          },
+          totalRakeCollected: {
+            ...op.totalRakeCollected,
+            [rakeKey]: Math.max(0, (op.totalRakeCollected[rakeKey] ?? 0) - rakeAmt),
+          },
+        }));
+      }
+
       const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
       await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
 
@@ -301,6 +332,22 @@ export async function drainPendingLedgerAdjustments(
         tokenEntry.available = Math.max(0, tokenEntry.available - entry.amount);
         return b;
       });
+      // R4-FG-13: apply rake reversal in the periodic drain path too.
+      if (entry.rakeReversal && entry.rakeReversal.amount > 0) {
+        const rakeKey = entry.rakeReversal.tokenKey;
+        const rakeAmt = entry.rakeReversal.amount;
+        store.updateOperator((op) => ({
+          ...op,
+          balances: {
+            ...op.balances,
+            [rakeKey]: Math.max(0, (op.balances[rakeKey] ?? 0) - rakeAmt),
+          },
+          totalRakeCollected: {
+            ...op.totalRakeCollected,
+            [rakeKey]: Math.max(0, (op.totalRakeCollected[rakeKey] ?? 0) - rakeAmt),
+          },
+        }));
+      }
       await store.flush();
 
       // Remove exactly this entry from the list (count=1)

@@ -1,13 +1,26 @@
 import { z } from 'zod';
 
+// R4-FG-22 (round-4 high): Zod's `nonnegative()` and `positive()`
+// accept `NaN` AND `Infinity`. With NaN budgets, BudgetManager.
+// remainingFor returns NaN, canAfford returns false everywhere →
+// silent strategy DoS for that user. With Infinity reservation, the
+// play loop tries to buy Infinity entries; the Hedera SDK throws
+// AFTER the reservation is held → leaked reservation. Wrap every
+// numeric leaf in `.refine(Number.isFinite)` to refuse both at
+// schema load — defensive, not a migration of existing files.
+const finiteNumber = (
+  base: z.ZodNumber = z.number(),
+): z.ZodEffects<z.ZodNumber, number, number> =>
+  base.refine(Number.isFinite, { message: 'must be a finite number (no NaN/Infinity)' });
+
 // ── Token Budget ──────────────────────────────────────────────
 // Per-token spending limits. Keys in the parent record are token IDs
 // (e.g., "0.0.8011209") or "hbar" for the native token.
 
 export const TokenBudgetSchema = z.object({
-  maxPerSession: z.number().nonnegative(),
-  maxPerPool: z.number().nonnegative(),
-  reserve: z.number().nonnegative().default(0),
+  maxPerSession: finiteNumber(z.number().nonnegative()),
+  maxPerPool: finiteNumber(z.number().nonnegative()),
+  reserve: finiteNumber(z.number().nonnegative()).default(0),
 });
 
 export const BudgetSchema = z
@@ -16,7 +29,7 @@ export const BudgetSchema = z
     tokenBudgets: z.record(z.string(), TokenBudgetSchema),
     /** Optional USD session cap. Requires price oracle. */
     usd: z.object({
-      maxPerSession: z.number().positive(),
+      maxPerSession: finiteNumber(z.number().positive()),
       /** If true, block play when price is unavailable. Default false (fail-open). */
       failClosed: z.boolean().default(false),
     }).optional(),
@@ -47,8 +60,8 @@ export const FeeTokenFilterSchema = z.union([
 
 export const PoolFilterSchema = z.object({
   type: z.enum(['all', 'global', 'community']).default('all'),
-  minWinRate: z.number().min(0).max(100).optional(),
-  maxEntryFee: z.number().positive().optional(),
+  minWinRate: finiteNumber(z.number().min(0).max(100)).optional(),
+  maxEntryFee: finiteNumber(z.number().positive()).optional(),
   /** Filter by fee token symbol for pool discovery. Symbols are fine here
    *  since this is a pre-filter on MCP data (which returns symbols).
    *  See FeeTokenFilterSchema for the supported shapes. */
@@ -78,7 +91,13 @@ export const PlayStyleSchema = z.object({
     .enum(['buy', 'buy_and_roll', 'buy_and_redeem'])
     .default('buy_and_roll'),
   entriesPerBatch: z.number().int().positive().default(1),
-  minExpectedValue: z.number().default(-Infinity),
+  // R4-FG-22: minExpectedValue allows -Infinity intentionally as a
+  // sentinel — null lower bound — but rejects NaN. Don't apply
+  // finiteNumber here; do refine to reject NaN.
+  minExpectedValue: z
+    .number()
+    .refine((n) => !Number.isNaN(n), { message: 'minExpectedValue cannot be NaN' })
+    .default(-Infinity),
   transferToOwner: z.boolean().default(true),
   ownerAddress: z.string().optional(),
   /** Boost score for pools with NFT prizes */

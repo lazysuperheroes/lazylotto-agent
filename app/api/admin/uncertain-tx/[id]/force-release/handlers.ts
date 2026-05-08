@@ -51,7 +51,7 @@ import { randomUUID } from 'node:crypto';
  * random suffix; the `phase` field in `details` distinguishes phases
  * for replay tooling.
  */
-function uniqueForceReleaseOrphanId(txId: string): string {
+export function uniqueForceReleaseOrphanId(txId: string): string {
   return `audit-orphan:force-release:${txId}:${randomUUID().slice(0, 8)}`;
 }
 import { HBAR_TOKEN_KEY } from '~/config/strategy';
@@ -776,7 +776,23 @@ async function handleRefund(
 
   if (mirrorResult === 'FAILED') {
     // F10: overwrite to `failed:<refundTxId>` instead of DEL.
-    const refundTxId = entry.transactionId; // dead-letter id IS the refundTxId
+    //
+    // R4-FG-36 (round-4 medium): use `details.refundTxId` to match
+    // the SUCCESS branch (line ~1059) which writes `details.refundTxId`.
+    // Pre-fix this branch used `entry.transactionId` — for legacy
+    // entries where `entry.transactionId !== details.refundTxId`,
+    // the FAILED and SUCCESS branches disagreed on which tx
+    // identifies the refund, breaking diagnostic message symmetry.
+    if (typeof details.refundTxId !== 'string' || details.refundTxId.length === 0) {
+      return {
+        ok: false,
+        status: 400,
+        error:
+          'Dead-letter is missing details.refundTxId. Cannot resolve FAILED branch ' +
+          'without an authoritative refund tx id. Manual triage required.',
+      };
+    }
+    const refundTxId = details.refundTxId;
     try {
       await ctx.redis.set(details.claimKey, `failed:${refundTxId}`, {
         ex: 30 * 24 * 60 * 60,
@@ -945,16 +961,27 @@ async function handleRefund(
       // agent. Pre-fix self-loop (`from === to === agent`) produced
       // meaningless audit anchors that broke third-party balance
       // reconstruction. Verifier path already does this correctly;
-      // force-release sibling now matches. Fallback to depositRecord
-      // if entry.sender is missing; refuse if both are absent.
-      const refundTo = entry.sender ?? depositRecord?.userId;
+      // force-release sibling now matches.
+      //
+      // R4-FG-11 (round-4 high): the `depositRecord?.userId` fallback
+      // wrote the INTERNAL `usr_*` UUID into the audit anchor's `to`
+      // field — meaningless garbage on the topic. The fallback must
+      // resolve userId → hederaAccountId via the store, and refuse
+      // SUCCESS if neither entry.sender nor the resolved Hedera
+      // account is available (mirroring the verifier's contract,
+      // which uses entry.sender ONLY).
+      let refundTo: string | undefined = entry.sender;
+      if (!refundTo && depositRecord?.userId) {
+        const user = ctx.store.getUser(depositRecord.userId);
+        refundTo = user?.hederaAccountId;
+      }
       if (!refundTo) {
         return {
           ok: false,
           status: 400,
           error:
-            `Cannot force-release: refund SUCCESS branch needs entry.sender or a depositRecord ` +
-            `to attribute the refund recipient. Both are missing for ${entry.transactionId}.`,
+            `Cannot force-release: refund SUCCESS branch needs entry.sender or a resolvable ` +
+            `Hedera account for the deposit owner. Both are missing for ${entry.transactionId}.`,
         };
       }
       await ctx.accounting.recordRefund({

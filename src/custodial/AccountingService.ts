@@ -635,28 +635,52 @@ export class AccountingService {
     // Now: also check Redis-backed `seed-failed:<agentId>` flag set
     // by `initializeAgentSeq` on its catch path, with 10-min TTL so
     // all Lambdas recover when mirror heals.
-    if (this.agentSeqSeedFailed.has(agentAccountId)) {
-      throw new Error(
-        `AGENT_SEQ_SEED_FAILED: cannot emit v2 message for ${agentAccountId} — ` +
-        `mirror-node seed scan failed after retries. Investigate mirror-node ` +
-        `health; restart agent process to retry the scan.`,
-      );
-    }
+    // R4-FG-10 (round-4 high): consult Redis FIRST. The local
+    // in-process flag is per-Lambda and never cleared; if Redis says
+    // seed-failure has TTL'd out (cluster-wide recovery) we must
+    // believe Redis and clear the local flag, otherwise the warm
+    // Lambda permanently refuses every v2 write while sibling Lambdas
+    // succeed. Redis is the source of truth across the cluster; the
+    // local Set is a hot-path cache and must be invalidated when
+    // Redis disagrees.
+    let redisSaysFlagged = false;
+    let redisReachable = false;
     try {
       const { getRedis } = await import('../auth/redis.js');
       const redis = await getRedis();
       const network = process.env.HEDERA_NETWORK ?? 'testnet';
       const seedFailKey = `lla:${network}:agentseq-seed-failed:${agentAccountId}`;
       const flagged = await redis.get<string>(seedFailKey);
-      if (flagged) {
-        throw new Error(
-          `AGENT_SEQ_SEED_FAILED (cluster-wide): cannot emit v2 message for ${agentAccountId} — ` +
-          `another Lambda flagged seed failure. Mirror-node still degraded; flag will TTL out in ~10min.`,
-        );
-      }
-    } catch (e) {
-      if (e instanceof Error && e.message.startsWith('AGENT_SEQ_SEED_FAILED')) throw e;
-      // Redis unavailable — fall through to local-only check (already passed).
+      redisReachable = true;
+      redisSaysFlagged = Boolean(flagged);
+    } catch {
+      // Redis unavailable — fall back to in-process flag below.
+    }
+    if (redisReachable && !redisSaysFlagged && this.agentSeqSeedFailed.has(agentAccountId)) {
+      // R4-FG-10: cluster-wide flag has TTL'd out. Clear the local
+      // flag so this warm Lambda resumes v2 writes alongside its
+      // sibling Lambdas. Also drop the cached init promise so the
+      // next write triggers a fresh seed scan.
+      this.agentSeqSeedFailed.delete(agentAccountId);
+      this.agentSeqInitPromises.delete(agentAccountId);
+    }
+    if (redisSaysFlagged) {
+      // Belt-and-braces: also stamp local so subsequent calls in this
+      // Lambda short-circuit before touching Redis.
+      this.agentSeqSeedFailed.add(agentAccountId);
+      throw new Error(
+        `AGENT_SEQ_SEED_FAILED (cluster-wide): cannot emit v2 message for ${agentAccountId} — ` +
+        `another Lambda flagged seed failure. Mirror-node still degraded; flag will TTL out in ~10min.`,
+      );
+    }
+    if (this.agentSeqSeedFailed.has(agentAccountId)) {
+      // Redis was unreachable AND we have a local flag — keep refusing
+      // to be safe. Operator restart is the documented escape.
+      throw new Error(
+        `AGENT_SEQ_SEED_FAILED: cannot emit v2 message for ${agentAccountId} — ` +
+        `mirror-node seed scan failed after retries. Investigate mirror-node ` +
+        `health; restart agent process to retry the scan.`,
+      );
     }
     if (this.store) {
       return await this.store.nextAgentSeq(agentAccountId);
@@ -779,6 +803,11 @@ export class AccountingService {
           })),
         };
       }
+      // R4-FG-69 (round-4 low): tag the slimmed payload so a
+      // topic-only auditor can distinguish full vs slim messages
+      // and flag investigative attention to slimmed ones (load-bearing
+      // fields are present; the decision metadata isn't).
+      message = { ...message, slim: 1 };
     }
     await this.submitV2Message(message);
   }
@@ -832,6 +861,17 @@ export class AccountingService {
     user: string;
     agent: string;
     completedPools: number;
+    /**
+     * R4-FG-24 (round-4 high): Merkle root over the pools that
+     * actually emitted before the abort. Without this a compromised
+     * operator could write an aborted message claiming completedPools=0
+     * for a session whose pool messages already landed — verify-audit
+     * would treat it as aborted, ignore spend, and reconstruct user
+     * spent=0 while operator kept the spend. Optional only because
+     * legacy aborted messages predate the field; new writers MUST
+     * pass it (caller in MultiUserAgent computes from `playedPools`).
+     */
+    poolsRoot?: string;
     reason: string;
     lastError?: string;
   }): Promise<void> {
@@ -843,6 +883,7 @@ export class AccountingService {
       user: details.user,
       agentSeq,
       completedPools: details.completedPools,
+      ...(details.poolsRoot ? { poolsRoot: details.poolsRoot } : {}),
       reason: details.reason,
       ...(details.lastError ? { lastError: truncateError(details.lastError) } : {}),
       abortedAt: new Date().toISOString(),

@@ -31,7 +31,15 @@ async function mirrorGet<T>(path: string): Promise<T> {
   } else {
     url = `${baseUrl()}${path}`;
   }
-  const res = await fetch(url);
+  // R4-FG-30 (round-4 high): 8s timeout. Pre-fix `fetch(url)` had no
+  // timeout — a slow/wedged mirror node held the request open up to
+  // the Vercel function ceiling (60s/300s). Combined with the auth
+  // challenge rate-limit (10/5min), an attacker who bursts 10
+  // requests against an account ID that triggers a slow path could
+  // saturate the route for minutes — cheap DoS. Every mirrorGet
+  // caller benefits from the bound (refund.ts already uses 8s
+  // explicitly; this brings the rest in line).
+  const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
   if (!res.ok) {
     throw new Error(`Mirror node ${res.status}: ${url}`);
   }

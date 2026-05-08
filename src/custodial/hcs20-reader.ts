@@ -179,6 +179,16 @@ export interface NormalizedControlEvent extends BaseEvent {
   mirrorResult?: string;
   userId?: string;
   tokenReservations?: Array<{ token: string; amount: number }>;
+  /**
+   * R4-FG-7 (round-4 high): R3-FG-22 stamps a deterministic
+   * `idempotencyKey` on triage anchors so verifier + force-release
+   * siblings produce the same on-chain message body for the same
+   * uncertainTxId. The reader exposes the key here AND deduplicates
+   * the SECOND control event with the same key — without this,
+   * R3-FG-22 was wire-only decoration and consumers (verify-audit,
+   * monitoring panel, audit page) double-counted reservations.
+   */
+  idempotencyKey?: string;
 }
 
 /**
@@ -282,6 +292,21 @@ export async function parseAuditTopic(
   // bug it hides (two sessions claiming the same seq) is exactly
   // the pathological case we need to surface.
   const seenAgentSeqByAgent = new Map<string, Map<number, string[]>>();
+  // R4-FG-7: dedup control events on idempotencyKey. R3-FG-22 stamps
+  // 'play-triage:<txId>' on both the verifier and force-release
+  // sibling triage anchors. Without this Set, both anchors emit as
+  // separate NormalizedControlEvents and downstream consumers
+  // double-count.
+  const seenControlIdempotencyKeys = new Set<string>();
+
+  // R4-FG-58 (round-4 medium): reader-side dedup of refund anchors on
+  // `refundTxId`. F18 added burn dedup via `seenWithdrawTxIdsByKind`;
+  // refunds were the sibling miss. A verifier-side `recordRefund` retry
+  // after a partial failure (Lambda freeze post-submit-pre-stamp) emits
+  // a SECOND refund anchor with the same `refundTxId`; without this
+  // dedup the reader summed `rakeReversed` twice and operator balance
+  // reconstruction showed double-rake-reversal vs actual.
+  const seenRefundTxIds = new Set<string>();
   const stats: AuditReaderResult['stats'] = {
     totalMessages: messages.length,
     v1Messages: 0,
@@ -359,8 +384,21 @@ export async function parseAuditTopic(
     if (op === 'refund') {
       stats.v2Messages++;
       const ev = parseRefund(msg);
-      if (ev) events.push(ev);
-      else stats.skippedMessages++;
+      if (!ev) {
+        stats.skippedMessages++;
+        continue;
+      }
+      // R4-FG-58 (round-4 medium): skip duplicate refund anchors with
+      // the same refundTxId. A retry of `recordRefund` after a partial
+      // failure can emit two anchors for one logical refund; without
+      // dedup the reader double-credits `rakeReversed` and reconstructed
+      // operator balance shows twice the actual reversal.
+      if (seenRefundTxIds.has(ev.refundTxId)) {
+        stats.skippedMessages++;
+        continue;
+      }
+      seenRefundTxIds.add(ev.refundTxId);
+      events.push(ev);
       continue;
     }
 
@@ -399,6 +437,19 @@ export async function parseAuditTopic(
     // ── control (v1, no shape change) ──────────────────────
     if (op === 'control') {
       stats.v1Messages++;
+      // R4-FG-7: dedup verifier + force-release sibling triage anchors
+      // by R3-FG-22's deterministic idempotencyKey. The first anchor
+      // emits; the second is silently dropped + counted as skipped so
+      // downstream consumers don't double-count reservations.
+      const idempotencyKey =
+        typeof msg.payload.idempotencyKey === 'string'
+          ? msg.payload.idempotencyKey
+          : undefined;
+      if (idempotencyKey && seenControlIdempotencyKeys.has(idempotencyKey)) {
+        stats.skippedMessages++;
+        continue;
+      }
+      if (idempotencyKey) seenControlIdempotencyKeys.add(idempotencyKey);
       const tokenReservations = Array.isArray(msg.payload.tokenReservations)
         ? (msg.payload.tokenReservations as Array<unknown>)
             .filter(
@@ -433,6 +484,7 @@ export async function parseAuditTopic(
           ? { userId: msg.payload.userId }
           : {}),
         ...(tokenReservations ? { tokenReservations } : {}),
+        ...(idempotencyKey ? { idempotencyKey } : {}),
       });
       continue;
     }
@@ -721,22 +773,52 @@ async function reconstructSession(
       );
       status = 'corrupt';
     } else {
-      // Recompute root from observed pools and compare
-      const observedRoot = await computePoolsRoot(
-        bucket.pools.map((p) => ({
-          poolId: p.poolId,
-          spent: p.spent,
-          spentToken: p.spentToken,
-          wins: p.wins,
-          prizes: p.prizes,
-        })),
-      );
+      // R4-FG-23 (round-4 high): try the binding-aware Merkle first
+      // (writer post-fix always passes binding). Fall back to the
+      // legacy unbound form for sessions emitted before the binding
+      // landed, with a warning so operators can see which historical
+      // sessions lack cross-session-replay protection. Binding requires
+      // `agent` from the open message — without an open we can only
+      // try the legacy form.
+      const poolsForHash = bucket.pools.map((p) => ({
+        poolId: p.poolId,
+        spent: p.spent,
+        spentToken: p.spentToken,
+        wins: p.wins,
+        prizes: p.prizes,
+      }));
+      let observedRoot: string;
+      let usedLegacy = false;
+      if (agent) {
+        observedRoot = await computePoolsRoot(poolsForHash, {
+          sessionId,
+          user,
+          agent,
+        });
+        if (observedRoot !== bucket.close.poolsRoot) {
+          // Try legacy unbound form for back-compat with pre-R4-FG-23
+          // close messages.
+          const legacyRoot = await computePoolsRoot(poolsForHash);
+          if (legacyRoot === bucket.close.poolsRoot) {
+            observedRoot = legacyRoot;
+            usedLegacy = true;
+          }
+        }
+      } else {
+        observedRoot = await computePoolsRoot(poolsForHash);
+        usedLegacy = true;
+      }
       if (observedRoot !== bucket.close.poolsRoot) {
         warnings.push(
           `poolsRoot mismatch: close claims ${bucket.close.poolsRoot}, observed ${observedRoot}`,
         );
         status = 'corrupt';
       } else {
+        if (usedLegacy) {
+          warnings.push(
+            'legacy_merkle_binding: close validated against pre-R4-FG-23 unbound Merkle (cross-session replay protection unavailable for this session)',
+          );
+        }
         status = 'closed_success';
       }
     }
@@ -752,7 +834,56 @@ async function reconstructSession(
       warnings.push(
         `Aborted session pool count mismatch: aborted claims ${bucket.aborted.completedPools}, observed ${bucket.pools.length}`,
       );
+    } else if (bucket.aborted.poolsRoot && agent) {
+      // R4-FG-24 (round-4 high): when the abort message carries a
+      // Merkle root (post-fix writers always do), validate it against
+      // the observed pool messages. Pre-fix a compromised operator
+      // could write an aborted claiming completedPools=0 for a session
+      // whose pool messages already landed; the count-only check above
+      // catches that exact case but only when pool messages observed
+      // != claimed (which a sufficiently determined operator could
+      // arrange). The Merkle bind ties the abort to specific pool
+      // content + (sessionId, user, agent), so a forged abort cannot
+      // pass against legitimate pool messages without operator-key
+      // forgery of those too. Try-both back-compat with closed_success.
+      const poolsForHash = bucket.pools.map((p) => ({
+        poolId: p.poolId,
+        spent: p.spent,
+        spentToken: p.spentToken,
+        wins: p.wins,
+        prizes: p.prizes,
+      }));
+      const observedRoot = await computePoolsRoot(poolsForHash, {
+        sessionId,
+        user,
+        agent,
+      });
+      if (observedRoot !== bucket.aborted.poolsRoot) {
+        // Last-ditch legacy fallback (extremely unlikely on aborted
+        // since the field is brand new, but matches the close path).
+        const legacyRoot = await computePoolsRoot(poolsForHash);
+        if (legacyRoot === bucket.aborted.poolsRoot) {
+          warnings.push(
+            'legacy_merkle_binding: aborted validated against pre-R4-FG-23 unbound Merkle',
+          );
+          status = 'closed_aborted';
+        } else {
+          warnings.push(
+            `Aborted poolsRoot mismatch: aborted claims ${bucket.aborted.poolsRoot}, observed ${observedRoot}`,
+          );
+          status = 'corrupt';
+        }
+      } else {
+        status = 'closed_aborted';
+      }
     } else {
+      // Legacy abort (pre-R4-FG-24) has no poolsRoot. Surface that the
+      // session lacks Merkle tamper-evidence so operators can see it.
+      if (!bucket.aborted.poolsRoot) {
+        warnings.push(
+          'legacy_abort_no_merkle: aborted message predates R4-FG-24 (no Merkle tamper-evidence; count-only check)',
+        );
+      }
       status = 'closed_aborted';
     }
   } else {

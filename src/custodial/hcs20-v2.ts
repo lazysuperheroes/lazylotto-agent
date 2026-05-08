@@ -115,6 +115,16 @@ export interface PlayPoolResultMessage {
     budgetRemaining?: number;
     [key: string]: unknown;
   };
+  /**
+   * R4-FG-69 (round-4 low): set when the slim-fallback path in
+   * `recordPlayPoolResult` (R3-FG-46) had to drop strategyMeta or
+   * truncate prize symbols to fit under the 1024-byte HCS cap. A
+   * topic-only auditor can use this flag to flag investigative
+   * attention to slimmed messages — the load-bearing fields
+   * (sessionId, agentSeq, poolId, spent, wins, prize amounts) are
+   * still present, but the decision metadata isn't.
+   */
+  slim?: 1;
   ts: string;
 }
 
@@ -163,6 +173,19 @@ export interface PlaySessionCloseMessage {
  * over, here's how many pools made it through" — instead of having
  * to detect missing closes via timeout (which can't distinguish
  * crashed from in-flight).
+ *
+ * R4-FG-24 (round-4 high): `poolsRoot` is now carried on aborted
+ * messages too. Pre-fix a compromised operator could write an
+ * `aborted` claiming completedPools=0 for a session whose pool
+ * messages already wrote — verify-audit treated it as aborted +
+ * ignored spend, reconstructing user spent=0 while operator pocketed
+ * the spend. With the root present, the reader recomputes from
+ * observed pools and rejects mismatches as `corrupt`.
+ *
+ * Optional for backward compat: aborted messages emitted before this
+ * fix shipped don't carry a root. The reader falls back to the
+ * pre-fix completedPools count check and emits a `legacy_abort_no_merkle`
+ * warning so operators see which sessions lack tamper-evidence.
  */
 export interface PlaySessionAbortedMessage {
   p: 'hcs-20';
@@ -171,6 +194,12 @@ export interface PlaySessionAbortedMessage {
   user: string;
   agentSeq: number;
   completedPools: number;
+  /**
+   * R4-FG-24: Merkle root over `completedPools` pool tuples computed
+   * with the same binding as `play_session_close.poolsRoot`. Optional
+   * for backward compat with pre-R4-FG-24 aborted messages.
+   */
+  poolsRoot?: string;
   reason: string;
   /** Truncated error message (max ~200 chars to stay within size budget). */
   lastError?: string;
@@ -312,17 +341,45 @@ export interface NormalizedPool {
 // ── Helpers ─────────────────────────────────────────────────
 
 /**
- * Compute the canonical poolsRoot for a session: sha256 of the
- * sorted-by-poolId tuple list. Used by both writer (when emitting
- * the close message) and reader (when validating it).
+ * Identity binding for a Merkle root. Pre-R4-FG-23 the root hashed only
+ * pool tuples — two sessions with structurally identical pool sequences
+ * (same poolIds, spent, prizes) produced the same root and a
+ * compromised submit-key holder could swap a `play_session_close`
+ * between sessions and still pass the reader's tamper-evidence check.
  *
- * Canonical form: each pool serialized as `${poolId}|${spent}|${spentToken}|${wins}|${prizesHash}`,
- * where prizesHash is sha256 of the canonical-JSON-serialized prizes
- * array. Joined by newline. This is deterministic across both sides
- * of the wire.
+ * Including `sessionId|user|agent` as the first hash input ties each
+ * root to a single (session, user, agent) triple so cross-session
+ * replay no longer validates.
+ */
+export interface PoolsRootBinding {
+  sessionId: string;
+  user: string;
+  agent: string;
+}
+
+/**
+ * Compute the canonical poolsRoot for a session: sha256 of an
+ * optional binding line concatenated with the sorted-by-poolId
+ * tuple list. Used by both writer (when emitting the close /
+ * aborted message) and reader (when validating it).
+ *
+ * Canonical form:
+ *   - First line (when `binding` provided, R4-FG-23): `bv:1|${sessionId}|${user}|${agent}`
+ *   - One line per pool: `${poolId}|${spent}|${spentToken}|${wins}|${prizesHash}`
+ *     where prizesHash is sha256 of the canonical-JSON-serialized
+ *     prizes array.
+ *   - Joined by newline.
+ *
+ * Determinism: the writer ALWAYS passes a binding now (post-R4-FG-23).
+ * Pre-fix close messages on testnet have a root that was hashed
+ * without binding — the reader handles this by trying the bound
+ * format first, then falling back to the legacy unbound format and
+ * emitting a `legacy_merkle_binding` warning. Newly-emitted sessions
+ * always validate strictly.
  */
 export async function computePoolsRoot(
   pools: { poolId: number; spent: string | number; spentToken: string; wins: number; prizes: PrizeEntry[] }[],
+  binding?: PoolsRootBinding,
 ): Promise<string> {
   const { createHash } = await import('node:crypto');
 
@@ -332,7 +389,10 @@ export async function computePoolsRoot(
     const prizesHash = createHash('sha256').update(prizesCanonical).digest('hex');
     return `${p.poolId}|${p.spent}|${p.spentToken}|${p.wins}|${prizesHash}`;
   });
-  const root = createHash('sha256').update(lines.join('\n')).digest('hex');
+  const allLines = binding
+    ? [`bv:1|${binding.sessionId}|${binding.user}|${binding.agent}`, ...lines]
+    : lines;
+  const root = createHash('sha256').update(allLines.join('\n')).digest('hex');
   return `sha256:${root}`;
 }
 
@@ -362,11 +422,30 @@ function canonicalizePrizes(prizes: PrizeEntry[]): PrizeEntry[] {
  * Truncate an error message to a fixed byte budget so it fits in a
  * v2 message without overflowing the 1024-byte topic limit. Keeps
  * the head (most informative) and adds an ellipsis if truncated.
+ *
+ * R4-FG-55 (round-4 medium): codepoint-safe truncation. Pre-fix this
+ * sliced at the byte boundary, which can split mid-codepoint for
+ * non-ASCII errors (Hedera SDK errors with Japanese / accented chars,
+ * URLs with percent-encoded UTF-8, etc.). The resulting U+FFFD
+ * replacement chars re-encode to 3 bytes each, which can tip the
+ * payload BACK over the 1024-byte cap that the truncation was meant
+ * to bring it under. Walking backward to the previous UTF-8 lead byte
+ * before the cut keeps every codepoint intact.
  */
 export function truncateError(message: string, maxBytes = 200): string {
   const buf = Buffer.from(message, 'utf-8');
   if (buf.length <= maxBytes) return message;
-  return buf.slice(0, maxBytes - 3).toString('utf-8') + '...';
+  let cut = maxBytes - 3; // reserve 3 bytes for '...'
+  // Walk backward to a UTF-8 lead byte. Continuation bytes are 10xxxxxx
+  // (0x80..0xBF). Lead bytes are 0xxxxxxx (ASCII), 110xxxxx, 1110xxxx,
+  // or 11110xxx. We want to STOP before a continuation byte so we
+  // don't slice through a multibyte codepoint.
+  while (cut > 0 && (buf[cut]! & 0xc0) === 0x80) {
+    cut--;
+  }
+  // Edge case: if the string is all continuation bytes (impossible for
+  // valid UTF-8 but guard anyway), fall through to the byte slice.
+  return buf.slice(0, cut).toString('utf-8') + '...';
 }
 
 /**

@@ -194,6 +194,40 @@ export async function enableKillSwitch(
   enabledBy: string,
   accounting?: KillswitchAuditWriter,
 ): Promise<void> {
+  // R4-FG-47 (round-4 medium): atomic SET NX EX before any HCS work.
+  // Pre-fix the route's `existing.enabled` pre-check + this function's
+  // unconditional `redis.set(KILL_KEY, ...)` left a TOCTOU window where
+  // two concurrent POSTs could both see `enabled === false`, both
+  // submit a `killswitch_enabled` HCS anchor, and the second `set`
+  // would clobber the first's `enabledBy` / `enabledAt` metadata.
+  //
+  // The atomic `SET … NX` here is the real idempotency gate. If we
+  // win the SET, we own the engagement and proceed with the anchor.
+  // If the SET no-ops (already set), some sibling caller already
+  // engaged — short-circuit before any HCS submit so we don't emit a
+  // duplicate anchor. The route's pre-check is now an optimistic
+  // optimization (skip the work if obviously not needed); this gate
+  // is the correctness layer.
+  //
+  // Note this trades F22's strict anchor-first ordering for a few
+  // hundred milliseconds: the Redis flag lands microseconds before
+  // the anchor instead of after. That window can show "agent rejects
+  // plays without an on-chain anchor" briefly. The trade is worth it
+  // — the F22 anchor-first guarantee was already best-effort
+  // (anchor failure → flip anyway) so it was never strict.
+  const redis = await getRedis();
+  const state: Omit<KillSwitchState, 'enabled'> = {
+    reason,
+    enabledAt: new Date().toISOString(),
+    enabledBy,
+  };
+  const claimed = await redis.set(KILL_KEY, JSON.stringify(state), { nx: true });
+  if (claimed === null) {
+    // SET NX no-op: another caller owns the engagement. Idempotent
+    // return — caller can read state to confirm.
+    logger.info('kill switch already engaged (SET NX no-op)', { reason, enabledBy });
+    return;
+  }
   let anchorFailed = false;
   let anchorReason: string | undefined;
   if (accounting) {
@@ -224,9 +258,12 @@ export async function enableKillSwitch(
       // DR scenario.
       try {
         const { createStore } = await import('../custodial/createStore.js');
+        const { mintAuditOrphanId } = await import('./orphanIds.js');
         const store = await createStore();
         await store.upsertDeadLetter({
-          transactionId: `audit-orphan:killswitch-enable:${Date.now()}`,
+          // R4-FG-28: bare Date.now() collides if two enable calls
+          // race within the same millisecond — use uuid-suffixed id.
+          transactionId: mintAuditOrphanId('audit-orphan:killswitch-enable', 'global'),
           timestamp: new Date().toISOString(),
           error: `killswitch enable HCS anchor failed/timed out: ${result.reason}`,
           kind: 'audit_trail_orphaned',
@@ -259,16 +296,13 @@ export async function enableKillSwitch(
       }
     }
   }
-  // R2-FG-25: Redis flip happens regardless of anchor outcome. If the
-  // flip itself throws, propagate (caller / route layer must surface
-  // the failure — pre-fix swallowed Redis errors silently).
-  const redis = await getRedis();
-  const state: Omit<KillSwitchState, 'enabled'> = {
-    reason,
-    enabledAt: new Date().toISOString(),
-    enabledBy,
-  };
-  await redis.set(KILL_KEY, JSON.stringify(state));
+  // R4-FG-47: the Redis flip already landed via the SET NX EX above —
+  // it is the atomic claim that gated entry to this function.
+  // Pre-fix this site re-issued an unconditional SET, which on the
+  // losing-race side would clobber the winner's metadata. With NX
+  // gating, the second caller short-circuits before reaching here.
+  // R2-FG-25: anchor failure does NOT undo the Redis state — operator
+  // safety beats audit completeness during an emergency.
   logger.warn('kill switch ENABLED', { reason, enabledBy });
   if (anchorFailed) {
     logger.error(
@@ -314,9 +348,11 @@ export async function disableKillSwitch(
       // R3-FG-53 (round-3 P5-KS-002): orphan + escalate disable-side too.
       try {
         const { createStore } = await import('../custodial/createStore.js');
+        const { mintAuditOrphanId } = await import('./orphanIds.js');
         const store = await createStore();
         await store.upsertDeadLetter({
-          transactionId: `audit-orphan:killswitch-disable:${Date.now()}`,
+          // R4-FG-28: bare Date.now() collides; use uuid-suffixed id.
+          transactionId: mintAuditOrphanId('audit-orphan:killswitch-disable', 'global'),
           timestamp: new Date().toISOString(),
           error: `killswitch disable HCS anchor failed/timed out: ${result.reason}`,
           kind: 'audit_trail_orphaned',

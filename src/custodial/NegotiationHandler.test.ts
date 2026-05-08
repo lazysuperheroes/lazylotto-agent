@@ -228,6 +228,45 @@ describe('NegotiationHandler', () => {
       assert.ok(stored);
       assert.equal(stored.userId, user.userId);
     });
+
+    // revert-proof: if the `await this.store.flush()` call at
+    // NegotiationHandler.ts:142 (R3-FG-30) is removed, `flushCalls`
+    // remains 0 OR the order assertion `flushedBeforeReturn === true`
+    // fails because the awaited flush never lands before the function
+    // resolves. The test pinpoints the post-saveUser flush directly.
+    it('R3-FG-30: flushes the store BEFORE returning so sibling Lambdas see the new memo', async () => {
+      // Build a flush-spy store. We intentionally don't reuse the
+      // module-level mock so we can assert on flush ordering.
+      const saveOrder: string[] = [];
+      const spy = {
+        getUser: () => undefined,
+        getUserByMemo: () => undefined,
+        getUserByAccountId: () => undefined,
+        saveUser(_user: UserAccount): void { saveOrder.push('save'); },
+        getAllUsers: () => [],
+        async flush(): Promise<void> { saveOrder.push('flush'); },
+      } as unknown as PersistentStore;
+      const localHandler = new NegotiationHandler(
+        {} as Client,
+        spy,
+        TEST_CONFIG,
+        AGENT_ACCOUNT,
+      );
+
+      let returned = false;
+      const promise = localHandler.registerUser('0.0.8888', '0.0.8888', 'conservative')
+        .then((u) => { returned = true; return u; });
+      await promise;
+
+      assert.equal(returned, true);
+      // Order assertion: saveUser AND flush both occurred, and flush
+      // happened AFTER save but BEFORE the function resolved.
+      assert.deepEqual(
+        saveOrder,
+        ['save', 'flush'],
+        'expected save → flush ordering before registerUser resolved',
+      );
+    });
   });
 
   // ── validateRake ─────────────────────────────────────────────

@@ -257,6 +257,30 @@ export function assertProductionRedis(): void {
         `Slack/Discord webhook URL or accept the boot failure.`,
       );
     }
+    // R4-FG-25 (round-4 high): validate URL parseability + scheme.
+    // Pre-fix the boot check accepted typos (`https//hooks…`, missing
+    // colon) and accidental http:// or file:// URLs — the cron
+    // payload (reconcile delta info, escalation messages) could leak
+    // operational signals to a misconfigured/malicious URL, and the
+    // webhook fire-and-forget would silently fail forever.
+    let parsedWebhook: URL;
+    try {
+      parsedWebhook = new URL(webhook);
+    } catch {
+      throw new Error(
+        `PRODUCTION_ESCALATION_REQUIRED: RECONCILE_FAILURE_WEBHOOK_URL is not ` +
+        `a valid URL (got "${webhook}"). Common typo: missing colon after https. ` +
+        `Set a parseable https:// URL.`,
+      );
+    }
+    if (parsedWebhook.protocol !== 'https:') {
+      throw new Error(
+        `PRODUCTION_ESCALATION_REQUIRED: RECONCILE_FAILURE_WEBHOOK_URL must use ` +
+        `https:// scheme (got "${parsedWebhook.protocol}"). Operational signals ` +
+        `(escalation cause messages, user IDs) would otherwise traverse the ` +
+        `internet in plaintext.`,
+      );
+    }
 
     // R3-FG-43 (round-3 P10-AUTH-002 / P10-PROD-001): validate
     // AUTH_PAGE_ORIGIN. The default fallback in `getAudience()` is

@@ -8,7 +8,10 @@
  * an operator wants to release a held claim/reserve immediately
  * after manually verifying the mirror state.
  *
- * Requires 'operator' tier (covers admin / operator wallet-bound).
+ * Requires 'admin' tier (closes R3-FG-40 — was 'operator' pre-fix;
+ * route was downgraded so admin EOAs can self-serve force-releases
+ * without needing the operator wallet key). Doc reflects the runtime
+ * `requireTier(request, 'admin')` check below (R4-FG-61 doc fix).
  *
  * Behavior per kind:
  *  - `withdrawal_uncertain`        → release the user reserve.
@@ -31,6 +34,7 @@
  */
 
 import { NextResponse } from 'next/server';
+import { randomUUID } from 'node:crypto';
 import { requireTier, isErrorResponse, CORS_HEADERS } from '../../../../_lib/auth';
 import { getAgentContext } from '../../../../_lib/mcp';
 import { withStore } from '../../../../_lib/withStore';
@@ -39,7 +43,9 @@ import { logger } from '~/lib/logger';
 import { getRedis, KEY_PREFIX } from '~/auth/redis';
 import { getMirrorBaseUrl } from '~/hedera/mirror';
 import { classifyMirrorResult } from '~/hedera/responseCodes';
-import { applyForceRelease } from './handlers';
+import { RELEASE_SCRIPT } from '~/lib/locks';
+import { applyForceRelease, uniqueForceReleaseOrphanId } from './handlers';
+import { escalateUncertainDlFailure } from '~/lib/escalation';
 
 /**
  * Verifier-lock TTL — must match `VERIFY_LOCK_TTL_SEC` in
@@ -147,6 +153,17 @@ export const POST = withStore(async (request: Request) => {
     const auth = await requireTier(request, 'admin');
     if (isErrorResponse(auth)) return auth;
 
+    // R4-FG-42 (round-4 medium, deferred): full `withIdempotency`
+    // wrap not implemented here — the route returns early at many
+    // distinct branches (404 / 409 / 500 / lock-busy / kind-unsupported)
+    // with shape-distinct bodies, and folding all of them into a single
+    // serializable cached outcome is a non-trivial refactor. The
+    // upstream verifier-lock + the entry's `resolvedAt` short-circuit
+    // (lines 211-220) already make most retries no-ops. A retry that
+    // beats the lock TTL of 60s and lands on an entry whose mutation
+    // partially completed but didn't reach `markResolved` is the
+    // residual hole. Tracked as R4-FG-42 follow-up.
+
     // F5 (2026-05-06 audit I-11): bind the rate-limit budget to the
     // operator account, not the bearer-token prefix. Otherwise a
     // session-token rotation (legitimate or adversarial) resets the
@@ -248,10 +265,21 @@ export const POST = withStore(async (request: Request) => {
     } else {
       lockKey = `${KEY_PREFIX.verifying}${id}`;
     }
+    // R4-FG-8 (round-4 high): fenced acquire-then-release. Pre-fix
+    // wrote the literal 'force-release' value and then unfenced-DEL'd
+    // on the way out — `the SET-NX above guaranteed we own this exact
+    // instance` was only true while the lock TTL hadn't expired. The
+    // route's work (handler + R3-FG-1 refresh + audit anchor + resolve
+    // write) can exceed VERIFY_LOCK_TTL_SEC on HCS congestion. After
+    // TTL expiry a sibling reconcile can acquire fresh; this route's
+    // unfenced DEL would then nuke the sibling's lock, opening the
+    // door for a third caller. Generate a UUID fence at acquire and
+    // compare-and-delete via RELEASE_SCRIPT (mirror of verifier).
+    const lockFence = randomUUID();
     let lockAcquired = false;
     try {
       const redis = await getRedis();
-      const ok = await redis.set(lockKey, 'force-release', {
+      const ok = await redis.set(lockKey, lockFence, {
         nx: true,
         ex: VERIFY_LOCK_TTL_SEC,
       });
@@ -275,16 +303,14 @@ export const POST = withStore(async (request: Request) => {
     }
 
     // R3-FG-5 (round-3 P9-002): release the verifier-lock on EVERY exit.
-    // R2-FG-1 promised "release on ok=false paths" but the route never
-    // released the lock at all — every force-release call leaked the
-    // 60s TTL, blocking concurrent reconcile + repeat operator clicks.
-    // The lock has no fence (literal 'force-release' value), so a plain
-    // DEL is safe; we don't risk nuking another acquirer because the
-    // SET-NX above guaranteed we own this exact instance.
+    // R4-FG-8: fenced compare-and-delete via RELEASE_SCRIPT. If the
+    // TTL elapsed and a sibling acquired this key with their own
+    // fence, our DEL would nuke their lock; the eval no-ops in that
+    // case (script returns 0), so the sibling keeps holding.
     const releaseLock = async (): Promise<void> => {
       try {
         const r = await getRedis();
-        await r.del(lockKey);
+        await r.eval(RELEASE_SCRIPT, [lockKey], [lockFence]);
       } catch (e) {
         logger.warn('force-release verifier-lock release failed; relying on TTL', {
           component: 'AdminForceRelease',
@@ -376,14 +402,21 @@ export const POST = withStore(async (request: Request) => {
         mirrorResult,
       });
     } catch (auditErr) {
-      logger.warn('force-release HCS-20 audit anchor write failed', {
+      // R4-FG-26 (round-4 high): use the salted helper from
+      // handlers.ts (R3-FG-26 sibling miss). Pre-fix this site used
+      // the literal `audit-orphan:force-release:${id}` — repeated
+      // route-level audit failures collided via REPLACE, losing
+      // earlier failure history. Plus add escalation symmetric with
+      // the per-handler block below — this catch was the only
+      // route-level audit-anchor failure that didn't page anyone.
+      logger.error('CRITICAL: force-release HCS-20 audit anchor write failed', {
         component: 'AdminForceRelease',
         uncertainTxId: id,
         error: auditErr instanceof Error ? auditErr.message : String(auditErr),
       });
       try {
         await store.upsertDeadLetter({
-          transactionId: `audit-orphan:force-release:${id}`,
+          transactionId: uniqueForceReleaseOrphanId(id),
           timestamp: new Date().toISOString(),
           error: `force-release audit anchor write failed: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`,
           kind: 'audit_trail_orphaned',
@@ -394,10 +427,23 @@ export const POST = withStore(async (request: Request) => {
             by: auth.accountId,
             reason,
             mirrorResult,
+            phase: 'route_audit_anchor_failed',
           },
         });
       } catch {
         /* logged above */
+      }
+      try {
+        await escalateUncertainDlFailure({
+          kind: 'audit_trail_orphaned',
+          uncertainTxId: id,
+          cause: auditErr,
+        });
+      } catch (escErr) {
+        logger.error('force-release route audit-anchor escalation also failed', {
+          component: 'AdminForceRelease',
+          error: escErr instanceof Error ? escErr.message : String(escErr),
+        });
       }
     }
 
@@ -411,13 +457,36 @@ export const POST = withStore(async (request: Request) => {
     // a subsequent re-run (operator clears resolvedAt, or the
     // play-uncertain SUCCESS triage path which intentionally retains
     // visible state) to re-execute every step → double-debit.
+    // R4-FG-29 (round-4 high): when refreshDeadLetters() throws OR
+    // post-find is undefined, the previous fallback was `freshEntry`
+    // — the PRE-handler snapshot. Resolve-write would then spread
+    // `...freshEntry`, clobbering every progress marker the handler
+    // just stamped (the exact bug R3-FG-1 was meant to fix, re-
+    // emerging on a transient Redis blip). Now: try refresh, then on
+    // failure fall back to the IN-PROCESS cache directly (no fresh
+    // refresh) — the handler's writes already updated the local
+    // store, so the cache has the right entry. Last-resort fallback
+    // to freshEntry only if even the in-process find fails.
     let latestEntry = freshEntry;
     try {
       await store.refreshDeadLetters();
       const post = store.getDeadLetters().find((e) => e.transactionId === id);
       if (post) latestEntry = post;
+      else {
+        // Refresh succeeded but find returned undefined — prefer
+        // direct in-process cache over freshEntry to pick up the
+        // handler's local stamps.
+        const cached = store.getDeadLetters().find((e) => e.transactionId === id);
+        if (cached) latestEntry = cached;
+      }
     } catch {
-      // Fall through with freshEntry — at least it's post-lock.
+      // Refresh threw — DO NOT fall through with the pre-handler
+      // freshEntry (would clobber stamps). Read directly from the
+      // in-process store instead — the handler's writes landed there
+      // and Redis-write may have lagged independently of the refresh
+      // round-trip.
+      const cached = store.getDeadLetters().find((e) => e.transactionId === id);
+      if (cached) latestEntry = cached;
     }
     try {
       await store.upsertDeadLetter({

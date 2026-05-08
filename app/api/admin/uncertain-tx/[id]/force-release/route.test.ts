@@ -741,6 +741,120 @@ describe('F12 + F8 + F9 + F10: applyForceRelease — refund_uncertain', () => {
     expect(result.status).toBe(400);
     expect(redisStore.get('lla:testnet:session:victim')).toBe('session-data');
   });
+
+  // revert-proof: if the SADD block at handlers.ts:1093-1109 (R3-FG-23)
+  // is removed, no `refundedOriginals` set is created in redisStore;
+  // `redisStore.get('lla:testnet:refunded-originals')` is undefined,
+  // and the assertions on `Set` membership and `.has(originalTxId)`
+  // both fail.
+  it('R3-FG-23: SUCCESS branch SADDs originalTxId to the permanent refunded-originals set', async () => {
+    const claimKey = 'lla:testnet:refunded:original-tx-r3fg23';
+    const entry: DeadLetterEntry = {
+      transactionId: 'refund-tx-r3fg23',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'refund_uncertain',
+      details: {
+        claimKey,
+        originalTxId: 'original-tx-r3fg23',
+        refundTxId: 'refund-tx-r3fg23',
+        humanAmount: 50,
+        tokenKey: 'hbar',
+        agentAccountId: '0.0.9999',
+      },
+    };
+    const { ctx, redisStore } = makeContext({
+      dls: new Map([[entry.transactionId, entry]]),
+      balances: new Map([['u-bob', makeBalance('hbar', 50, 0)]]),
+      deposits: new Map([
+        [
+          'original-tx-r3fg23',
+          {
+            transactionId: 'original-tx-r3fg23',
+            userId: 'u-bob',
+            grossAmount: 50,
+            rakeAmount: 0,
+            netAmount: 50,
+            tokenId: null,
+            memo: 'm',
+            timestamp: '2026-05-01T00:00:00Z',
+          },
+        ],
+      ]),
+    });
+
+    const result = await applyForceRelease(entry, 'SUCCESS', ctx);
+
+    expect(result.ok).toBe(true);
+    // The load-bearing assertion: the permanent SADD set must contain
+    // the originalTxId so a 30-day claim TTL doesn't open a second
+    // refund window. Pre-fix the in-flight processRefund + verifier
+    // SUCCESS paths SADD'd; force-release SUCCESS was the asymmetric
+    // sibling that didn't.
+    const refundedSet = redisStore.get('lla:testnet:refunded-originals');
+    expect(refundedSet).toBeInstanceOf(Set);
+    expect((refundedSet as Set<unknown>).has('original-tx-r3fg23')).toBe(true);
+  });
+
+  // revert-proof: if the available-balance pre-check at
+  // handlers.ts:905-926 (R3-FG-24) is removed, the SUCCESS path falls
+  // through into `Math.max(0, available - humanAmount)` which silently
+  // clamps to 0. The user keeps their available balance AND retains
+  // the refund. With the fix in place, the call returns
+  // `{ ok: false, status: 409, error: /insufficient/ }` — pre-fix it
+  // returns `{ ok: true }`. This test's `expect(result.status).toBe(409)`
+  // and `/insufficient/` regex both fail on revert.
+  it('R3-FG-24: SUCCESS refuses with 409 when available < humanAmount (no Math.max(0,…) clamp)', async () => {
+    const claimKey = 'lla:testnet:refunded:original-tx-r3fg24';
+    const entry: DeadLetterEntry = {
+      transactionId: 'refund-tx-r3fg24',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'refund_uncertain',
+      details: {
+        claimKey,
+        originalTxId: 'original-tx-r3fg24',
+        refundTxId: 'refund-tx-r3fg24',
+        humanAmount: 100, // refund WANTS 100
+        tokenKey: 'hbar',
+        agentAccountId: '0.0.9999',
+      },
+    };
+    const { ctx, state, accountingCalls, redisStore } = makeContext({
+      dls: new Map([[entry.transactionId, entry]]),
+      // User has only 30 available — 70 short.
+      balances: new Map([['u-alice', makeBalance('hbar', 30, 0)]]),
+      deposits: new Map([
+        [
+          'original-tx-r3fg24',
+          {
+            transactionId: 'original-tx-r3fg24',
+            userId: 'u-alice',
+            grossAmount: 100,
+            rakeAmount: 0,
+            netAmount: 100,
+            tokenId: null,
+            memo: 'm',
+            timestamp: '2026-05-01T00:00:00Z',
+          },
+        ],
+      ]),
+    });
+
+    const result = await applyForceRelease(entry, 'SUCCESS', ctx);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    // Load-bearing assertions: 409 + insufficient-balance string.
+    expect(result.status).toBe(409);
+    expect(result.error).toMatch(/insufficient/);
+    // No mutations: balance UNTOUCHED (pre-fix would have clamped to 0).
+    expect(state.balances.get('u-alice')!.tokens.hbar!.available).toBe(30);
+    // No audit anchor written.
+    expect(accountingCalls.filter((c) => c.method === 'recordRefund').length).toBe(0);
+    // No SADD landed (R3-FG-23 only fires on SUCCESS).
+    expect(redisStore.get('lla:testnet:refunded-originals')).toBeUndefined();
+  });
 });
 
 // ── F12: mirror outcome refusals ─────────────────────────────────

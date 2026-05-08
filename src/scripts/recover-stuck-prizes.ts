@@ -169,7 +169,18 @@ async function main() {
     process.exit(3);
   }
   const recoveryLockKey = userAccount.userId;
-  const lockToken = await acquireUserLock(recoveryLockKey, 300);
+  // R4-FG-15 (round-4 high): TTL bumped from 300s → 600s. The
+  // transferAllPrizesWithRetry ladder runs up to 3 retries × ~16s
+  // receipt ceiling each ≈ 48s on happy path; on slow mainnet day
+  // with mirror propagation wait + HCS audit + per-prize re-read,
+  // worst case pushed past 5 minutes. A 300s TTL guaranteed
+  // mid-flight lock loss; another caller (in-band MCP recover, or
+  // parallel CLI) could acquire + submit a SECOND
+  // `transferPendingPrizes` call. Contract is idempotent at
+  // prize-set level (no double-spend) but two `prize_recovery` HCS
+  // messages emit, both claiming success — topic-only auditor sees
+  // a phantom recovery.
+  const lockToken = await acquireUserLock(recoveryLockKey, 600);
   if (!lockToken) {
     console.error(
       `  ✗ Another op holds lockUser:${recoveryLockKey} for ${userAccountId}. ` +
@@ -211,9 +222,17 @@ async function main() {
   console.log('');
   console.log('[5/5] Recording prize_recovery on HCS-20 audit topic...');
   const hcs20TopicId = process.env.HCS20_TOPIC_ID;
+  // R4-FG-18 (round-4 high): exit code 4 when the audit log fails.
+  // Pre-fix the script printed a warning and exited 0; cron / ops
+  // runbook scripts saw "success" even though the topic is missing
+  // a `prize_recovery` anchor — defeats the very purpose of the
+  // audit trail. Track the failure and exit non-zero before the
+  // final `process.exit(0)`.
+  let auditWriteFailed = false;
   if (!hcs20TopicId) {
     console.warn('      ⚠ HCS20_TOPIC_ID not set in env — skipping audit log entry.');
     console.warn('      The contract transfer succeeded, but the audit trail will not show this recovery.');
+    auditWriteFailed = true;
   } else {
     const tick = process.env.HCS20_TICK ?? 'LLCRED';
     const accounting = new AccountingService({ client, tick, topicId: hcs20TopicId });
@@ -233,6 +252,7 @@ async function main() {
     } catch (err) {
       console.error(`      ✗ Audit log failed: ${err instanceof Error ? err.message : String(err)}`);
       console.error('      Recovery itself succeeded; only the audit log entry failed.');
+      auditWriteFailed = true;
     }
   }
 
@@ -252,6 +272,12 @@ async function main() {
   console.log('  Recovery complete.');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   await releaseUserLock(recoveryLockKey, lockToken);
+  // R4-FG-18: exit non-zero when audit log failed so monitoring shells
+  // surface the missing anchor.
+  if (auditWriteFailed) {
+    console.error('  ⚠ EXIT 4: audit log entry missing — prize_recovery anchor absent from topic.');
+    process.exit(4);
+  }
   process.exit(0);
 }
 

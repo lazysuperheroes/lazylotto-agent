@@ -203,6 +203,23 @@ export class DepositWatcher {
     this.stats.lastPollAt = new Date().toISOString();
 
     try {
+      // R4-FG-67 (round-4 low): refresh the user index so a sibling
+      // Lambda's just-registered user is visible to this poll.
+      // Pre-fix `registerUser` flushed but the SIBLING Lambda whose
+      // `pollOnce` is running might still be holding a stale local
+      // user-index (the cache was loaded before the new registration
+      // landed). Refreshing here closes the first-deposit unmatched-memo
+      // race that R3-FG-30 closed on the writer side. Best-effort —
+      // a refresh failure shouldn't block the poll; subsequent passes
+      // will retry.
+      try {
+        await (this.store as { refreshUserIndex?: () => Promise<void> }).refreshUserIndex?.();
+      } catch (refreshErr) {
+        logger.warn('refreshUserIndex failed at pollOnce start', {
+          component: 'DepositWatcher',
+          error: refreshErr instanceof Error ? refreshErr.message : String(refreshErr),
+        });
+      }
       let watermark = this.store.getWatermark();
 
       // On first run (no watermark), start from "now" to avoid re-processing
@@ -254,7 +271,29 @@ export class DepositWatcher {
           // Capture sender + memo so users can find their stuck deposits.
           // R2-FG-26: stamp `auto_retry: true` on unknown-token entries
           // so the next pass can re-process once the registry warms.
+          //
+          // R4-FG-20 (round-4 high): bounded retry budget on unknown
+          // tokens. Pre-fix the watermark held forever, blocking every
+          // subsequent legitimate deposit (HBAR, LAZY, etc.) until
+          // manual intervention — single bad-token deposit DoS'd the
+          // entire deposit watcher. Now: track `unknownTokenAttempts`
+          // on the entry; after MAX_UNKNOWN_TOKEN_ATTEMPTS polls,
+          // promote to a hard dead-letter and ADVANCE the watermark.
+          // The deposit is still recoverable via /api/admin/replay-
+          // deposit; deferring it shouldn't keep the queue wedged.
           const isUnknownToken = err instanceof UnknownTokenError;
+          const MAX_UNKNOWN_TOKEN_ATTEMPTS = 10;
+          let unknownTokenAttempts = 0;
+          let promotedToHardDl = false;
+          if (isUnknownToken) {
+            const existing = this.store
+              .getDeadLetters()
+              .find((e) => e.transactionId === tx.transaction_id);
+            const prior =
+              ((existing?.details as { unknownTokenAttempts?: number } | undefined)?.unknownTokenAttempts) ?? 0;
+            unknownTokenAttempts = prior + 1;
+            promotedToHardDl = unknownTokenAttempts >= MAX_UNKNOWN_TOKEN_ATTEMPTS;
+          }
           await this.store.upsertDeadLetter({
             transactionId: tx.transaction_id,
             timestamp: tx.consensus_timestamp,
@@ -262,19 +301,43 @@ export class DepositWatcher {
             sender: this.extractSender(tx) ?? undefined,
             memo: this.decodeMemo(tx.memo_base64),
             ...(isUnknownToken
-              ? { details: { autoRetry: true, unknownTokenId: (err as UnknownTokenError).tokenId } }
+              ? {
+                  details: {
+                    // Stop autoRetrying once we hit the cap so the
+                    // operator's replay-deposit endpoint becomes the
+                    // single recovery path.
+                    autoRetry: !promotedToHardDl,
+                    unknownTokenId: (err as UnknownTokenError).tokenId,
+                    unknownTokenAttempts,
+                    ...(promotedToHardDl ? { promotedAt: new Date().toISOString() } : {}),
+                  },
+                }
               : {}),
           });
           if (isUnknownToken) {
-            // Hold watermark BEFORE this tx so it gets re-processed.
-            if (
-              !earliestUnknownTokenTs ||
-              tx.consensus_timestamp < earliestUnknownTokenTs
-            ) {
-              earliestUnknownTokenTs = tx.consensus_timestamp;
+            if (promotedToHardDl) {
+              // R4-FG-20: cap blown — promote to hard DL and let the
+              // watermark advance past this tx. Operator can replay via
+              // admin endpoint once the token registry is fixed.
+              logger.error('unknown-token deposit promoted to hard DL after attempt cap', {
+                component: 'DepositWatcher',
+                event: 'unknown_token_promoted',
+                txId: tx.transaction_id,
+                tokenId: (err as UnknownTokenError).tokenId,
+                attempts: unknownTokenAttempts,
+              });
+              // Don't hold watermark — fall through to lastTimestamp advance below.
+            } else {
+              // Hold watermark BEFORE this tx so it gets re-processed.
+              if (
+                !earliestUnknownTokenTs ||
+                tx.consensus_timestamp < earliestUnknownTokenTs
+              ) {
+                earliestUnknownTokenTs = tx.consensus_timestamp;
+              }
+              // Skip the lastTimestamp advance for this tx.
+              continue;
             }
-            // Skip the lastTimestamp advance for this tx.
-            continue;
           }
         }
         // Track the last timestamp regardless of processing outcome

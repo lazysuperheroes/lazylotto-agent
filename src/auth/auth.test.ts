@@ -142,6 +142,41 @@ describe('Session management', () => {
     assert.equal(result, null);
   });
 
+  // revert-proof: if the `wasLocked` branch at session.ts:151-161
+  // (R3-FG-44) reverts to a plain `return createSession(...)`, the
+  // refreshed session loses `locked: true` and gains a 7-day TTL.
+  // The assertion `newSession.locked === true` then becomes `false`
+  // and this test fails.
+  it("R3-FG-44: refreshSession preserves locked: true on rotation", async () => {
+    const { token: oldToken } = await createSession(testAccount, 'admin');
+    const wasLocked = await lockSession(oldToken);
+    assert.equal(wasLocked, true);
+    // Pre-condition: the source session is locked.
+    const before = await getSession(oldToken);
+    assert.equal(before?.locked, true);
+    assert.equal(before?.expiresAt, null);
+
+    const result = await refreshSession(oldToken);
+    assert.ok(result, 'refreshSession must return a new session');
+    assert.notEqual(result.token, oldToken);
+
+    // The load-bearing assertion: the rotated session must still be
+    // locked. Pre-fix the new session was a fresh 7-day TTL — silent
+    // demotion of a permanent admin session.
+    const newSession = await getSession(result.token);
+    assert.ok(newSession, 'rotated token must resolve to a session');
+    assert.equal(
+      newSession.locked,
+      true,
+      'rotated session must inherit locked=true from the source',
+    );
+    assert.equal(
+      newSession.expiresAt,
+      null,
+      'rotated locked session must have null expiresAt (no TTL)',
+    );
+  });
+
   it('revokeAllForAccount removes all sessions for an account', async () => {
     const { token: token1 } = await createSession(testAccount, 'user');
     const { token: token2 } = await createSession(testAccount, 'user');
@@ -355,6 +390,134 @@ describe('assertProductionRedis', () => {
       else env.AUTH_PAGE_ORIGIN = originalAud;
       if (originalMcp === undefined) delete env.LAZYLOTTO_MCP_URL;
       else env.LAZYLOTTO_MCP_URL = originalMcp;
+    }
+  });
+
+  // revert-proof: if redis.ts:291-298 (the AUTH_PAGE_ORIGIN missing
+  // check, R3-FG-43) is removed, this assertion's
+  // `PRODUCTION_AUDIENCE_REQUIRED` regex never matches because no
+  // throw fires.
+  it("R3-FG-43: THROWS PRODUCTION_AUDIENCE_REQUIRED when NODE_ENV='production' and AUTH_PAGE_ORIGIN is missing", () => {
+    const original = env.NODE_ENV;
+    const originalNet = env.HEDERA_NETWORK;
+    const originalWebhook = env.RECONCILE_FAILURE_WEBHOOK_URL;
+    const originalAud = env.AUTH_PAGE_ORIGIN;
+    env.NODE_ENV = 'production';
+    env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    env.HEDERA_NETWORK = 'testnet';
+    env.RECONCILE_FAILURE_WEBHOOK_URL = 'https://hooks.example.com/test';
+    delete env.AUTH_PAGE_ORIGIN;
+    try {
+      assert.throws(
+        () => assertProductionRedis(),
+        /PRODUCTION_AUDIENCE_REQUIRED/,
+      );
+    } finally {
+      if (original === undefined) delete env.NODE_ENV; else env.NODE_ENV = original;
+      delete env.UPSTASH_REDIS_REST_URL;
+      delete env.UPSTASH_REDIS_REST_TOKEN;
+      if (originalNet === undefined) delete env.HEDERA_NETWORK; else env.HEDERA_NETWORK = originalNet;
+      if (originalWebhook === undefined) delete env.RECONCILE_FAILURE_WEBHOOK_URL; else env.RECONCILE_FAILURE_WEBHOOK_URL = originalWebhook;
+      if (originalAud === undefined) delete env.AUTH_PAGE_ORIGIN; else env.AUTH_PAGE_ORIGIN = originalAud;
+    }
+  });
+
+  // revert-proof: if redis.ts:299-305 (the http:// rejection in
+  // R3-FG-43) is removed, the http:// origin would silently accept
+  // and `assert.throws(/PRODUCTION_AUDIENCE_INSECURE/)` fails.
+  it("R3-FG-43: THROWS PRODUCTION_AUDIENCE_INSECURE when AUTH_PAGE_ORIGIN is plain http://", () => {
+    const original = env.NODE_ENV;
+    const originalNet = env.HEDERA_NETWORK;
+    const originalWebhook = env.RECONCILE_FAILURE_WEBHOOK_URL;
+    const originalAud = env.AUTH_PAGE_ORIGIN;
+    const originalMcp = env.LAZYLOTTO_MCP_URL;
+    env.NODE_ENV = 'production';
+    env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    env.HEDERA_NETWORK = 'testnet';
+    env.RECONCILE_FAILURE_WEBHOOK_URL = 'https://hooks.example.com/test';
+    env.AUTH_PAGE_ORIGIN = 'http://testnet-agent.lazysuperheroes.com'; // plain http
+    env.LAZYLOTTO_MCP_URL = 'https://testnet-dapp.lazysuperheroes.com/api/mcp';
+    try {
+      assert.throws(
+        () => assertProductionRedis(),
+        /PRODUCTION_AUDIENCE_INSECURE/,
+      );
+    } finally {
+      if (original === undefined) delete env.NODE_ENV; else env.NODE_ENV = original;
+      delete env.UPSTASH_REDIS_REST_URL;
+      delete env.UPSTASH_REDIS_REST_TOKEN;
+      if (originalNet === undefined) delete env.HEDERA_NETWORK; else env.HEDERA_NETWORK = originalNet;
+      if (originalWebhook === undefined) delete env.RECONCILE_FAILURE_WEBHOOK_URL; else env.RECONCILE_FAILURE_WEBHOOK_URL = originalWebhook;
+      if (originalAud === undefined) delete env.AUTH_PAGE_ORIGIN; else env.AUTH_PAGE_ORIGIN = originalAud;
+      if (originalMcp === undefined) delete env.LAZYLOTTO_MCP_URL; else env.LAZYLOTTO_MCP_URL = originalMcp;
+    }
+  });
+
+  // revert-proof: if redis.ts:306-313 (network mismatch check,
+  // R3-FG-43) is removed, a mainnet deploy with a testnet origin URL
+  // silently boots and serves cross-network signature replays.
+  // `PRODUCTION_AUDIENCE_NETWORK_MISMATCH` regex never matches.
+  it("R3-FG-43: THROWS PRODUCTION_AUDIENCE_NETWORK_MISMATCH when HEDERA_NETWORK=mainnet but AUTH_PAGE_ORIGIN looks like testnet", () => {
+    const original = env.NODE_ENV;
+    const originalNet = env.HEDERA_NETWORK;
+    const originalWebhook = env.RECONCILE_FAILURE_WEBHOOK_URL;
+    const originalAud = env.AUTH_PAGE_ORIGIN;
+    const originalMcp = env.LAZYLOTTO_MCP_URL;
+    env.NODE_ENV = 'production';
+    env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    env.HEDERA_NETWORK = 'mainnet';
+    env.RECONCILE_FAILURE_WEBHOOK_URL = 'https://hooks.example.com/test';
+    env.AUTH_PAGE_ORIGIN = 'https://testnet-agent.lazysuperheroes.com';
+    env.LAZYLOTTO_MCP_URL = 'https://dapp.lazysuperheroes.com/api/mcp';
+    try {
+      assert.throws(
+        () => assertProductionRedis(),
+        /PRODUCTION_AUDIENCE_NETWORK_MISMATCH/,
+      );
+    } finally {
+      if (original === undefined) delete env.NODE_ENV; else env.NODE_ENV = original;
+      delete env.UPSTASH_REDIS_REST_URL;
+      delete env.UPSTASH_REDIS_REST_TOKEN;
+      if (originalNet === undefined) delete env.HEDERA_NETWORK; else env.HEDERA_NETWORK = originalNet;
+      if (originalWebhook === undefined) delete env.RECONCILE_FAILURE_WEBHOOK_URL; else env.RECONCILE_FAILURE_WEBHOOK_URL = originalWebhook;
+      if (originalAud === undefined) delete env.AUTH_PAGE_ORIGIN; else env.AUTH_PAGE_ORIGIN = originalAud;
+      if (originalMcp === undefined) delete env.LAZYLOTTO_MCP_URL; else env.LAZYLOTTO_MCP_URL = originalMcp;
+    }
+  });
+
+  // revert-proof: if redis.ts:315-322 (the LAZYLOTTO_MCP_URL missing
+  // check, R3-FG-80 / bundled with R3-FG-43) is removed, the boot
+  // succeeds and the missing env only fails at first tool call.
+  // `PRODUCTION_MCP_URL_REQUIRED` regex never matches → fails.
+  it("R3-FG-43: THROWS PRODUCTION_MCP_URL_REQUIRED when LAZYLOTTO_MCP_URL is missing", () => {
+    const original = env.NODE_ENV;
+    const originalNet = env.HEDERA_NETWORK;
+    const originalWebhook = env.RECONCILE_FAILURE_WEBHOOK_URL;
+    const originalAud = env.AUTH_PAGE_ORIGIN;
+    const originalMcp = env.LAZYLOTTO_MCP_URL;
+    env.NODE_ENV = 'production';
+    env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    env.HEDERA_NETWORK = 'testnet';
+    env.RECONCILE_FAILURE_WEBHOOK_URL = 'https://hooks.example.com/test';
+    env.AUTH_PAGE_ORIGIN = 'https://testnet-agent.lazysuperheroes.com';
+    delete env.LAZYLOTTO_MCP_URL;
+    try {
+      assert.throws(
+        () => assertProductionRedis(),
+        /PRODUCTION_MCP_URL_REQUIRED/,
+      );
+    } finally {
+      if (original === undefined) delete env.NODE_ENV; else env.NODE_ENV = original;
+      delete env.UPSTASH_REDIS_REST_URL;
+      delete env.UPSTASH_REDIS_REST_TOKEN;
+      if (originalNet === undefined) delete env.HEDERA_NETWORK; else env.HEDERA_NETWORK = originalNet;
+      if (originalWebhook === undefined) delete env.RECONCILE_FAILURE_WEBHOOK_URL; else env.RECONCILE_FAILURE_WEBHOOK_URL = originalWebhook;
+      if (originalAud === undefined) delete env.AUTH_PAGE_ORIGIN; else env.AUTH_PAGE_ORIGIN = originalAud;
+      if (originalMcp === undefined) delete env.LAZYLOTTO_MCP_URL; else env.LAZYLOTTO_MCP_URL = originalMcp;
     }
   });
 

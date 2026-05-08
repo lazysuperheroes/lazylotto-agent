@@ -73,4 +73,24 @@ describe('Token Registry', () => {
   it('roundForToken returns raw for unknown token', () => {
     assert.equal(roundForToken(1.23456, '0.0.nope'), 1.23456);
   });
+
+  // revert-proof: if math.ts:34-38 (R3-FG-68 token-id regex check)
+  // is removed, `registerToken('not-a-token', 6, 'X')` silently
+  // succeeds and assert.throws becomes a NO-throw → test fails.
+  it('R3-FG-68: registerToken throws on malformed token id (not-a-token)', () => {
+    assert.throws(
+      () => registerToken('not-a-token', 6, 'X'),
+      /tokenId must be 'hbar' or a Hedera token id/,
+    );
+  });
+
+  // revert-proof: same as above — comma-list (the live LAZY_TOKEN_ID
+  // typo R3-FG-68 was written for) must also throw. Pre-fix it
+  // silently cached at decimals=0 forever.
+  it('R3-FG-68: registerToken throws on comma-list LAZY_TOKEN_ID typo', () => {
+    assert.throws(
+      () => registerToken('0.0.X, 0.0.other', 1, 'LAZY'),
+      /tokenId must be 'hbar' or a Hedera token id/,
+    );
+  });
 });

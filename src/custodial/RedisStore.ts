@@ -570,6 +570,15 @@ export class RedisStore implements IStore {
     record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.processedTxIds.add(record.transactionId);
     this.deposits.push(record);
+    // R4-FG-21 (round-4 high): enforce in-memory MAX_RECORDS so warm
+    // Lambdas don't accumulate 6+ months of writes (~120MB+ for plays
+    // alone) and trip Upstash 4MB request-body limit on cold-start
+    // pipelined GETs. Pre-fix the constant was declared and never
+    // read; arrays grew unbounded. Drop oldest from the front when
+    // over the cap.
+    if (this.deposits.length > MAX_RECORDS) {
+      this.deposits.splice(0, this.deposits.length - MAX_RECORDS);
+    }
 
     const pipeline = this.redis.pipeline();
     pipeline.set(k('deposits', record.transactionId), JSON.stringify(record));
@@ -607,6 +616,9 @@ export class RedisStore implements IStore {
   recordPlaySession(record: PlaySessionResult): void {
     record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.plays.push(record);
+    if (this.plays.length > MAX_RECORDS) {
+      this.plays.splice(0, this.plays.length - MAX_RECORDS);
+    }
 
     const pipeline = this.redis.pipeline();
     pipeline.set(k('plays', record.sessionId), JSON.stringify(record));
@@ -623,6 +635,9 @@ export class RedisStore implements IStore {
   recordWithdrawal(record: WithdrawalRecord): void {
     record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.withdrawals.push(record);
+    if (this.withdrawals.length > MAX_RECORDS) {
+      this.withdrawals.splice(0, this.withdrawals.length - MAX_RECORDS);
+    }
 
     const pipeline = this.redis.pipeline();
     pipeline.set(k('withdrawals', record.transactionId), JSON.stringify(record));
@@ -706,6 +721,9 @@ export class RedisStore implements IStore {
   recordGas(record: GasRecord): void {
     record.schemaVersion = CURRENT_SCHEMA_VERSION;
     this.gasLog.push(record);
+    if (this.gasLog.length > MAX_RECORDS) {
+      this.gasLog.splice(0, this.gasLog.length - MAX_RECORDS);
+    }
 
     const rid = record.transactionId || recordId();
     const pipeline = this.redis.pipeline();

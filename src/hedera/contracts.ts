@@ -107,7 +107,17 @@ export async function executeIntent(
     );
   }
 
-  // Estimate gas cost (Hedera charges ~0.000000082 HBAR per gas unit)
+  // Estimate gas cost using the published Hedera mainnet gas price
+  // (~0.000000082 HBAR/gas). NOTE (R4-FG-63 deferred): this uses
+  // intent.gas (the LIMIT) rather than gas actually consumed. The
+  // proposed fix to read `receipt.transactionFee` doesn't apply
+  // because TransactionReceipt does not expose the fee — that lives
+  // on TransactionRecord, which requires a separate paid query.
+  // Leaving the over-estimate in place: it's worse for solvency
+  // tracking (under-reports operator headroom) but always errs on
+  // the safe side (operator looks insolvent earlier rather than
+  // later). Proper fix: bolt on a TransactionRecordQuery only when
+  // an exact fee is needed, e.g., for fee-withdrawal accounting.
   const estimatedGasHbar = intent.gas * 0.000000082;
 
   return {
@@ -150,6 +160,9 @@ export async function executeEncodedCall(
     );
   }
 
+  // R4-FG-63 deferred: same estimation caveat as `executeIntent` —
+  // intent.gas is the LIMIT, not the actual gas consumed. Real fee
+  // lives on TransactionRecord which we don't query for cost.
   const estimatedGasHbar = gas * 0.000000082;
 
   return {
@@ -251,6 +264,30 @@ export async function transferAllPrizesWithRetry(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       attemptsLog.push({ attempt: i + 1, gas, error: message });
+
+      // R4-FG-17 (round-4 high): rethrow ReceiptUncertainError
+      // immediately. Pre-fix the retry catch only short-circuited on
+      // INSUFFICIENT_GAS; ReceiptUncertainError was wrapped + retried.
+      // But the underlying tx may have landed and burned the prize-
+      // loop counter. The next attempt submits a new transaction;
+      // when the first did succeed, the second reverts and the
+      // wrapper logs success — `prizeTransfer.attempts` undercounts.
+      // Withdrawals + refunds already follow this rule (no retry on
+      // uncertain); contracts.ts must too.
+      const isReceiptUncertain =
+        err instanceof Error &&
+        (err.constructor.name === 'ReceiptUncertainError' ||
+          message.includes('ReceiptUncertainError') ||
+          message.includes('receipt timeout'));
+      if (isReceiptUncertain) {
+        const wrapped = new Error(
+          `Prize transfer receipt uncertain on attempt ${i + 1}: ${message}`,
+        );
+        (wrapped as Error & { attemptsLog: typeof attemptsLog; receiptUncertain: true }).attemptsLog =
+          attemptsLog;
+        (wrapped as Error & { attemptsLog: typeof attemptsLog; receiptUncertain: true }).receiptUncertain = true;
+        throw wrapped;
+      }
 
       // Only retry on INSUFFICIENT_GAS — everything else is fatal.
       // The Hedera SDK surfaces the receipt status in the error message

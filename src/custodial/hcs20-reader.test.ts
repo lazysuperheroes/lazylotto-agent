@@ -73,8 +73,17 @@ async function close(
   pools: { poolId: number; spent: number; spentToken: string; wins: number; prizes: PrizeEntry[] }[],
   totalWins: number,
   ts = T0,
+  opts: { legacyBinding?: boolean; user?: string; agent?: string } = {},
 ): Promise<RawTopicMessage> {
-  const poolsRoot = await computePoolsRoot(pools);
+  // R4-FG-23: post-fix writers always include the (sessionId, user,
+  // agent) binding. Tests for legacy close messages opt in via
+  // `legacyBinding: true` to forge a pre-fix root and exercise the
+  // reader's back-compat fallback path.
+  const u = opts.user ?? USER;
+  const a = opts.agent ?? AGENT;
+  const poolsRoot = opts.legacyBinding
+    ? await computePoolsRoot(pools)
+    : await computePoolsRoot(pools, { sessionId, user: u, agent: a });
   return {
     sequence: seq,
     timestamp: ts,
@@ -82,7 +91,7 @@ async function close(
       p: 'hcs-20',
       op: 'play_session_close',
       sessionId,
-      user: USER,
+      user: u,
       agentSeq: seq,
       poolsPlayed,
       poolsRoot,
@@ -93,13 +102,31 @@ async function close(
   };
 }
 
-function aborted(
+async function aborted(
   seq: number,
   sessionId: string,
   completedPools: number,
   reason = 'v2_write_failure',
   ts = T0,
-): RawTopicMessage {
+  opts: {
+    /** R4-FG-24: include `poolsRoot` derived from these pools. Default: omit (legacy). */
+    pools?: { poolId: number; spent: number; spentToken: string; wins: number; prizes: PrizeEntry[] }[];
+    /** Force a specific root (for tampering tests). Wins over `pools`. */
+    forgePoolsRoot?: string;
+    user?: string;
+    agent?: string;
+  } = {},
+): Promise<RawTopicMessage> {
+  let poolsRoot: string | undefined;
+  if (opts.forgePoolsRoot !== undefined) {
+    poolsRoot = opts.forgePoolsRoot;
+  } else if (opts.pools) {
+    poolsRoot = await computePoolsRoot(opts.pools, {
+      sessionId,
+      user: opts.user ?? USER,
+      agent: opts.agent ?? AGENT,
+    });
+  }
   return {
     sequence: seq,
     timestamp: ts,
@@ -107,9 +134,10 @@ function aborted(
       p: 'hcs-20',
       op: 'play_session_aborted',
       sessionId,
-      user: USER,
+      user: opts.user ?? USER,
       agentSeq: seq,
       completedPools,
+      ...(poolsRoot ? { poolsRoot } : {}),
       reason,
       lastError: 'something broke',
       abortedAt: ts,
@@ -158,7 +186,7 @@ describe('hcs20-reader: aborted session', () => {
       open(1, sessionId, 5),
       pool(2, sessionId, 0, 1, 4, 0),
       pool(3, sessionId, 1, 2, 10, 0),
-      aborted(4, sessionId, 2),
+      await aborted(4, sessionId, 2),
     ];
 
     const result = await parseAuditTopic(messages, NOW);
@@ -185,7 +213,7 @@ describe('hcs20-reader: aborted session', () => {
       open(1, sessionId, 5),
       pool(2, sessionId, 0, 1, 4, 0),
       pool(3, sessionId, 1, 2, 10, 0),
-      aborted(4, sessionId, 5), // claims 5 but only 2 observed
+      await aborted(4, sessionId, 5), // claims 5 but only 2 observed
     ];
 
     const result = await parseAuditTopic(messages, NOW);
@@ -293,6 +321,205 @@ describe('hcs20-reader: corruption detection', () => {
   });
 });
 
+describe('hcs20-reader: R4-FG-23 cross-session Merkle replay', () => {
+  // R4-FG-23 (round-4 high): pre-fix, two sessions with structurally
+  // identical pool data hashed to the same poolsRoot, so a compromised
+  // submit-key holder could swap a `play_session_close` between
+  // sessions and the reader's tamper-evidence check passed. Binding
+  // sessionId|user|agent into the root makes that swap detectable.
+  //
+  // revert-proof: assertion #1 (different roots) fails if computePoolsRoot
+  // reverts to hashing pool tuples only. Assertion #2 (corrupt status)
+  // fails if the reader stops binding-aware recomputation.
+
+  it('two sessions with identical pool data produce different roots when binding included', async () => {
+    const poolsData = [
+      { poolId: 0, spent: 4, spentToken: 'HBAR', wins: 0, prizes: [] as PrizeEntry[] },
+      { poolId: 1, spent: 10, spentToken: 'HBAR', wins: 1, prizes: [{ t: 'ft', tk: 'HBAR', amt: 50 } as PrizeEntry] },
+    ];
+    const rootA = await computePoolsRoot(poolsData, {
+      sessionId: 'sess-A',
+      user: USER,
+      agent: AGENT,
+    });
+    const rootB = await computePoolsRoot(poolsData, {
+      sessionId: 'sess-B',
+      user: USER,
+      agent: AGENT,
+    });
+    assert.notEqual(rootA, rootB, 'binding should make roots distinct');
+
+    // And: replay the close from session A onto session B's pool
+    // messages → reader marks B as corrupt because the bound root
+    // recomputation does not match A's bound root.
+    const messages: RawTopicMessage[] = [
+      open(1, 'sess-A', 2),
+      pool(2, 'sess-A', 0, 1, 4, 0),
+      pool(3, 'sess-A', 1, 2, 10, 1, [{ t: 'ft', tk: 'HBAR', amt: 50 }]),
+      // close emitted under sessionId 'sess-A' with rootA
+      {
+        sequence: 4,
+        timestamp: T0,
+        payload: {
+          p: 'hcs-20',
+          op: 'play_session_close',
+          sessionId: 'sess-A',
+          user: USER,
+          agentSeq: 4,
+          poolsPlayed: 2,
+          poolsRoot: rootA,
+          totalWins: 1,
+          prizeTransfer: { status: 'succeeded', txId: 'tx-1', attempts: 1, gasUsed: 5_450_000 },
+          ts: T0,
+        },
+      },
+      open(5, 'sess-B', 2),
+      pool(6, 'sess-B', 0, 1, 4, 0),
+      pool(7, 'sess-B', 1, 2, 10, 1, [{ t: 'ft', tk: 'HBAR', amt: 50 }]),
+      // Adversarial: close for B claims rootA (cross-session replay)
+      {
+        sequence: 8,
+        timestamp: T0,
+        payload: {
+          p: 'hcs-20',
+          op: 'play_session_close',
+          sessionId: 'sess-B',
+          user: USER,
+          agentSeq: 8,
+          poolsPlayed: 2,
+          poolsRoot: rootA, // forged: actually session A's bound root
+          totalWins: 1,
+          prizeTransfer: { status: 'succeeded', txId: 'tx-2', attempts: 1, gasUsed: 5_450_000 },
+          ts: T0,
+        },
+      },
+    ];
+
+    const result = await parseAuditTopic(messages, NOW);
+    const sessA = result.sessions.find((s) => s.sessionId === 'sess-A')!;
+    const sessB = result.sessions.find((s) => s.sessionId === 'sess-B')!;
+    assert.equal(sessA.status, 'closed_success', 'session A validates against its own root');
+    assert.equal(sessB.status, 'corrupt', 'session B rejects A-bound root as Merkle mismatch');
+    assert.ok(
+      sessB.warnings.some((w) => w.includes('poolsRoot mismatch')),
+      'expected poolsRoot mismatch warning on replayed close',
+    );
+  });
+
+  // revert-proof: if the reader's close-validation drops the legacy
+  // unbound fallback (R4-FG-23 back-compat path), this test fails
+  // with status='corrupt' instead of 'closed_success' + warning.
+  it('legacy unbound close validates with legacy_merkle_binding warning (back-compat)', async () => {
+    const sessionId = 'sess-legacy';
+    const poolsData = [
+      { poolId: 0, spent: 4, spentToken: 'HBAR', wins: 0, prizes: [] as PrizeEntry[] },
+    ];
+    const messages: RawTopicMessage[] = [
+      open(1, sessionId, 1),
+      pool(2, sessionId, 0, 1, 4, 0),
+      // Pre-R4-FG-23 close: root computed without binding
+      await close(3, sessionId, 1, poolsData, 0, T0, { legacyBinding: true }),
+    ];
+
+    const result = await parseAuditTopic(messages, NOW);
+    const session = result.sessions[0]!;
+    assert.equal(session.status, 'closed_success');
+    assert.ok(
+      session.warnings.some((w) => w.includes('legacy_merkle_binding')),
+      'expected legacy_merkle_binding warning',
+    );
+  });
+});
+
+describe('hcs20-reader: R4-FG-24 aborted Merkle root', () => {
+  // R4-FG-24 (round-4 high): pre-fix the aborted message carried no
+  // poolsRoot. A compromised operator could write an aborted with
+  // forged completedPools alongside legitimate pool messages — the
+  // count check catches obvious mismatches but the Merkle bind closes
+  // the residual hole where the forged abort matches by count.
+  //
+  // revert-proof: status assertion fails if the reader stops
+  // recomputing the Merkle root for aborted messages.
+
+  it('aborted with mismatched poolsRoot is corrupt', async () => {
+    const sessionId = 'sess-abort-tampered';
+    const poolsData = [
+      { poolId: 0, spent: 4, spentToken: 'HBAR', wins: 0, prizes: [] as PrizeEntry[] },
+      { poolId: 1, spent: 10, spentToken: 'HBAR', wins: 0, prizes: [] as PrizeEntry[] },
+    ];
+    const messages: RawTopicMessage[] = [
+      open(1, sessionId, 2),
+      pool(2, sessionId, 0, 1, 4, 0),
+      pool(3, sessionId, 1, 2, 10, 0),
+      // Aborted forges a root that doesn't match the observed pools
+      // (e.g., from a different session with the same pool count).
+      await aborted(4, sessionId, 2, 'v2_write_failure', T0, {
+        forgePoolsRoot: 'sha256:DEADBEEF', // wrong root
+      }),
+    ];
+
+    const result = await parseAuditTopic(messages, NOW);
+    const session = result.sessions[0]!;
+    assert.equal(session.status, 'corrupt');
+    assert.ok(
+      session.warnings.some((w) => w.includes('Aborted poolsRoot mismatch')),
+      'expected Aborted poolsRoot mismatch warning',
+    );
+  });
+
+  // revert-proof: if recordPlaySessionAborted stops emitting
+  // poolsRoot or the reader's aborted branch stops recomputing it
+  // (R4-FG-24), this test fails because the warning will be
+  // 'legacy_abort_no_merkle' instead of clean.
+  it('aborted with matching bound poolsRoot is closed_aborted', async () => {
+    const sessionId = 'sess-abort-clean';
+    const poolsData = [
+      { poolId: 0, spent: 4, spentToken: 'HBAR', wins: 0, prizes: [] as PrizeEntry[] },
+      { poolId: 1, spent: 10, spentToken: 'HBAR', wins: 0, prizes: [] as PrizeEntry[] },
+    ];
+    const messages: RawTopicMessage[] = [
+      open(1, sessionId, 5),
+      pool(2, sessionId, 0, 1, 4, 0),
+      pool(3, sessionId, 1, 2, 10, 0),
+      // Honest aborted with the correct bound Merkle root
+      await aborted(4, sessionId, 2, 'v2_write_failure', T0, {
+        pools: poolsData,
+      }),
+    ];
+
+    const result = await parseAuditTopic(messages, NOW);
+    const session = result.sessions[0]!;
+    assert.equal(session.status, 'closed_aborted');
+    assert.ok(
+      !session.warnings.some((w) => w.includes('legacy_abort_no_merkle')),
+      'should not emit legacy warning when poolsRoot is present',
+    );
+  });
+
+  // revert-proof: if the reader's aborted branch drops the
+  // 'legacy_abort_no_merkle' warning (R4-FG-24 back-compat path),
+  // this test fails because no warning will be emitted on
+  // pre-fix abort messages.
+  it('aborted without poolsRoot still works (back-compat) with warning', async () => {
+    const sessionId = 'sess-abort-legacy';
+    const messages: RawTopicMessage[] = [
+      open(1, sessionId, 5),
+      pool(2, sessionId, 0, 1, 4, 0),
+      pool(3, sessionId, 1, 2, 10, 0),
+      // Pre-R4-FG-24 abort: no poolsRoot field (default branch of helper)
+      await aborted(4, sessionId, 2),
+    ];
+
+    const result = await parseAuditTopic(messages, NOW);
+    const session = result.sessions[0]!;
+    assert.equal(session.status, 'closed_aborted');
+    assert.ok(
+      session.warnings.some((w) => w.includes('legacy_abort_no_merkle')),
+      'expected legacy_abort_no_merkle warning on pre-R4-FG-24 abort',
+    );
+  });
+});
+
 describe('hcs20-reader: v1 backward compat', () => {
   it('reconstructs a v1 batch session as closed_success with no wins', async () => {
     const sessionId = 'sess-v1';
@@ -387,6 +614,64 @@ describe('hcs20-reader: agentSeq gap detection', () => {
 });
 
 describe('hcs20-reader: refund parsing', () => {
+  // revert-proof: if seenRefundTxIds is removed (R4-FG-58 reverted) the
+  // reader emits TWO refund events instead of one and the second
+  // assertion (refund event count === 1) fails.
+  it('R4-FG-58: duplicate refundTxId emits ONE refund event (reader-side dedup)', async () => {
+    // Two refund messages with the same `refundTxId` — happens when
+    // verifier-side `recordRefund` retries after a Lambda freeze.
+    const dupRefundTxId = '0.0.456@789.012';
+    const messages: RawTopicMessage[] = [
+      {
+        sequence: 1,
+        timestamp: T0,
+        payload: {
+          p: 'hcs-20',
+          op: 'refund',
+          tick: 'LLCRED',
+          amt: '100',
+          from: AGENT,
+          to: USER,
+          originalDepositTxId: '0.0.123@456.789',
+          refundTxId: dupRefundTxId,
+          reason: 'admin',
+          performedBy: '0.0.OPERATOR',
+          rakeReversed: '5',
+          rakeReversedToken: 'HBAR',
+          ts: T0,
+        },
+      },
+      {
+        sequence: 2,
+        timestamp: T0,
+        payload: {
+          p: 'hcs-20',
+          op: 'refund',
+          tick: 'LLCRED',
+          amt: '100',
+          from: AGENT,
+          to: USER,
+          originalDepositTxId: '0.0.123@456.789',
+          refundTxId: dupRefundTxId, // SAME refundTxId — verifier retry
+          reason: 'admin',
+          performedBy: '0.0.OPERATOR',
+          rakeReversed: '5',
+          rakeReversedToken: 'HBAR',
+          ts: T0,
+        },
+      },
+    ];
+
+    const result = await parseAuditTopic(messages, NOW);
+    const refundEvents = result.events.filter((e) => e.type === 'refund');
+    assert.equal(
+      refundEvents.length,
+      1,
+      'reader must dedup duplicate refund anchors on refundTxId',
+    );
+    assert.equal(result.stats.skippedMessages, 1, 'duplicate must increment skippedMessages');
+  });
+
   it('parses refund messages into NormalizedRefundEvent', async () => {
     const messages: RawTopicMessage[] = [
       {
@@ -688,5 +973,64 @@ describe('hcs20-reader: v1 token attribution', () => {
       assert.equal(opWith!.token, 'LAZY');
       assert.equal(opWith!.amount, 15);
     }
+  });
+
+  // revert-proof: R4-FG-7 — `seenControlIdempotencyKeys` Set + skip-
+  // when-seen at hcs20-reader.ts:~407-415. Pre-fix R3-FG-22 stamped
+  // `idempotencyKey: 'play-triage:<txId>'` into the body but the
+  // reader had zero references to it; both verifier + force-release
+  // sibling triage anchors emitted as separate control events. With
+  // the dedup, the second anchor is dropped (counted as skipped) and
+  // only the first remains in `events`. Reverting the dedup would let
+  // this test see TWO control events with the same idempotencyKey.
+  it('R4-FG-7: control events with the same idempotencyKey are deduped', async () => {
+    const messages: RawTopicMessage[] = [
+      {
+        sequence: 1,
+        timestamp: T0,
+        payload: {
+          p: 'hcs-20',
+          op: 'control',
+          v: 1,
+          event: 'play_uncertain_success_pending_triage',
+          by: 'reconcile',
+          uncertainTxId: '0.0.123-1234567890-987654321',
+          userId: USER,
+          tokenReservations: [{ token: 'HBAR', amount: 50 }],
+          idempotencyKey: 'play-triage:0.0.123-1234567890-987654321',
+        },
+      },
+      {
+        // The sibling force-release writer fires the SAME logical event
+        // for the SAME uncertainTxId — same deterministic key.
+        sequence: 2,
+        timestamp: T0,
+        payload: {
+          p: 'hcs-20',
+          op: 'control',
+          v: 1,
+          event: 'play_uncertain_success_pending_triage',
+          by: 'force-release',
+          uncertainTxId: '0.0.123-1234567890-987654321',
+          userId: USER,
+          tokenReservations: [{ token: 'HBAR', amount: 50 }],
+          idempotencyKey: 'play-triage:0.0.123-1234567890-987654321',
+        },
+      },
+    ];
+    const result = await parseAuditTopic(messages, NOW);
+    const triageEvents = result.events.filter(
+      (e) => e.type === 'control' && e.idempotencyKey === 'play-triage:0.0.123-1234567890-987654321',
+    );
+    assert.equal(
+      triageEvents.length,
+      1,
+      'R4-FG-7 fix missing: two control events with same idempotencyKey both emitted (downstream consumers will double-count)',
+    );
+    assert.equal(
+      result.stats.skippedMessages,
+      1,
+      'R4-FG-7 fix missing: deduped sibling must be counted as skipped for observability',
+    );
   });
 });
