@@ -259,8 +259,8 @@ export async function transferAllPrizesWithRetry(
       // before re-submitting. Pre-fix the message string was the
       // only signal; recovery proceeded blindfold.
       const errTxId =
-        err instanceof Error && typeof (err as { transactionId?: string }).transactionId === 'string'
-          ? (err as { transactionId: string }).transactionId
+        err instanceof Error && typeof (err as unknown as { transactionId?: string }).transactionId === 'string'
+          ? (err as unknown as { transactionId: string }).transactionId
           : undefined;
       attemptsLog.push({
         attempt: i + 1,

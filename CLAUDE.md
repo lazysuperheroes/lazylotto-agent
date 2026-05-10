@@ -223,6 +223,34 @@ shipped PRDs, and the closed adversarial-audit cycle (rounds 2-12) all live
 under `docs/archive/` (do not link to them from current docs). The dApp's MCP
 endpoint is documented in the separate LazyLotto dApp repo, not here.
 
+## Pre-push checks (run these before `git push`)
+
+Both gates must be green. Running one without the other lets real
+deploy failures slip past — `npm test` and `npm run build:web` exercise
+different parts of the type system:
+
+```
+npm test            # node:test via tsx — runtime behaviour, ~12s
+npm run build:web   # next build (which runs tsc whole-program) — ~30s
+```
+
+**Why both.** `tsx` (the loader behind `npm test`) does isolated module
+transpilation: each file compiles independently with no cross-file
+type-check. TypeScript errors in functions never touched by tests slip
+through silently. `next build` runs `tsc` whole-program, catching those.
+
+This was learned the hard way at 0.3.5 ship time: `npm test` was 748/748
+green but `npm run build:web` failed on 8 pre-existing type errors in
+files that node tests didn't exercise (one of which — `ledgerByUser.get`
+vs `ledgers.get` — was a typo I introduced in Phase-9 Cluster B). Vercel
+runs `npm run build:web` via `vercel.json:buildCommand`; a deploy with
+a `tsc` error fails at Vercel build, not at runtime. Always run both
+locally before push.
+
+If `npm run build:web` fails with a type error in a file you didn't
+touch this session, it's PRE-EXISTING — fix it in passing rather than
+pushing-and-fixing on Vercel. Build-clean is a per-commit invariant.
+
 ## Audit cycle status (closed at Phase-9.5, 2026-05-10)
 
 The 12-persona adversarial-audit cycle ran from rounds 2 through 12 and closed

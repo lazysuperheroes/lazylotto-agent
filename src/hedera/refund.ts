@@ -41,6 +41,34 @@ import { randomUUID } from 'node:crypto';
 
 const REFUND_KEY_PREFIX = KEY_PREFIX.refunded;
 
+/**
+ * R8-FG-25 / Phase-6 Cluster E: typed sentinel for refund-claim
+ * duplicates. Pre-fix the catch in `claimRefundLock` discriminated
+ * via 5-way `e.message.includes(...)` against literal strings
+ * constructed elsewhere in the same function. A future copy-edit
+ * on any of the strings would silently flip the catch's branch.
+ *
+ * The `kind` discriminant carries the specific duplicate scenario
+ * for compile-time exhaustiveness in callers. Add new kinds when
+ * the function emits a new "duplicate detected" branch.
+ */
+export type RefundDuplicateKind =
+  | 'in-progress'
+  | 'completed'
+  | 'failed-onchain'
+  | 'refunded-originals'
+  | 'unexpected-state';
+
+export class RefundDuplicateError extends Error {
+  readonly __refundDuplicate = true as const;
+  readonly kind: RefundDuplicateKind;
+  constructor(kind: RefundDuplicateKind, message: string) {
+    super(message);
+    this.name = 'RefundDuplicateError';
+    this.kind = kind;
+  }
+}
+
 // ── Types ────────────────────────────────────────────────────────
 
 export interface RefundResult {
@@ -353,6 +381,10 @@ export async function processRefund(
   // refused (operator must explicitly remove it via runbook to
   // genuinely retry).
   let redisLockKey: string | null = null;
+  // R5-FG-68: hoist claimFence to function scope so the catch-block
+  // release at line ~849 can compare-and-DEL via RELEASE_SCRIPT. The
+  // try-block-scoped declaration was out of reach in the catch.
+  let claimFence: string | null = null;
   try {
     const redis = await getRedis();
 
@@ -362,7 +394,8 @@ export async function processRefund(
       transactionId,
     );
     if (alreadyRefunded === 1) {
-      throw new Error(
+      throw new RefundDuplicateError(
+        'refunded-originals',
         `Transaction ${transactionId} is in the permanent refunded-originals ` +
           `set — it has been refunded before. To retry, an operator must ` +
           `explicitly SREM the txId from \`${KEY_PREFIX.refundedOriginals}\` ` +
@@ -378,7 +411,7 @@ export async function processRefund(
     // current Lambda's TTL elapsed and a sibling had acquired with
     // their own value. Same archetype as R4-FG-65 fenced for
     // withIdempotency; refund.ts was the sibling miss.
-    const claimFence = `pending:${randomUUID()}`;
+    claimFence = `pending:${randomUUID()}`;
     const claimResult = await redis.set(
       redisLockKey,
       claimFence,
@@ -403,15 +436,20 @@ export async function processRefund(
       const existing = await redis.get<string>(redisLockKey);
       let message: string;
       // R5-FG-68: legacy literal 'pending' OR new fenced 'pending:<uuid>'
-      // both indicate an in-progress refund claim.
+      // both indicate an in-progress refund claim. R8-FG-25 / Phase-6
+      // Cluster E: throw typed `RefundDuplicateError` instead of
+      // plain Error so the catch below discriminates via `instanceof`.
+      let kind: RefundDuplicateKind;
       if (
         existing === 'pending' ||
         (typeof existing === 'string' && existing.startsWith('pending:'))
       ) {
+        kind = 'in-progress';
         message =
           `Refund for ${transactionId} is already in progress on another ` +
           `Lambda. Try again in a minute.`;
       } else if (typeof existing === 'string' && existing.startsWith('failed:')) {
+        kind = 'failed-onchain';
         message =
           `Refund for ${transactionId} previously FAILED on chain ` +
           `(prior refund tx: ${existing.slice('failed:'.length)}). ` +
@@ -421,33 +459,34 @@ export async function processRefund(
         /^\d+\.\d+\.\d+@\d+\.\d+$/.test(existing)
       ) {
         // Recognized: a real Hedera refund tx id.
+        kind = 'completed';
         message =
           `Transaction ${transactionId} has already been refunded. ` +
           `Original refund tx: ${existing}`;
       } else if (typeof existing === 'string' && existing) {
         // R2-FG-2 (S-03): claim has an unrecognized value. Don't lie
         // about "already refunded"; surface as unexpected state.
+        kind = 'unexpected-state';
         message =
           `Refund claim for ${transactionId} is in an unexpected state ` +
           `(value not a Hedera txId, not 'pending', not 'failed:*'). ` +
           `Investigate the Redis claim manually before retrying.`;
       } else {
+        kind = 'in-progress';
         message =
           `Refund for ${transactionId} is already in progress on another ` +
           `Lambda. Try again in a minute.`;
       }
-      throw new Error(message);
+      throw new RefundDuplicateError(kind, message);
     }
   } catch (e) {
-    // Rethrow our own sentinels unchanged
-    if (
-      e instanceof Error &&
-      (e.message.includes('already been refunded') ||
-        e.message.includes('already in progress') ||
-        e.message.includes('previously FAILED on chain') ||
-        e.message.includes('permanent refunded-originals') ||
-        e.message.includes('unexpected state'))
-    ) {
+    // R8-FG-25 / Phase-6 Cluster E: rethrow our own sentinels via
+    // `instanceof RefundDuplicateError` (typed) instead of the
+    // pre-Phase-6 5-way message-substring discrimination. The
+    // 5 strings were all writer-constructed in this same function
+    // 60 lines up — a future copy-edit on any of them silently
+    // flipped the catch.
+    if (e instanceof RefundDuplicateError) {
       throw e;
     }
     // Any other error means we couldn't claim — refuse the refund.
@@ -767,21 +806,27 @@ export async function processRefund(
       // SREM by hand.
       try {
         const { mintAuditOrphanId } = await import('../lib/orphanIds.js');
-        await store.upsertDeadLetter({
-          transactionId: mintAuditOrphanId(
-            'audit-orphan:refund-srem',
-            transactionId,
-          ),
-          timestamp: new Date().toISOString(),
-          error: `refundedOriginals SREM failed after Regime-A submit error: ${sremErr instanceof Error ? sremErr.message : String(sremErr)}`,
-          kind: 'audit_trail_orphaned',
-          details: {
-            sourceKind: 'refunded_originals_srem_failed',
-            sourceTxId: transactionId,
-            phase: 'srem_failed',
-            claimError: err instanceof Error ? err.message : String(err),
-          },
-        });
+        // `options?.store` may be undefined in CLI / test contexts
+        // where the refund path runs without a custodial store. Skip
+        // the dead-letter write rather than throw — the logger.error
+        // above is the primary signal; the DL is the runbook hand-off.
+        if (options?.store) {
+          await options.store.upsertDeadLetter({
+            transactionId: mintAuditOrphanId(
+              'audit-orphan:refund-srem',
+              transactionId,
+            ),
+            timestamp: new Date().toISOString(),
+            error: `refundedOriginals SREM failed after Regime-A submit error: ${sremErr instanceof Error ? sremErr.message : String(sremErr)}`,
+            kind: 'audit_trail_orphaned',
+            details: {
+              sourceKind: 'refunded_originals_srem_failed',
+              sourceTxId: transactionId,
+              phase: 'srem_failed',
+              claimError: err instanceof Error ? err.message : String(err),
+            },
+          });
+        }
       } catch {
         /* logged above */
       }
@@ -805,7 +850,9 @@ export async function processRefund(
         // R5-FG-68: fenced compare-and-DEL via RELEASE_SCRIPT.
         // Pre-fix unfenced DEL nuked sibling acquirers' fresh
         // claims after our 30-day TTL elapsed.
-        await redis.eval(RELEASE_SCRIPT, [redisLockKey], [claimFence]);
+        if (claimFence) {
+          await redis.eval(RELEASE_SCRIPT, [redisLockKey], [claimFence]);
+        }
       } catch (delErr) {
         // The 30-day TTL is the worst-case fallback; the marker
         // expires on its own. Surface so an operator can manually
@@ -971,6 +1018,9 @@ export async function processRefund(
     try {
       await options.accounting.recordRefund({
         amount: humanRefundAmount,
+        // R6-FG-8: emit the underlying token explicitly so the
+        // reader doesn't fall back to tick→HBAR for non-HBAR refunds.
+        token: refundToken ?? HBAR_TOKEN_KEY,
         from: agentAccountId,
         to: senderAccountId,
         originalDepositTxId: transactionId,
@@ -1734,6 +1784,10 @@ export async function verifyUncertainRefunds(
       try {
         await accounting.recordRefund({
           amount: details.humanAmount,
+          // R6-FG-8: emit the underlying token so the reader can
+          // attribute non-HBAR refunds correctly without falling
+          // back to tick→HBAR.
+          ...(details.tokenKey ? { token: details.tokenKey } : {}),
           from: details.agentAccountId,
           to: entry.sender,
           originalDepositTxId: details.originalTxId,

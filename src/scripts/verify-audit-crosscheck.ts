@@ -110,6 +110,20 @@ export type AlertCategory =
    * stream rather than buried in the catch-all skippedMessages.
    */
   | 'refund_dropped_malformed'
+  /**
+   * Categories referenced by verify-audit.ts that were missing from
+   * the enum pre-Phase-9.5. tsx-based `npm test` doesn't whole-program
+   * type-check, so these alert.push sites compiled at runtime but
+   * tripped Next.js' build-time type-check. Added here as a sweep.
+   */
+  | 'duplicate_refund_original'
+  | 'strategy_deviation'
+  | 'session_strategy_mismatch'
+  | 'rake_without_deposit'
+  | 'rake_missing_deposit_tx_id'
+  | 'legacy_merkle_binding'
+  | 'legacy_abort_no_merkle'
+  | 'audit_trail_orphaned'
   | 'unverified';
 
 export interface AuditAlert {

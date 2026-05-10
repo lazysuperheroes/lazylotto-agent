@@ -8,9 +8,10 @@ import { z } from 'zod';
 // AFTER the reservation is held → leaked reservation. Wrap every
 // numeric leaf in `.refine(Number.isFinite)` to refuse both at
 // schema load — defensive, not a migration of existing files.
-const finiteNumber = (
-  base: z.ZodNumber = z.number(),
-): z.ZodEffects<z.ZodNumber, number, number> =>
+// Zod v4 dropped the `ZodEffects` export from the classic path; let TS
+// infer the return type from `.refine(...)` so this stays portable
+// across Zod major versions.
+const finiteNumber = (base: z.ZodNumber = z.number()) =>
   base.refine(Number.isFinite, { message: 'must be a finite number (no NaN/Infinity)' });
 
 // ── Token Budget ──────────────────────────────────────────────

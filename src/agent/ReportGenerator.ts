@@ -65,7 +65,20 @@ export type PrizeTransferOutcomeReport =
       prizeCount: number;
       ownerEoa: string;
       error: string;
-      attemptsLog: { attempt: number; gas: number; error?: string }[];
+      attemptsLog: { attempt: number; gas: number; error?: string; lastSubmittedTxId?: string }[];
+      /**
+       * R5-FG-66: present when the underlying error was
+       * receipt-uncertain. Mirrors the same-named field on
+       * `PrizeTransferOutcome` in `agent/LottoAgent.ts`. Recovery
+       * script reads this to mirror-query before re-submitting.
+       */
+      receiptUncertain?: boolean;
+      /**
+       * R5-FG-65: contract tx id of the last submitted attempt.
+       * Used by recover-stuck-prizes.ts to cross-check on-chain
+       * effect before re-submit.
+       */
+      lastSubmittedTxId?: string;
     };
 
 export interface SessionReport {

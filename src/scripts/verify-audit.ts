@@ -851,7 +851,7 @@ async function main() {
           // irreversibly committed but the reservation overlay must
           // release so reconstruction reflects truth).
           if (event.userId && event.tokenReservations) {
-            const led = ledgerByUser.get(event.userId);
+            const led = ledgers.get(event.userId);
             if (led) {
               for (const r of event.tokenReservations) {
                 led.heldByToken[r.token] = Math.max(
@@ -872,7 +872,7 @@ async function main() {
           // on the non-override flavour too. Same archetype as
           // force_release_override; same fix.
           if (event.userId && event.tokenReservations) {
-            const led = ledgerByUser.get(event.userId);
+            const led = ledgers.get(event.userId);
             if (led) {
               for (const r of event.tokenReservations) {
                 led.heldByToken[r.token] = Math.max(
@@ -902,7 +902,7 @@ async function main() {
           // user's ledger so reconstructed balance reflects the
           // actually-spendable funds.
           if (event.userId && event.tokenReservations) {
-            const led = ledgerByUser.get(event.userId);
+            const led = ledgers.get(event.userId);
             if (led) {
               for (const r of event.tokenReservations) {
                 led.heldByToken[r.token] = (led.heldByToken[r.token] ?? 0) + r.amount;
@@ -938,7 +938,7 @@ async function main() {
             Number.isFinite(grossNum) &&
             grossNum > 0
           ) {
-            const led = ledgerByUser.get(event.userId);
+            const led = ledgers.get(event.userId);
             if (led) {
               led.depositCreditFlushOrphanedByToken[event.token] =
                 (led.depositCreditFlushOrphanedByToken[event.token] ?? 0) + grossNum;
@@ -1297,10 +1297,9 @@ async function main() {
   if (args.storeSnapshot) {
     try {
       const { createStore } = await import('../custodial/createStore.js');
-      const store = await createStore({
-        mode: 'redis',
-        agentAccountId: args.agentAccountId ?? '0.0.0',
-      });
+      // createStore() takes no args; mode is auto-selected from env
+      // (Upstash credentials present -> RedisStore; else PersistentStore).
+      const store = await createStore();
       await store.refreshDeadLetters().catch(() => undefined);
       const orphans = store.getDeadLetters().filter((e) => e.kind === 'audit_trail_orphaned');
       if (orphans.length > 0) {

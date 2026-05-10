@@ -93,9 +93,12 @@ export const POST = withStore(async (request: Request) => {
         );
       }
       const opResult = idempotent.result;
-      const replayedHeader = idempotent.kind === 'duplicate'
-        ? { 'X-Idempotent-Replayed': 'true' }
-        : {};
+      // Typed as Record<string, string> so spread-into-HeadersInit doesn't
+      // hit the `{...} | {}` union-not-assignable TS narrowing trap.
+      const replayedHeader: Record<string, string> =
+        idempotent.kind === 'duplicate'
+          ? { 'X-Idempotent-Replayed': 'true' }
+          : {};
       switch (opResult.kind) {
         case 'invalid_input':
           return NextResponse.json(

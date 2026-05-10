@@ -649,12 +649,10 @@ export async function parseAuditTopic(
       const parsed = parseRefund(msg);
       // R10-FG-3 + R11-FG-5 + R12-FG-4 / Phase-9.5 Cluster F:
       // tagged-union dispatch. parseRefund returns either a
-      // NormalizedRefundEvent (has `type: 'refund'`) or a
-      // ParseRefundFailure (has `reason` only). Discriminate via
-      // `type` because NormalizedRefundEvent itself carries a
-      // `reason: string` field for the refund's user-facing reason —
-      // `'reason' in parsed` is true for BOTH variants and would
-      // mis-discriminate.
+      // NormalizedRefundEvent (which has `type: 'refund'`) or a
+      // ParseRefundFailure (which has `kind: 'parse-failure'`).
+      // Discriminate on `kind` (unique to failure) so TS narrows
+      // unambiguously across compiler versions.
       //
       // Pre-Phase-9.5 the dispatcher re-derived the categorization
       // from the raw payload AFTER bare-null returns from parseRefund
@@ -665,9 +663,15 @@ export async function parseAuditTopic(
       // branches and re-open the R11-FG-1 over-credit signature. The
       // exhaustive switch turns any future 6th reason into a
       // TypeScript error.
-      if (!('type' in parsed)) {
+      if ('kind' in parsed && parsed.kind === 'parse-failure') {
         stats.skippedMessages++;
-        switch (parsed.reason) {
+        // Lift the reason into a locally-typed variable so the
+        // exhaustiveness check in the default branch narrows to
+        // `never` cleanly across TS versions. Inlining `parsed.reason`
+        // here causes next-build's TS to infer the post-switch
+        // narrow as `any` instead of `never`.
+        const reason: ParseRefundFailureReason = parsed.reason;
+        switch (reason) {
           case 'empty-original-deposit-tx-id':
             stats.refundsDroppedEmptyOriginal++;
             break;
@@ -684,13 +688,17 @@ export async function parseAuditTopic(
             // Exhaustiveness check. If a new ParseRefundFailureReason
             // is added without a corresponding dispatcher branch,
             // this assertion fails at compile time.
-            const _exhaustive: never = parsed.reason;
+            const _exhaustive: never = reason;
             void _exhaustive;
           }
         }
         continue;
       }
-      const ev = parsed;
+      // The `if (kind === 'parse-failure') continue` above eliminated
+      // the failure branch; TS narrows positive-side but not always
+      // the complement, so we cast explicitly here. Safe by
+      // construction.
+      const ev = parsed as NormalizedRefundEvent;
       // R4-FG-58 (round-4 medium): skip duplicate refund anchors with
       // the same refundTxId. A retry of `recordRefund` after a partial
       // failure can emit two anchors for one logical refund; without
@@ -1612,7 +1620,16 @@ type ParseRefundFailureReason =
   | 'invalid-amt'
   | 'missing-refund-tx-id';
 
+/**
+ * Unique tag `kind: 'parse-failure'` so the dispatcher can discriminate
+ * without colliding with `NormalizedRefundEvent.reason` (which is the
+ * refund's user-facing reason string, not the failure mode). Using `kind`
+ * as the discriminator instead of `'type' in parsed` makes the narrowing
+ * unambiguous across TypeScript versions (next-build's TS was inferring
+ * `any` post-narrow when using `in`).
+ */
 interface ParseRefundFailure {
+  kind: 'parse-failure';
   reason: ParseRefundFailureReason;
 }
 
@@ -1630,10 +1647,14 @@ function parseRefund(
   // bypassed the dedup gate before. R12-FG-4 / Phase-9.5: each
   // null-return reason is now tagged so the dispatcher categorizes
   // by type rather than re-parsing the payload.
-  if (!originalDepositTxId) return { reason: 'empty-original-deposit-tx-id' };
-  if (!from || !to) return { reason: 'missing-from-or-to' };
-  if (!Number.isFinite(amt)) return { reason: 'invalid-amt' };
-  if (!refundTxId) return { reason: 'missing-refund-tx-id' };
+  if (!originalDepositTxId)
+    return { kind: 'parse-failure', reason: 'empty-original-deposit-tx-id' };
+  if (!from || !to)
+    return { kind: 'parse-failure', reason: 'missing-from-or-to' };
+  if (!Number.isFinite(amt))
+    return { kind: 'parse-failure', reason: 'invalid-amt' };
+  if (!refundTxId)
+    return { kind: 'parse-failure', reason: 'missing-refund-tx-id' };
   // R6-FG-7: extract rake reversal so verify-audit reducers can
   // apply operator-balance corrections. Pre-fix this was silently
   // dropped, leaving operator-balance reconstruction short.
