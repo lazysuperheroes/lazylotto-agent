@@ -1,0 +1,648 @@
+{
+  "version": 1,
+  "generatedAt": "2026-05-09",
+  "description": "Per-finding coverage manifest. NOT exhaustive — tracks structural gates and high-severity Phase-6/7 closures. Pre-Phase-7 the description claimed to cover 'every shipped audit-finding fix'; R8-FG-21 / R9-P10-009 surfaced the under-claim (manifest covered ~9 of 115+ R6 findings). Phase-7 honest rewrite: (a) every R6/R8 critical fix has an entry, (b) R9 critical fixes have entries, (c) structural gate entries cover archetype classes that subsume many findings collectively (see coverageStrategy: 'structural-gate'), (d) lows / mediums are NOT all listed; the manifest-vs-doc ratio counter at audit-coverage.test.ts:`manifest-vs-audit-doc coverage ratio` reports the gap as informational telemetry. Adding new R10+ findings: critical/high MUST land with manifest entry + locking test (and ideally revertDrill patch); medium/low are operator's call.",
+  "findings": [
+    {
+      "id": "R6-FG-1",
+      "round": "R6",
+      "severity": "critical",
+      "coverageStrategy": "structural-gate",
+      "summary": "MultiUserAgent.processWithdrawal released the reserve on PostSubmitError (sibling-miss of R5-FG-3). Catch must use parent class PreserveClaimError so both PostSubmitError and ReceiptUncertainError preserve the claim.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/MultiUserAgent.ts",
+            "lines": "processWithdrawal catch (~1414)"
+          },
+          {
+            "file": "src/hedera/transfers.ts",
+            "lines": "PreserveClaimError now abstract with transactionId"
+          }
+        ],
+        "commit": "11de1bf"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/sibling-archetype-gate.test.ts",
+          "name": "no source file outside transfers.ts uses instanceof ReceiptUncertainError or PostSubmitError"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Locked by the structural sibling-archetype gate (R6-Phase-1). Any future regression that re-introduces `instanceof ReceiptUncertainError` or `instanceof PostSubmitError` outside transfers.ts fails CI."
+    },
+    {
+      "id": "R6-FG-2",
+      "round": "R6",
+      "severity": "critical",
+      "coverageStrategy": "structural-gate",
+      "summary": "MultiUserAgent.playForUser released reservations on PostSubmitError (R5-FG-3 sibling miss in the play path).",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/MultiUserAgent.ts",
+            "lines": "playForUser catch (~1144)"
+          }
+        ],
+        "commit": "11de1bf"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/sibling-archetype-gate.test.ts",
+          "name": "no source file outside transfers.ts uses instanceof ReceiptUncertainError or PostSubmitError"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Same archetype as R6-FG-1; locked by the same structural gate."
+    },
+    {
+      "id": "R6-FG-3",
+      "round": "R6",
+      "severity": "critical",
+      "coverageStrategy": "structural-gate",
+      "summary": "MultiUserAgent.operatorWithdrawFees DELed the F24 per-token claim on PostSubmitError, opening operator-double-pay window.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/MultiUserAgent.ts",
+            "lines": "operatorWithdrawFees catch (~1795)"
+          }
+        ],
+        "commit": "11de1bf"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/sibling-archetype-gate.test.ts",
+          "name": "no source file outside transfers.ts uses instanceof ReceiptUncertainError or PostSubmitError"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Same archetype as R6-FG-1; locked by the same structural gate."
+    },
+    {
+      "id": "R6-FG-4",
+      "round": "R6",
+      "severity": "critical",
+      "coverageStrategy": "individual",
+      "summary": "executeIntent + executeEncodedCall in contracts.ts skipped safeSubmit, so post-submit errors escaped as plain Error and withIdempotency DELed the claim — contract-call double-spend window on every buy/roll/transferAllPrizes/staking op.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/hedera/contracts.ts",
+            "lines": "executeIntent + executeEncodedCall route through safeSubmit"
+          }
+        ],
+        "commit": "11de1bf"
+      },
+      "tests": [
+        {
+          "file": "src/hedera/contracts.test.ts",
+          "name": "executeIntent + executeEncodedCall route through safeSubmit"
+        }
+      ],
+      "revertDrill": {
+        "patch": "R6-FG-4.patch",
+        "expectFail": [
+          "R6-FG-4: contracts.ts post-submit safety net"
+        ]
+      },
+      "notes": "Source-level structural test asserts the safeSubmit import + ≥2 `await safeSubmit(` call sites. Removing either wrapper flips the assertion. Two drills authored: R6-FG-4.patch removes the safeSubmit import (R8-FG-20 import-only revert detector); R6-FG-4-callsite.patch removes one call site keeping the import (R8-FG-20 callsite-only revert detector). Manifest cites the import drill; the callsite drill is on disk for ad-hoc operator use via `npm run audit:revert-drill -- R6-FG-4-callsite` (manifest split would require a new findings-id; the drill file exists for future activation)."
+    },
+    {
+      "id": "R6-FG-5",
+      "round": "R6",
+      "severity": "critical",
+      "coverageStrategy": "individual",
+      "summary": "transferAllPrizesWithRetry retry catch used string-name comparison so PostSubmitError slipped through and escalated the next attempt — risked double-prize-transfer.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/hedera/contracts.ts",
+            "lines": "transferAllPrizesWithRetry catch (~291)"
+          }
+        ],
+        "commit": "11de1bf"
+      },
+      "tests": [
+        {
+          "file": "src/hedera/contracts.test.ts",
+          "name": "PostSubmitError is a PreserveClaimError (retry catch must include it)"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "If PostSubmitError stops extending PreserveClaimError, the inheritance assertion fails — direct revert detection."
+    },
+    {
+      "id": "R6-FG-7",
+      "round": "R6",
+      "severity": "critical",
+      "coverageStrategy": "individual",
+      "summary": "parseRefund silently dropped rakeReversed + rakeReversedToken — operator-balance reconstruction was permanently short by every refund-of-raked-deposit's reversal.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/hcs20-reader.ts",
+            "lines": "parseRefund + NormalizedRefundEvent rakeReversed/rakeReversedToken"
+          }
+        ],
+        "commit": "uncommitted (Phase 2)"
+      },
+      "tests": [
+        {
+          "file": "src/hedera/contracts.test.ts",
+          "name": "rakeReversed is read from the wire payload"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Round-trip test feeds a refund payload with rakeReversed='14' and asserts the normalized event preserves the value as a number."
+    },
+    {
+      "id": "R6-FG-8",
+      "round": "R6",
+      "severity": "critical",
+      "coverageStrategy": "individual",
+      "summary": "RefundMessage carried no token field; reader's resolveTokenField fell back to tick→HBAR — every LAZY/FT refund recorded as HBAR.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/hcs20-schema.ts",
+            "lines": "RefundSchema.token field"
+          },
+          {
+            "file": "src/custodial/AccountingService.ts",
+            "lines": "recordRefund passes token"
+          },
+          {
+            "file": "src/hedera/refund.ts",
+            "lines": "both call sites pass token"
+          }
+        ],
+        "commit": "uncommitted (Phase 2)"
+      },
+      "tests": [
+        {
+          "file": "src/custodial/hcs20-schema.test.ts",
+          "name": "R6-FG-8: parsed refund preserves explicit `token` field"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-6 Cluster A made this behavioral (was a placebo per R8-FG-10). Test asserts the parsed refund's `token` field equals 'LAZY' — removing the field from RefundSchema (or relaxing it back to silent-strip) flips the assertion."
+    },
+    {
+      "id": "R6-Phase-1",
+      "round": "structural",
+      "severity": "structural",
+      "coverageStrategy": "structural-gate",
+      "summary": "PreserveClaimError abstract parent class + sibling-archetype CI gate. Forbids any direct `instanceof ReceiptUncertainError` or `instanceof PostSubmitError` outside the transfers.ts module — eliminates the entire sibling-miss archetype that produced R6-FG-1..5.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/hedera/transfers.ts",
+            "lines": "PreserveClaimError abstract base"
+          },
+          {
+            "file": "src/__tests__/sibling-archetype-gate.ts"
+          },
+          {
+            "file": "src/__tests__/sibling-archetype-gate.test.ts"
+          }
+        ],
+        "commit": "11034af"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/sibling-archetype-gate.test.ts",
+          "name": "no source file outside transfers.ts uses instanceof ReceiptUncertainError or PostSubmitError"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "The gate's job is to prevent the archetype FROM RECURRING. Any future regression that adds back a subclass-specific gate fails CI by source-scan."
+    },
+    {
+      "id": "R6-FG-12",
+      "round": "R6",
+      "severity": "critical",
+      "coverageStrategy": "structural-gate",
+      "summary": "pendingLedger.ts SET-NX claim used non-fenced literal '1' value; mutation failure left the claim stuck for 7d while next drain LREM'd the row → silent ledger debit loss.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/pendingLedger.ts",
+            "lines": "applyPendingLedgerForUser + drainPendingLedgerAdjustments now route through fencedClaim"
+          },
+          {
+            "file": "src/lib/fencedClaim.ts"
+          }
+        ],
+        "commit": "uncommitted (Phase 4)"
+      },
+      "tests": [
+        {
+          "file": "src/lib/fencedClaim.test.ts",
+          "name": "releases the claim on a non-preserve throw"
+        },
+        {
+          "file": "src/__tests__/claim-archetype-gate.test.ts",
+          "name": "no source file outside the primitive layer uses redis.set"
+        }
+      ],
+      "revertDrill": {
+        "patch": "R6-Phase-4.patch",
+        "expectFail": [
+          "releases the claim on a non-preserve throw"
+        ]
+      },
+      "notes": "Phase-6 R8-FG-19 closure: secondary lock on the claim-archetype gate. Reverting pendingLedger.ts back to hand-rolled SET-NX would NOT flip the primitive's release-on-throw test (which uses fencedClaim in isolation), but WOULD trip the claim-archetype gate. Drill comments out the releaseFence call in the catch path — the primitive-side test FAILS, proving the test exercises the actual fix."
+    },
+    {
+      "id": "R6-Phase-4",
+      "round": "structural",
+      "severity": "structural",
+      "coverageStrategy": "structural-gate",
+      "summary": "fencedClaim primitive collapses every hand-rolled `redis.set(key, marker, { nx: true })` + `redis.del(key)` pair into one helper that gets the fence + release semantics right by construction. Forbids new SET-NX outside the primitive layer via claim-archetype-gate.test.ts.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/lib/fencedClaim.ts"
+          },
+          {
+            "file": "src/lib/orphanReconciler.ts"
+          },
+          {
+            "file": "src/__tests__/claim-archetype-gate.ts"
+          },
+          {
+            "file": "src/__tests__/claim-archetype-gate.test.ts"
+          },
+          {
+            "file": "src/custodial/pendingLedger.ts",
+            "lines": "migrated to fencedClaim"
+          }
+        ],
+        "commit": "uncommitted (Phase 4)"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/claim-archetype-gate.test.ts",
+          "name": "no source file outside the primitive layer uses redis.set"
+        },
+        {
+          "file": "src/lib/fencedClaim.test.ts",
+          "name": "PRESERVES the claim on PreserveClaimError (rethrows)"
+        }
+      ],
+      "revertDrill": {
+        "patch": "R6-Phase-4.patch",
+        "expectFail": [
+          "releases the claim on a non-preserve throw"
+        ]
+      },
+      "notes": "Locked by the structural claim-archetype gate AND the fencedClaim release-on-throw test. The drill comments out the catch's releaseFence call and asserts the locked test fails — physical proof the primitive's contract is exercised."
+    },
+    {
+      "id": "R6-Phase-2",
+      "round": "structural",
+      "severity": "structural",
+      "coverageStrategy": "individual",
+      "summary": "Zod schemas as the single source of truth for HCS-20 v2 wire format. Writer parses outbound payloads via validateV2Message before submit; reader runs schema-validation in soft-mode and reports drift; doc generator regenerates docs/hcs20-v2-schema.md from the schemas.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/hcs20-schema.ts"
+          },
+          {
+            "file": "src/custodial/AccountingService.ts",
+            "lines": "submitV2Message validates"
+          },
+          {
+            "file": "src/custodial/hcs20-reader.ts",
+            "lines": "softValidate + schemaValidationFailures stat"
+          },
+          {
+            "file": "src/scripts/generate-schema-docs.ts"
+          }
+        ],
+        "commit": "uncommitted (Phase 2)"
+      },
+      "tests": [
+        {
+          "file": "src/custodial/hcs20-schema.test.ts",
+          "name": "throws when a required field is missing"
+        },
+        {
+          "file": "src/custodial/hcs20-schema.test.ts",
+          "name": "rejects an unknown op"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Removing validateV2Message from submitV2Message strips the writer-side drift gate and flips both locked tests."
+    },
+    {
+      "id": "R9-FG-3",
+      "round": "R9",
+      "severity": "critical",
+      "coverageStrategy": "documentation-only",
+      "summary": "HCS20_SOFT_VALIDATE env never set in any production path; Phase-6 R8-FG-6 schema-drift detection shipped as silent no-op in cron + verify-audit + audit pages.",
+      "fix": {
+        "files": [
+          {
+            "file": "app/api/cron/reconcile/route.ts",
+            "lines": "process.env.HCS20_SOFT_VALIDATE = '1' at module load"
+          },
+          {
+            "file": "src/scripts/verify-audit.ts",
+            "lines": "process.env.HCS20_SOFT_VALIDATE = '1' at module load"
+          },
+          {
+            "file": "src/custodial/hcs20-reader.ts",
+            "lines": "maybeFireBootWarning() in parseAuditTopic"
+          },
+          {
+            "file": "docs/mainnet-deploy-checklist.md",
+            "lines": "HCS20_SOFT_VALIDATE env-var step"
+          }
+        ],
+        "commit": "uncommitted (Phase 7)"
+      },
+      "tests": [],
+      "revertDrill": null,
+      "notes": "Phase-7 Cluster A. coverageStrategy individual but tests array empty: the closure is wiring-side. The boot warning is exercised manually (Vercel deploy) but no synthetic test asserts the env is set at the cron route module load — that's a doc-level acceptance check (see mainnet-deploy-checklist.md). Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+    },
+    {
+      "id": "R9-FG-4",
+      "round": "R9",
+      "severity": "critical",
+      "coverageStrategy": "documentation-only",
+      "summary": "reconcileOrphans documented as cron-invoked but never imported by app/api/cron/reconcile/route.ts; orphan reconciler dead code in production.",
+      "fix": {
+        "files": [
+          {
+            "file": "app/api/cron/reconcile/route.ts",
+            "lines": "import + invoke reconcileOrphans + threshold webhook"
+          }
+        ],
+        "commit": "uncommitted (Phase 7)"
+      },
+      "tests": [],
+      "revertDrill": null,
+      "notes": "Phase-7 Cluster A. Closure is wiring-side; smoke test would require an integration harness against a synthetic Redis. Manual acceptance: cron route now imports reconcileOrphans (verified at ship time). Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+    },
+    {
+      "id": "R9-FG-5",
+      "round": "R9",
+      "severity": "critical",
+      "coverageStrategy": "structural-gate",
+      "summary": "auth/verify.ts:107 message-substring sibling-miss undefended by widened gate; same string-control-flow archetype as R8-FG-25 closures in refund.ts/MultiUserAgent.ts.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/auth/verify.ts",
+            "lines": "SignatureValidationError typed sentinel + instanceof discrimination"
+          },
+          {
+            "file": "src/__tests__/sibling-archetype-gate.ts",
+            "lines": "FORBIDDEN_PATTERNS adds .message.includes pattern"
+          }
+        ],
+        "commit": "uncommitted (Phase 7)"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/sibling-archetype-gate.test.ts",
+          "name": "flags `err.message.includes(\"...\")` discrimination"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-7 Cluster C. The gate's behavioral fixture asserts the pattern fires on planted text; the typed sentinel replaces the substring check at the lone production callsite. Locked by structural-gate (any future regression that re-introduces .message.includes outside grandfathered files fails CI)."
+    },
+    {
+      "id": "R9-FG-1",
+      "round": "R9",
+      "severity": "critical",
+      "coverageStrategy": "documentation-only",
+      "summary": "heldByToken accumulator populated but never subtracted from ledgerBalanceByToken in verify-audit; R8-FG-24 closure was wire-only.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/scripts/verify-audit.ts",
+            "lines": "per-token derivation subtracts heldByToken + depositCreditFlushOrphanedByToken; allTokens set extended"
+          }
+        ],
+        "commit": "uncommitted (Phase 7)"
+      },
+      "tests": [],
+      "revertDrill": null,
+      "notes": "Phase-7 Cluster B. Closure is in the derivation loop. The companion `user_balance_negative` alert (R9-P12-005) covers the regression — if heldByToken/depositCreditFlushOrphanedByToken subtractions are reverted, the alert won't fire on synthetic over-emit fixtures (would need a regression test). Tests array empty pending acceptance test; see notes. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+    },
+    {
+      "id": "R9-FG-2",
+      "round": "R9",
+      "severity": "critical",
+      "coverageStrategy": "documentation-only",
+      "summary": "depositCreditFlushOrphanedByToken accumulator populated but never subtracted; R6-FG-10 closure was wire-only.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/scripts/verify-audit.ts",
+            "lines": "per-token derivation subtracts depositCreditFlushOrphanedByToken (same loop as R9-FG-1)"
+          }
+        ],
+        "commit": "uncommitted (Phase 7)"
+      },
+      "tests": [],
+      "revertDrill": null,
+      "notes": "Phase-7 Cluster B. Companion to R9-FG-1; same fix block. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+    },
+    {
+      "id": "R9-FG-6",
+      "round": "R9",
+      "severity": "high",
+      "coverageStrategy": "documentation-only",
+      "summary": "pendingLedger body NOT idempotent on (userId, sourceTx); 7-day double-debit window after Lambda crash mid-mutation. R8-FG-7 fix relied on body idempotency assumption that didn't hold.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/pendingLedger.ts",
+            "lines": "SADD-membership check (KEY_PREFIX.pendingLedgerAppliedSet) BEFORE mutation in both eager + periodic drains"
+          },
+          {
+            "file": "src/auth/redis.ts",
+            "lines": "KEY_PREFIX.pendingLedgerAppliedSet declared"
+          }
+        ],
+        "commit": "uncommitted (Phase 7)"
+      },
+      "tests": [],
+      "revertDrill": null,
+      "notes": "Phase-7 Cluster E. Closure is the SISMEMBER/SADD pair around the body. Synthetic Lambda-crash test deferred — would require a chaos-engineering test harness. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+    },
+    {
+      "id": "R9-FG-9",
+      "round": "R9",
+      "severity": "high",
+      "coverageStrategy": "individual",
+      "summary": "Field-level schema constraints (AmountStringField < 1e15, originalDepositTxId.min(1)) reject legacy testnet data through reader-loose Hcs20V2MessageSchema.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/hcs20-schema.ts",
+            "lines": "split AmountStringField (loose) / AmountStringFieldStrict (writer); same for RefundOriginalDepositTxIdField"
+          },
+          {
+            "file": "src/custodial/hcs20-schema.ts",
+            "lines": "RefundStrictSchema overrides amt + originalDepositTxId via .extend()"
+          }
+        ],
+        "commit": "uncommitted (Phase 7)"
+      },
+      "tests": [
+        {
+          "file": "src/custodial/hcs20-schema.test.ts",
+          "name": "R9-FG-9 / R8-FG-22 split: reader-loose accepts unbounded amt; writer-strict rejects"
+        },
+        {
+          "file": "src/custodial/hcs20-schema.test.ts",
+          "name": "R9-FG-9 / R8-FG-8 split: reader-loose accepts empty originalDepositTxId; writer-strict rejects"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-7 Cluster D. Three behavioral tests assert reader-loose accepts AND writer-strict rejects for both bound and min(1) constraints."
+    },
+    {
+      "id": "R9-FG-11",
+      "round": "R9",
+      "severity": "high",
+      "coverageStrategy": "documentation-only",
+      "summary": "R8-FG-8 reader-side empty-string originalDepositTxId defense missing; legacy/attacker-injected refunds with empty value bypassed dedup.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/hcs20-reader.ts",
+            "lines": "parseRefund returns null on empty originalDepositTxId"
+          }
+        ],
+        "commit": "uncommitted (Phase 7)"
+      },
+      "tests": [],
+      "revertDrill": null,
+      "notes": "Phase-7 Cluster F. softValidate's schema_validation_failure alert covers the remaining defense-in-depth signal when HCS20_SOFT_VALIDATE=1. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+    },
+    {
+      "id": "R9-FG-13",
+      "round": "R9",
+      "severity": "high",
+      "coverageStrategy": "documentation-only",
+      "summary": "Typed error discriminants (RefundDuplicateError.kind, InFlightClaimError) thrown away at HTTP/MCP boundary; pre-fix returned plain 500 for every refund-duplicate kind.",
+      "fix": {
+        "files": [
+          {
+            "file": "app/api/_lib/errors.ts",
+            "lines": "NEW: mapErrorToResponse helper"
+          },
+          {
+            "file": "app/api/admin/refund/route.ts",
+            "lines": "use mapErrorToResponse in catch"
+          }
+        ],
+        "commit": "uncommitted (Phase 7)"
+      },
+      "tests": [],
+      "revertDrill": null,
+      "notes": "Phase-7 Cluster F. MCP tool route migration to mapErrorToResponse is partial; refund admin route is wired. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+    },
+    {
+      "id": "R9-FG-14",
+      "round": "R9",
+      "severity": "high",
+      "coverageStrategy": "individual",
+      "summary": "Source-regex tests (R6-FG-5, R8-FG-13) didn't strip comments — comments documenting `instanceof PreserveClaimError` could falsely satisfy the assertion. Phase-3 placebo archetype recurrence.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/hedera/contracts.test.ts",
+            "lines": "import stripComments from lint-helpers; apply before regex"
+          }
+        ],
+        "commit": "uncommitted (Phase 7)"
+      },
+      "tests": [
+        {
+          "file": "src/hedera/contracts.test.ts",
+          "name": "R6-FG-5 behavioral: contracts.ts retry-loop catches `instanceof PreserveClaimError`"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-7 Cluster H. Source is now stripped of comments before matching; a comment-only revert no longer satisfies the assertion."
+    },
+    {
+      "id": "R9-FG-8",
+      "round": "R9",
+      "severity": "high",
+      "coverageStrategy": "documentation-only",
+      "summary": "RedisLike.scan signature declared cursor as number; Upstash returns string. Cast hid the mismatch; future callers trusting the type would loop forever on production.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/auth/redis.ts",
+            "lines": "RedisLike.scan signature: cursor: string | number, return Promise<[string | number, string[]]>"
+          },
+          {
+            "file": "src/lib/orphanReconciler.ts",
+            "lines": "pass cursor through verbatim (no Number() coercion)"
+          }
+        ],
+        "commit": "uncommitted (Phase 7)"
+      },
+      "tests": [],
+      "revertDrill": null,
+      "notes": "Phase-7 Cluster G. In-memory mock returns numeric; Upstash returns string; both work via the union type. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+    },
+    {
+      "id": "R9-FG-12",
+      "round": "R9",
+      "severity": "high",
+      "coverageStrategy": "documentation-only",
+      "summary": "orphanReconciler.test.ts cross-contamination: integration test seeded a key not in beforeEach candidates; if it panicked before its tail cleanup, the key persisted across runs.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/lib/orphanReconciler.test.ts",
+            "lines": "beforeEach candidates list includes the integration test's :integration key"
+          }
+        ],
+        "commit": "uncommitted (Phase 7)"
+      },
+      "tests": [],
+      "revertDrill": null,
+      "notes": "Phase-7 Cluster G. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+    },
+    {
+      "id": "R10-FG-4",
+      "round": "R10",
+      "severity": "critical",
+      "coverageStrategy": "structural-gate",
+      "summary": "Manifest placebo-by-elision: 9 of 12 R9-FG entries shipped with coverageStrategy:\"individual\" AND tests:[]. The Phase-3 annotation cross-check loops over the empty array → vacuous pass. Phase-3's strict setting was defeated by its own escape hatch — the exact archetype Phase-3 was created to prevent. 8th recurrence of the R2-FG-0 archetype.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/__tests__/audit-coverage.test.ts",
+            "lines": "new it() block: individual-strategy entries declare at least one test"
+          },
+          {
+            "file": "src/__tests__/audit-coverage.json",
+            "lines": "9 R9-FG entries downgraded individual→documentation-only with Phase-8 R10-FG-4 sweep notes"
+          }
+        ],
+        "commit": "Phase-8 Cluster A"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/audit-coverage.test.ts",
+          "name": "R10-FG-4: individual-strategy entries declare at least one test"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-8 Cluster A. Locked by structural-gate (the new it() block in audit-coverage.test.ts). Removing the gate flips against any future individual-strategy entry that ships without a real test reference. Standalone behavioral mirror lives at src/__tests__/r10-fg-4-behavioral.test.ts as a dissection-discipline artifact."
+    }
+  ]
+}
