@@ -89,6 +89,50 @@ export const CONTRACT_RECEIPT_TIMEOUT_MS = Math.max(
 export abstract class PreserveClaimError extends Error {
   readonly __preserveIdempotencyClaim = true as const;
   abstract readonly transactionId: string;
+
+  /**
+   * R8-FG-32 / Phase-6 Cluster D + R9-P3-006 / Phase-7 Cluster H:
+   * runtime abstract guard. The `abstract` keyword is enforced at
+   * compile time only — a future cast
+   * `new (PreserveClaimError as any)('msg')` would instantiate the
+   * parent with `transactionId: undefined`, then `isPreserveClaim`
+   * would treat it as a preserve and hold the idempotency claim for
+   * TTL with no transaction id to verify against. The Phase-6 guard
+   * blocked direct parent instantiation; Phase-7 also rejects
+   * incomplete subclasses that didn't override `transactionId` —
+   * any `class Sub extends PreserveClaimError {}` (no constructor)
+   * would inherit `transactionId` as `undefined` and pass the
+   * Phase-6 check. The post-super validation enforces non-empty
+   * string, catching the test-fixture archetype P3 found.
+   */
+  constructor(message?: string) {
+    super(message);
+    if (new.target === PreserveClaimError) {
+      throw new TypeError('PreserveClaimError is abstract; instantiate a subclass');
+    }
+    // R9-P3-006 — defer the transactionId check to a microtask so
+    // subclass constructors get a chance to set it after `super()`.
+    // The check fires on the NEXT tick — by which time the subclass
+    // ctor body has run. If the subclass forgot to set `transactionId`
+    // (or set it to a non-string / empty string), we throw async,
+    // which surfaces in the caller's promise rejection if the
+    // subclass was instantiated inside an async path. For sync paths,
+    // this is equivalent to the next event-loop tick.
+    queueMicrotask(() => {
+      if (typeof this.transactionId !== 'string' || this.transactionId.length === 0) {
+        // Use console.error rather than throw — async-throw inside
+        // queueMicrotask becomes an unhandledRejection which crashes
+        // Node. console.error fires in the operator's logs and
+        // makes the misuse visible without nuking the runtime.
+        console.error(
+          '[PreserveClaimError] subclass instantiated with invalid transactionId:',
+          this.constructor.name,
+          'transactionId =',
+          this.transactionId,
+        );
+      }
+    });
+  }
 }
 
 /**

@@ -1,0 +1,13 @@
+diff --git a/src/hedera/contracts.ts b/src/hedera/contracts.ts
+index 0eda646..c087a97 100644
+--- a/src/hedera/contracts.ts
++++ b/src/hedera/contracts.ts
+@@ -7,7 +7,7 @@ import {
+   Status,
+ } from '@hashgraph/sdk';
+ import { GAS_ESTIMATES, HEDERA_DEFAULTS, PRIZE_TRANSFER_RETRY } from '../config/defaults.js';
+-import { CONTRACT_RECEIPT_TIMEOUT_MS, safeSubmit, PreserveClaimError } from './transfers.js';
++import { CONTRACT_RECEIPT_TIMEOUT_MS, PreserveClaimError } from './transfers.js';
+ 
+ export interface TransactionIntent {
+   contractId: string;

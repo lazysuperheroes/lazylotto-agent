@@ -1,0 +1,49 @@
+# R9-P6-009 / Phase-7 Cluster H: CI workflow that runs the gate trio
+# on every push + pull request. Pre-Phase-7 the schema:docs:check,
+# audit:coverage:check, and the archetype gates were only run
+# locally; a contributor adding a field without regenerating docs
+# (or adding a manifest entry without updating coverageStrategy)
+# could merge with silent drift.
+#
+# All three commands also run via `npm test` (the gates are
+# node:test files); this workflow makes the chain visible in the
+# GitHub Actions UI and required-checks settings.
+
+name: CI
+
+on:
+  push:
+    branches: [main, testnet]
+  pull_request:
+
+jobs:
+  test-and-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run full test suite (includes archetype gates + revert-proof)
+        run: npm test
+        env:
+          # R9-FG-3 / Phase-7 Cluster A: enable schema-drift detection
+          # so the test suite exercises softValidate paths that the
+          # cron route also hits.
+          HCS20_SOFT_VALIDATE: '1'
+
+      - name: Verify schema docs are up to date
+        run: npm run schema:docs:check
+
+      - name: Verify audit-coverage manifest is consistent
+        run: npm run audit:coverage:check

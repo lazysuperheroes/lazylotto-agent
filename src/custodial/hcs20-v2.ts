@@ -1,5 +1,16 @@
 /**
- * HCS-20 schema v2 — type definitions and shared helpers.
+ * HCS-20 schema v2 — normalized session reconstruction types and
+ * shared on/off-topic helpers (Merkle root, error truncation, byte
+ * cap enforcement).
+ *
+ * SOURCE OF TRUTH: wire-format shapes (PlaySessionOpenMessage,
+ * PlayPoolResultMessage, etc.) live in `./hcs20-schema.ts` as Zod
+ * schemas. This file re-exports the inferred TypeScript types so
+ * existing consumers (`AccountingService`, `hcs20-reader`,
+ * `verify-audit`, audit pages) keep working unchanged. Adding or
+ * changing a wire field MUST go through `hcs20-schema.ts` first;
+ * the writer's `submitV2Message` calls `validateV2Message` against
+ * the schema and a field that isn't on the schema is stripped.
  *
  * v1 wrote ONE batch message per play session containing only burn
  * sub-ops (the cost side). The wins side was invisible on chain and
@@ -14,279 +25,45 @@
  *   - HCS gives total ordering within a topic
  *   - Submit key is operator-only (only the agent can write)
  *   - v1 messages are immutable on chain — readers handle both shapes
- *
- * The shape choices below were locked in after architect + data-engineer
- * + product reviews. Notable decisions:
- *
- *   - Per-pool granularity (not chunked single message). Pros: simple
- *     reader, predictable size, no SDK chunk reassembly.
- *   - `v:2` lives on session lifecycle messages (open + recovery), not
- *     on every pool message. Op names disambiguate the rest.
- *   - `tick` is dropped from non-balance ops because it's HCS-20 spec
- *     baggage that says nothing the topic ID doesn't already.
- *   - `poolsRoot` (sha256 Merkle of pool tuples) replaces a totals
- *     dict on `_close`. Tamper evidence; reader recomputes and
- *     rejects on mismatch.
- *   - `agentSeq` is a monotonic per-agent counter recovered at
- *     startup via one mirror node scan. Lets readers detect dropped
- *     messages.
- *   - `prizeTransfer` on `_close` is a first-class field — the field
- *     that would have made the 668 HBAR stuck-prize incident
- *     self-explanatory if it had existed.
  */
 
-// ── Op name constants ────────────────────────────────────────
+// ── Wire shape re-exports (source: hcs20-schema.ts) ─────────
 
-export const HCS20_V2_OPS = {
-  PLAY_SESSION_OPEN: 'play_session_open',
-  PLAY_POOL_RESULT: 'play_pool_result',
-  PLAY_SESSION_CLOSE: 'play_session_close',
-  PLAY_SESSION_ABORTED: 'play_session_aborted',
-  REFUND: 'refund',
-  PRIZE_RECOVERY: 'prize_recovery',
-  STRATEGY_CHANGE: 'strategy_change',
-} as const;
+export {
+  HCS20_V2_OPS,
+  PrizeEntrySchema,
+  PlaySessionOpenSchema,
+  PlayPoolResultSchema,
+  PlaySessionCloseSchema,
+  PlaySessionAbortedSchema,
+  RefundSchema,
+  PrizeRecoverySchema,
+  StrategyChangeSchema,
+  ControlEventSchema,
+  Hcs20V2MessageSchema,
+  Hcs20WriterMessageSchema,
+  validateV2Message,
+  safeParseByOp,
+  HCS20_SCHEMAS,
+} from './hcs20-schema.js';
 
-export type Hcs20V2OpName = (typeof HCS20_V2_OPS)[keyof typeof HCS20_V2_OPS];
+export type {
+  Hcs20V2OpName,
+  Hcs20OpName,
+  PrizeEntry,
+  PlaySessionOpenMessage,
+  PlayPoolResultMessage,
+  PlaySessionCloseMessage,
+  PlaySessionAbortedMessage,
+  RefundMessage,
+  PrizeRecoveryMessage,
+  StrategyChangeMessage,
+  ControlEventMessage,
+  Hcs20V2Message,
+  Hcs20WriterMessage,
+} from './hcs20-schema.js';
 
-// ── Wire shapes (what we write to the topic) ────────────────
-//
-// All v2 wire shapes use short field names where reasonable to keep
-// per-message size under the 1024-byte topic limit. Long names like
-// "transactionId" are only used where they're already part of the
-// HCS-20 spec or where clarity beats byte savings (Hedera tx IDs
-// dominate the size budget anyway).
-
-/**
- * play_session_open — written FIRST in the play sequence. Carries the
- * v field as a session-level fence so future v3 readers can detect
- * unsupported sessions without parsing every pool message.
- *
- * `expectedPools` is a hint, not a guarantee. The agent may emit
- * fewer if budget runs out mid-session. The reader uses it as a
- * sanity check, not a hard constraint.
- */
-export interface PlaySessionOpenMessage {
-  p: 'hcs-20';
-  op: 'play_session_open';
-  v: 2;
-  sessionId: string;
-  user: string;
-  agent: string;
-  agentSeq: number;
-  strategy: string;
-  boostBps: number;
-  expectedPools: number;
-  ts: string;
-}
-
-/**
- * play_pool_result — one per pool actually played. The `seq` field
- * is the pool's position within this session (1-indexed). The total
- * count is `expectedPools` from the open message — no separate `of`
- * field, that would be redundant.
- *
- * Prizes are nested as a discriminated array. `t:'ft'` for fungible
- * (token + amt), `t:'nft'` for NFTs (token + symbol + serials array).
- * Symbol is included for NFTs because the dApp needs it for display
- * and recomputing it from the token ID requires a mirror node call.
- *
- * `strategyMeta` is optional and carries the agent's decision input
- * for this pool (EV, budget remaining at time of decision, etc.).
- * This is the "evidence" field that lets external auditors verify
- * not just *what* happened but *why* the agent thought it was a
- * good play. Convert the audit trail from a ledger into evidence.
- */
-export interface PlayPoolResultMessage {
-  p: 'hcs-20';
-  op: 'play_pool_result';
-  sessionId: string;
-  user: string;
-  agentSeq: number;
-  poolId: number;
-  seq: number;
-  entries: number;
-  spent: string;
-  spentToken: string;
-  wins: number;
-  prizes: PrizeEntry[];
-  strategyMeta?: {
-    ev?: number;
-    budgetRemaining?: number;
-    [key: string]: unknown;
-  };
-  /**
-   * R4-FG-69 (round-4 low): set when the slim-fallback path in
-   * `recordPlayPoolResult` (R3-FG-46) had to drop strategyMeta or
-   * truncate prize symbols to fit under the 1024-byte HCS cap. A
-   * topic-only auditor can use this flag to flag investigative
-   * attention to slimmed messages — the load-bearing fields
-   * (sessionId, agentSeq, poolId, spent, wins, prize amounts) are
-   * still present, but the decision metadata isn't.
-   */
-  slim?: 1;
-  ts: string;
-}
-
-export type PrizeEntry =
-  | { t: 'ft'; tk: string; amt: number }
-  | { t: 'nft'; tk: string; sym: string; ser: number[] };
-
-/**
- * play_session_close — written LAST in the play sequence on success.
- * Carries the operator's signed claim about the session totals plus
- * the prize-transfer outcome.
- *
- * `poolsRoot` is sha256 of canonically-sorted pool tuples (see
- * computePoolsRoot() below). The reader recomputes the root from
- * the pool messages it actually saw and rejects the close if they
- * disagree — that's the tamper-evidence layer.
- *
- * `prizeTransfer` is the field that would have made the 668 HBAR
- * stuck-prize incident self-explanatory. Operators (and end users)
- * can see exactly where the prize delivery sat: succeeded, pending,
- * failed, recovered.
- */
-export interface PlaySessionCloseMessage {
-  p: 'hcs-20';
-  op: 'play_session_close';
-  sessionId: string;
-  user: string;
-  agentSeq: number;
-  poolsPlayed: number;
-  poolsRoot: string;
-  totalWins: number;
-  prizeTransfer: {
-    status: 'succeeded' | 'skipped' | 'failed' | 'recovered';
-    txId?: string;
-    attempts?: number;
-    gasUsed?: number;
-    lastError?: string;
-  };
-  /**
-   * R5-FG-59 (P12-309): when the agent legitimately deviated from
-   * the strategy snapshotted at session-open (budget exhaustion,
-   * killswitch mid-play, per-pool fee filter), this field records
-   * the deviation reason. R4-FG-60 detects only disagreement
-   * between `strategy_change` and `session_open`, NOT between
-   * `session_open` and actual play behavior.
-   */
-  strategyDeviation?: { reason: string; field?: string };
-  ts: string;
-}
-
-/**
- * play_session_aborted — written instead of close when the session
- * sequence dies mid-stream (agent crash, contract revert, etc.).
- * The reader uses it as a positive close marker — "this session is
- * over, here's how many pools made it through" — instead of having
- * to detect missing closes via timeout (which can't distinguish
- * crashed from in-flight).
- *
- * R4-FG-24 (round-4 high): `poolsRoot` is now carried on aborted
- * messages too. Pre-fix a compromised operator could write an
- * `aborted` claiming completedPools=0 for a session whose pool
- * messages already wrote — verify-audit treated it as aborted +
- * ignored spend, reconstructing user spent=0 while operator pocketed
- * the spend. With the root present, the reader recomputes from
- * observed pools and rejects mismatches as `corrupt`.
- *
- * Optional for backward compat: aborted messages emitted before this
- * fix shipped don't carry a root. The reader falls back to the
- * pre-fix completedPools count check and emits a `legacy_abort_no_merkle`
- * warning so operators see which sessions lack tamper-evidence.
- */
-export interface PlaySessionAbortedMessage {
-  p: 'hcs-20';
-  op: 'play_session_aborted';
-  sessionId: string;
-  user: string;
-  agentSeq: number;
-  completedPools: number;
-  /**
-   * R4-FG-24: Merkle root over `completedPools` pool tuples computed
-   * with the same binding as `play_session_close.poolsRoot`. Optional
-   * for backward compat with pre-R4-FG-24 aborted messages.
-   */
-  poolsRoot?: string;
-  reason: string;
-  /** Truncated error message (max ~200 chars to stay within size budget). */
-  lastError?: string;
-  /** R5-FG-59: optional deviation marker (see PlaySessionCloseMessage). */
-  strategyDeviation?: { reason: string; field?: string };
-  abortedAt: string;
-}
-
-/**
- * refund — new op type for operator-initiated refunds. Today
- * processRefund mutates the local ledger and writes nothing to
- * HCS-20, which means external auditors see deposit + nothing,
- * making reconciliation impossible. Adding this closes the gap.
- *
- * `tick` IS included because refunds are credit-affecting (the
- * inverse of a deposit). Reconcilers treat it as a burn from the
- * user's LLCRED side.
- */
-export interface RefundMessage {
-  p: 'hcs-20';
-  op: 'refund';
-  tick: string;
-  amt: string;
-  from: string;
-  to: string;
-  originalDepositTxId: string;
-  refundTxId: string;
-  reason: 'stuck_deposit' | 'operator_initiated' | 'admin' | string;
-  performedBy: string;
-  ts: string;
-  /**
-   * Rake amount reversed back from operator state. F9 (2026-05-06
-   * audit OP-01): when refunding a deposit that was raked at credit
-   * time, the operator's local `balances[token] += rakeAmount` is
-   * reversed by this much. Optional for backward compat — readers
-   * MUST default to 0 when absent (legacy refund messages predate
-   * this field).
-   */
-  rakeReversed?: string;
-  /**
-   * Token of the reversed rake (mirrors the deposit's token). Included
-   * explicitly so a topic-only reader doesn't need to back-reference
-   * `originalDepositTxId` to apply the operator-balance reversal.
-   */
-  rakeReversedToken?: string;
-}
-
-/**
- * strategy_change — user switched their play strategy preset. Not a
- * balance-moving op, purely an audit anchor so third parties can
- * reconstruct "which strategy was active when each session ran"
- * without having to correlate timestamps with the registration
- * record.
- *
- * `performedBy` distinguishes self-serve user changes from admin
- * interventions. Reads 'user' (default) or an admin account id.
- * No `tick` field — this is not an HCS-20 balance op.
- */
-export interface StrategyChangeMessage {
-  p: 'hcs-20';
-  op: 'strategy_change';
-  user: string;
-  previousStrategy: string;
-  newStrategy: string;
-  newStrategyVersion: string;
-  performedBy: string;
-  ts: string;
-}
-
-// ── Discriminated union of all v2 messages ──────────────────
-
-export type Hcs20V2Message =
-  | PlaySessionOpenMessage
-  | PlayPoolResultMessage
-  | PlaySessionCloseMessage
-  | PlaySessionAbortedMessage
-  | RefundMessage
-  | StrategyChangeMessage;
+import type { PrizeEntry, PlaySessionCloseMessage } from './hcs20-schema.js';
 
 // ── Normalized session reconstruction (reader output) ───────
 //
@@ -359,6 +136,16 @@ export interface NormalizedSession {
    * mismatch — the field's presence is the explanation).
    */
   strategyDeviation?: { reason: string; field?: string };
+  /**
+   * R8-FG-16 / Phase-6 Cluster C: total count of prizes dropped by
+   * the writer's slim-fallback (`slim_truncated_prizes` field on
+   * pool messages). When > 0, the on-chain prize transfer carried
+   * MORE prizes than the topic records — totalPrizeValue under-reports
+   * actual on-chain truth and external auditors must reconcile
+   * against on-chain wallet state. Verify-audit surfaces this as a
+   * warning.
+   */
+  truncatedPrizesDropped?: number;
 }
 
 export interface NormalizedPool {

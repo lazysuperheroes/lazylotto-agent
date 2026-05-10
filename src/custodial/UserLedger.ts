@@ -321,8 +321,12 @@ export class UserLedger {
             await this.accounting.recordControlEvent('deposit_credit_flush_orphaned', {
               uncertainTxId: txId,
               userId,
-              grossAmount,
+              // Phase-6 Cluster A: AmountStringField (schema-required
+              // for this event) wants stringified amounts to preserve
+              // precision across the wire.
+              grossAmount: String(grossAmount),
               token,
+              by: this.agentAccountId,
               cause: flushErr instanceof Error ? flushErr.message.slice(0, 200) : String(flushErr).slice(0, 200),
               idempotencyKey: `deposit-flush-orphan:${txId}`,
             });

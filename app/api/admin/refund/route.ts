@@ -111,10 +111,12 @@ export const POST = withStore(async (request: Request) => {
     };
     return NextResponse.json(idempotent.result, { headers });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json(
-      { error: message },
-      { status: 500, headers: CORS_HEADERS },
-    );
+    // R9-FG-13 / Phase-7 Cluster F: route through the centralized
+    // mapper so RefundDuplicateError/InFlightClaimError discriminants
+    // surface as `code` + `kind` + `retryable` on the response. The
+    // operator UI can branch on code instead of parsing the message.
+    const { mapErrorToResponse } = await import('../../_lib/errors');
+    const mapped = mapErrorToResponse(err);
+    return NextResponse.json(mapped.body, { status: mapped.status, headers: CORS_HEADERS });
   }
 });

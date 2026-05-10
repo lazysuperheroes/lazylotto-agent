@@ -1,0 +1,17 @@
+diff --git a/src/hedera/contracts.ts b/src/hedera/contracts.ts
+--- a/src/hedera/contracts.ts
++++ b/src/hedera/contracts.ts
+@@ -139,11 +139,8 @@
+     .setFunctionParameters(Buffer.from(encodedCalldata.slice(2), 'hex'));
+
+   // R6-FG-4: route through safeSubmit (see executeIntent above).
+-  const { response: txResponse, receipt } = await safeSubmit(
+-    client,
+-    () => tx.execute(client),
+-    { ceilingMs: CONTRACT_RECEIPT_TIMEOUT_MS },
+-  );
++  const txResponse = await tx.execute(client);
++  const receipt = await txResponse.getReceipt(client);
+
+   if (receipt.status !== Status.Success) {
+     throw new Error(

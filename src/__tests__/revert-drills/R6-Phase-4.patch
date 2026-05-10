@@ -1,0 +1,12 @@
+diff --git a/src/lib/fencedClaim.ts b/src/lib/fencedClaim.ts
+--- a/src/lib/fencedClaim.ts
++++ b/src/lib/fencedClaim.ts
+@@ -156,7 +156,7 @@
+     // "releases the claim on a non-preserve throw" test fails if
+     // this line is removed; it is the structural revert detector
+     // for the entire primitive's release contract.
+-    await releaseFence(key, fence); // R6-Phase-4 release-on-throw anchor
++    // await releaseFence(key, fence); // R6-Phase-4 release-on-throw anchor
+     throw err;
+   }
+ }

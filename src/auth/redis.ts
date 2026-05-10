@@ -47,6 +47,18 @@ export const KEY_PREFIX = {
   // both apply twice. SET-NX before mutate makes the apply atomic;
   // LREM remains belt-and-braces. 7-day TTL matches deposit dedup.
   pendingLedgerClaim: `lla:${NET}:pending-ledger-claim:`,
+  /**
+   * R9-FG-6 / Phase-7 Cluster E: idempotency anchor for pending-ledger
+   * row applications. SADD-membership keyed by `<userId>:<sourceTx>`.
+   * Set members survive forever (no TTL) — once a row is applied,
+   * the body's SISMEMBER check skips re-application even after a
+   * Lambda crash mid-mutation + 7-day claim TTL elapse + sibling
+   * re-acquisition. Closes the double-debit window R8-FG-7's busy-
+   * branch fix relied on (incorrectly) being closed by body
+   * idempotency.
+   */
+  pendingLedgerAppliedSet: `lla:${NET}:pending-ledger-applied`,
+  pendingLedgerApplied: `lla:${NET}:pending-ledger-applied:`,
   // Withdrawal velocity counters, keyed per token + user
   velocity: `lla:${NET}:velocity:withdrawal:`,
   // Per-txId verifier locks for *_uncertain dead-letters — prevents
@@ -117,6 +129,14 @@ interface RedisLike {
   /** SISMEMBER — returns 1 if `member` is in the set at `key`, 0 otherwise. */
   sismember(key: string, member: string): Promise<number>;
   incr(key: string): Promise<number>;
+  /**
+   * R9-P3-002 / Phase-7: atomic INCRBY for the velocity-counter
+   * race fix in MultiUserAgent.applyWithdrawalVelocityCap. Adds
+   * `delta` to the integer at `key` (creates with value 0 if absent),
+   * returns the new value. Atomicity prevents the pre-fix
+   * `get → compute → set` last-write-wins race.
+   */
+  incrby(key: string, delta: number): Promise<number>;
   // ── List ops (used by pending ledger queue) ────────────────
   rpush(key: string, value: string): Promise<number>;
   /**
@@ -141,6 +161,27 @@ interface RedisLike {
     keys: string[],
     args: string[],
   ): Promise<T>;
+  /**
+   * R8-FG-9 / Phase-6 Cluster F + R9-FG-8 / Phase-7 Cluster G:
+   * cursor-based key scan. The orphan reconciler walks every
+   * registered claim namespace via SCAN.
+   *
+   * R9-FG-8 closure: cursor accepted and returned as `string |
+   * number`. Upstash production returns the cursor as a STRING
+   * (e.g. "42" or "0"); the in-memory mock returns numeric. The
+   * pre-Phase-7 interface declared `Promise<[number, string[]]>`
+   * and only worked because the reconciler defended with a local
+   * cast + dual `cursor === 0 || cursor === '0'` exit check. Future
+   * callers that trusted the type would silently loop forever on
+   * production. Now both flavours are first-class.
+   *
+   * Cursor `0` (or `"0"`) means "start"; iterate until the returned
+   * cursor is `0` again. Match is a glob with `*` wildcard.
+   */
+  scan(
+    cursor: string | number,
+    options: { match: string; count: number },
+  ): Promise<[string | number, string[]]>;
 }
 
 // ── Singleton pinned to globalThis ──────────────────────────
@@ -451,6 +492,14 @@ function createInMemoryStore(): RedisLike {
       else store.set(key, { value: String(next) });
       return next;
     },
+    async incrby(key: string, delta: number) {
+      const entry = store.get(key);
+      const current = entry && !isExpired(entry) ? Number(entry.value) || 0 : 0;
+      const next = current + delta;
+      if (entry) entry.value = String(next);
+      else store.set(key, { value: String(next) });
+      return next;
+    },
     async rpush(key: string, value: string) {
       if (!lists.has(key)) lists.set(key, []);
       const list = lists.get(key)!;
@@ -564,6 +613,38 @@ function createInMemoryStore(): RedisLike {
       }
 
       throw new Error('In-memory eval: unsupported script pattern');
+    },
+    /**
+     * R8-FG-9 / Phase-6 Cluster F: cursor-based scan implementation.
+     * The orphan reconciler walks every registered claim namespace
+     * via this entrypoint. Cursor semantics: linear pass over the
+     * keyspace; cursor IS the index into the sorted key array.
+     * Match supports trailing-`*` glob (the only form the reconciler
+     * uses).
+     */
+    async scan(
+      cursor: number,
+      options: { match: string; count: number },
+    ): Promise<[number, string[]]> {
+      // Materialize the live, non-expired keyset.
+      const allKeys: string[] = [];
+      for (const [k, v] of store.entries()) {
+        if (isExpired(v)) continue;
+        allKeys.push(k);
+      }
+      allKeys.sort();
+      // Filter by glob (only `*` wildcards supported).
+      const pattern = options.match;
+      const wildcardIdx = pattern.indexOf('*');
+      const prefix = wildcardIdx >= 0 ? pattern.slice(0, wildcardIdx) : pattern;
+      const matches = allKeys.filter(
+        wildcardIdx >= 0 ? (k) => k.startsWith(prefix) : (k) => k === pattern,
+      );
+      const start = Math.max(0, Math.floor(cursor));
+      const end = Math.min(matches.length, start + Math.max(1, options.count));
+      const batch = matches.slice(start, end);
+      const next = end >= matches.length ? 0 : end;
+      return [next, batch];
     },
   };
 }

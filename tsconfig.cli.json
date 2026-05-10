@@ -16,5 +16,14 @@
     "sourceMap": true
   },
   "include": ["src"],
-  "exclude": ["node_modules", "dist", ".next", "app", "src/web"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    ".next",
+    "app",
+    "src/web",
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "src/__tests__"
+  ]
 }

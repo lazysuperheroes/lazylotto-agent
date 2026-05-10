@@ -53,11 +53,22 @@ export type IdempotencyResult<T> =
 
 export function isPreserveClaim(err: unknown): err is PreserveClaimError {
   if (err instanceof PreserveClaimError) return true;
-  // Defense in depth: cross-bundle module identity drift fallback.
-  // If a future bundling boundary produces a duplicate class, the
-  // instanceof check above fails silently. The error name is set in
-  // the constructor and survives the duplicate-class hazard.
-  if (err instanceof Error && err.name === 'ReceiptUncertainError') return true;
+  // R8-FG-4 / R6-FG-17 / Phase-6 Cluster B closure: cross-bundle
+  // name fallback covers BOTH PreserveClaim subclasses. Pre-fix
+  // this checked only `'ReceiptUncertainError'`; a `PostSubmitError`
+  // (sibling shipped by R5-FG-3) failed both `instanceof
+  // PreserveClaimError` (under bundle drift) AND the name string —
+  // the catch path then DELed the idempotency claim → potential
+  // double-spend. The exact archetype `instanceof`-only checks
+  // produce, inside the helper that exists to defend against it.
+  // The sibling-archetype gate now also forbids new
+  // `err.name === '<subclass>'` checks outside this helper.
+  if (
+    err instanceof Error &&
+    (err.name === 'ReceiptUncertainError' || err.name === 'PostSubmitError')
+  ) {
+    return true;
+  }
   return false;
 }
 

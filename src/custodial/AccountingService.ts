@@ -12,10 +12,14 @@ import {
   type PlaySessionAbortedMessage,
   type RefundMessage,
   type StrategyChangeMessage,
+  type PrizeRecoveryMessage,
+  type ControlEventMessage,
+  type Hcs20WriterMessage,
   type PrizeEntry,
   computePoolsRoot,
   truncateError,
   enforceTopicMessageSizeLimit,
+  validateV2Message,
 } from './hcs20-v2.js';
 import type { IStore } from './IStore.js';
 
@@ -415,7 +419,12 @@ export class AccountingService {
       // never ran; reservations stay held pending manual reconstruction.
       // This anchor pins the event on the topic so a topic-only auditor
       // sees the spend even before manual reconstruction completes.
-      | 'play_uncertain_success_pending_triage',
+      | 'play_uncertain_success_pending_triage'
+      // R6-FG-9 / Phase-6 Cluster A: deposit credit flush failed
+      // post-on-chain-deposit. Topic-only DR replay uses the
+      // `grossAmount` field below to subtract the un-credited
+      // amount from the user's reconstructed balance.
+      | 'deposit_credit_flush_orphaned',
     details: {
       reason?: string;
       by: string;
@@ -445,9 +454,35 @@ export class AccountingService {
        * write produced duplicate topic anchors.
        */
       idempotencyKey?: string;
+      /**
+       * R6-FG-9 / Phase-6 Cluster A: gross deposit amount in display
+       * units (stringified for precision). REQUIRED for
+       * `deposit_credit_flush_orphaned` so a topic-only DR replay can
+       * compute the user's reconstructed balance without Redis.
+       * Refined by AmountStringField — finite, < 1e15.
+       */
+      grossAmount?: string;
+      /**
+       * R6-FG-9 / Phase-6 Cluster A: token of the un-credited deposit
+       * for `deposit_credit_flush_orphaned` ("HBAR" / "LAZY" / "0.0.X").
+       */
+      token?: string;
+      /**
+       * R6-FG-9 / Phase-6 Cluster A: free-form cause label for the
+       * orphan event (Redis blip, store error, etc.). Caller is
+       * responsible for any size truncation.
+       */
+      cause?: string;
     },
   ): Promise<void> {
-    await this.submitMessage({
+    // R8-FG-2 / Phase-6 Cluster A: route through submitV2Message so
+    // the strict writer schema gates every control-event emission.
+    // Pre-fix this called the legacy `submitMessage` (no validation),
+    // so R3-FG-22's body-level dedup nonce + R6-FG-9's grossAmount/
+    // token/cause fields shipped unvalidated. Any typo in those
+    // load-bearing fields was invisible until the reader produced
+    // wrong dedup or wrong reconstruction 24h later.
+    const message: ControlEventMessage = {
       p: 'hcs-20',
       op: 'control',
       tick: this.tick,
@@ -462,8 +497,12 @@ export class AccountingService {
         ? { tokenReservations: details.tokenReservations }
         : {}),
       ...(details.idempotencyKey ? { idempotencyKey: details.idempotencyKey } : {}),
+      ...(details.grossAmount ? { grossAmount: details.grossAmount } : {}),
+      ...(details.token ? { token: details.token } : {}),
+      ...(details.cause ? { cause: details.cause } : {}),
       timestamp: new Date().toISOString(),
-    });
+    };
+    await this.submitV2Message(message);
   }
 
   /**
@@ -507,7 +546,13 @@ export class AccountingService {
     /** Final gas value used for the successful contract call. */
     gasUsed?: number;
   }): Promise<void> {
-    await this.submitMessage({
+    // R8-FG-2 / Phase-6 Cluster A: route through submitV2Message so
+    // the strict writer schema (`Hcs20WriterMessageSchema`) gates
+    // every prize_recovery emission. Pre-fix this called the legacy
+    // `submitMessage` (no validation) — any field drift between
+    // writer and `PrizeRecoverySchema` shipped to the topic
+    // unvalidated, and a writer typo never surfaced at submit time.
+    const message: PrizeRecoveryMessage = {
       p: 'hcs-20',
       op: 'prize_recovery',
       tick: this.tick,
@@ -523,10 +568,11 @@ export class AccountingService {
       reason: details.reason,
       performedBy: details.performedBy,
       ...(details.affectedSessions ? { affectedSessions: details.affectedSessions } : {}),
-      ...(details.attempts ? { attempts: details.attempts } : {}),
-      ...(details.gasUsed ? { gasUsed: details.gasUsed } : {}),
+      ...(details.attempts !== undefined ? { attempts: details.attempts } : {}),
+      ...(details.gasUsed !== undefined ? { gasUsed: details.gasUsed } : {}),
       timestamp: new Date().toISOString(),
-    });
+    };
+    await this.submitV2Message(message);
   }
 
   // ── Batched Operations ───────────────────────────────────
@@ -969,6 +1015,16 @@ export class AccountingService {
     poolsRoot: string;
     totalWins: number;
     prizeTransfer: PlaySessionCloseMessage['prizeTransfer'];
+    /**
+     * R5-FG-59 / R9-FG-7 / Phase-7 Cluster F: legitimate mid-session
+     * deviation from the strategy snapshotted at session-open.
+     * `PlaySessionCloseSchema` declares the field; pre-Phase-7 the
+     * close-side writer didn't accept it (only aborted), so a
+     * close-with-deviation session had no path to surface the
+     * explanation onto the topic. This completes the R8-FG-17 fix
+     * which had only wired the aborted writer.
+     */
+    strategyDeviation?: { reason: string; field?: string };
   }): Promise<void> {
     const agentSeq = await this.nextAgentSeq(details.agent);
     const message: PlaySessionCloseMessage = {
@@ -981,6 +1037,7 @@ export class AccountingService {
       poolsRoot: details.poolsRoot,
       totalWins: details.totalWins,
       prizeTransfer: details.prizeTransfer,
+      ...(details.strategyDeviation ? { strategyDeviation: details.strategyDeviation } : {}),
       ts: new Date().toISOString(),
     };
     await this.submitV2Message(message);
@@ -1012,6 +1069,15 @@ export class AccountingService {
     poolsRoot?: string;
     reason: string;
     lastError?: string;
+    /**
+     * R5-FG-59 / R8-FG-17 / Phase-6 Cluster E: legitimate mid-session
+     * deviation from the strategy snapshotted at session-open.
+     * `PlaySessionAbortedSchema` declares the field; pre-Phase-6 the
+     * writer didn't accept it, so an aborted-with-deviation session
+     * couldn't carry the explanation onto the topic. R5-FG-59 was
+     * half-implemented (close-only); this completes it.
+     */
+    strategyDeviation?: { reason: string; field?: string };
   }): Promise<void> {
     const agentSeq = await this.nextAgentSeq(details.agent);
     const message: PlaySessionAbortedMessage = {
@@ -1024,6 +1090,7 @@ export class AccountingService {
       ...(details.poolsRoot ? { poolsRoot: details.poolsRoot } : {}),
       reason: details.reason,
       ...(details.lastError ? { lastError: truncateError(details.lastError) } : {}),
+      ...(details.strategyDeviation ? { strategyDeviation: details.strategyDeviation } : {}),
       abortedAt: new Date().toISOString(),
     };
     await this.submitV2Message(message);
@@ -1039,6 +1106,15 @@ export class AccountingService {
    */
   async recordRefund(details: {
     amount: string | number;
+    /**
+     * R6-FG-8 (round-6): underlying token of the refund (HBAR, LAZY,
+     * or 0.0.X). Pre-fix the message had only `tick: LLCRED` and the
+     * reader's `resolveTokenField` fallback returned 'HBAR' — a
+     * LAZY-deposit refund silently recorded as HBAR. Optional only
+     * for backward compat with existing callers; production paths
+     * (refund.ts, processRefund) MUST supply it.
+     */
+    token?: string;
     from: string;
     to: string;
     originalDepositTxId: string;
@@ -1067,7 +1143,18 @@ export class AccountingService {
       reason: details.reason,
       performedBy: details.performedBy,
       ts: new Date().toISOString(),
-      ...(details.rakeReversed && details.rakeReversed > 0
+      ...(details.token ? { token: details.token } : {}),
+      // R9-P10-010 / Phase-7 Cluster D: conditionally spread
+      // `rakeReversedToken` ONLY when both rakeReversed AND
+      // rakeReversedToken are present. Pre-fix the spread emitted
+      // `rakeReversedToken: undefined` when the caller passed
+      // rakeReversed without token — the writer-strict cross-field
+      // invariant catches it (rakeReversed without token throws),
+      // but the conditional spread keeps the writer self-consistent
+      // without leaning on the validator. A regression that drops
+      // the cross-field check would NOT silently emit an undefined
+      // field anymore.
+      ...(details.rakeReversed && details.rakeReversed > 0 && details.rakeReversedToken
         ? {
             rakeReversed: String(details.rakeReversed),
             rakeReversedToken: details.rakeReversedToken,
@@ -1120,15 +1207,7 @@ export class AccountingService {
    * enabled. The throw lets us distinguish "intentionally off"
    * from "broken in production".
    */
-  private async submitV2Message(
-    payload:
-      | PlaySessionOpenMessage
-      | PlayPoolResultMessage
-      | PlaySessionCloseMessage
-      | PlaySessionAbortedMessage
-      | RefundMessage
-      | StrategyChangeMessage,
-  ): Promise<void> {
+  private async submitV2Message(payload: Hcs20WriterMessage): Promise<void> {
     if (!this.topicId) {
       // Match legacy submitMessage() behavior to keep test envs
       // working but log loudly so production misconfigs surface.
@@ -1139,9 +1218,17 @@ export class AccountingService {
       );
       return;
     }
-    const message = JSON.stringify(payload);
-    const sessionRef = 'sessionId' in payload ? payload.sessionId : 'n/a';
-    enforceTopicMessageSizeLimit(message, `v2 op=${payload.op}, sessionId=${sessionRef}`);
+    // Phase-2 R7: validate the outbound payload against the canonical
+    // Zod schema BEFORE serialization. Drift between writer and
+    // schema is the root cause of recurring R6 findings (parseRefund
+    // missing rakeReversed, refund missing token field, etc.). The
+    // schema lives in `hcs20-schema.ts`; adding a wire field there
+    // first makes this validation pass — typos surface here, not 24h
+    // later when the reader gets confused.
+    const validated = validateV2Message(payload);
+    const message = JSON.stringify(validated);
+    const sessionRef = 'sessionId' in validated ? validated.sessionId : 'n/a';
+    enforceTopicMessageSizeLimit(message, `v2 op=${validated.op}, sessionId=${sessionRef}`);
     await new TopicMessageSubmitTransaction()
       .setTopicId(TopicId.fromString(this.topicId))
       .setMessage(message)

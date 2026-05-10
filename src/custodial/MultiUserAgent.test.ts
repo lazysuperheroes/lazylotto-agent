@@ -1010,3 +1010,52 @@ describe('MultiUserAgent financial paths', () => {
     });
   });
 });
+
+// Phase-6 Cluster D / R8-FG-13: behavioral revert detection for the
+// three MultiUserAgent catch paths broadened in R6-FG-1, 2, 3. The
+// sibling-archetype gate catches PATTERN reintroduction (someone
+// adding back `instanceof ReceiptUncertainError` outside transfers.ts).
+// It does NOT catch BEHAVIORAL reverts — flipping a catch's
+// `if (error instanceof PreserveClaimError)` to `if (false)` or
+// removing the if entirely reopens the double-spend window without
+// introducing any forbidden token. These source-level structural
+// assertions catch THAT.
+describe('Phase-6 R8-FG-13: MultiUserAgent catch paths use PreserveClaimError parent class', () => {
+  // revert-proof: R8-FG-13 — flipping any of the three catch sites
+  // from `instanceof PreserveClaimError` to `instanceof Error` (or
+  // removing the check) reopens R6-FG-1/2/3 without flagging the
+  // sibling-archetype gate. The structural assertion counts the
+  // parent-class checks and requires at least 3 (one per catch path:
+  // processWithdrawal, playForUser, operatorWithdrawFees).
+  it('three catch paths use `instanceof PreserveClaimError`', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join: pj } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(pj(here, 'MultiUserAgent.ts'), 'utf8');
+    const matches = source.match(/instanceof\s+PreserveClaimError/g) ?? [];
+    assert.ok(
+      matches.length >= 3,
+      `MultiUserAgent.ts must contain >=3 \`instanceof PreserveClaimError\` checks ` +
+        `(processWithdrawal, playForUser, operatorWithdrawFees catches). Found ${matches.length}.`,
+    );
+  });
+
+  // revert-proof: R8-FG-13 — dropping the import (or aliasing it to
+  // a different identifier) decouples the catch from the canonical
+  // class. Audit-coverage manifest entries for R6-FG-1/2/3 use
+  // coverageStrategy: 'structural-gate' but this is a behavioral
+  // backstop the gate cannot provide.
+  it('imports PreserveClaimError from transfers.js', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join: pj } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(pj(here, 'MultiUserAgent.ts'), 'utf8');
+    assert.match(
+      source,
+      /import\s*\{[^}]*\bPreserveClaimError\b[^}]*\}\s*from\s*['"]\.\.\/hedera\/transfers\.js['"]/,
+      'MultiUserAgent.ts must import PreserveClaimError from ../hedera/transfers.js',
+    );
+  });
+});

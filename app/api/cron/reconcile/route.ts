@@ -40,7 +40,19 @@ import { acquireOperatorLock, releaseOperatorLock, startOperatorLockHeartbeat } 
 import { withStore } from '../../_lib/withStore';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import type { ReconciliationResult } from '~/custodial/Reconciliation';
+import { reconcileOrphans } from '~/lib/orphanReconciler';
 import { isAuthorizedCron, escapeMrkdwn } from './helpers';
+
+/**
+ * R9-FG-3 / Phase-7 Cluster A: enable schema-drift detection on the
+ * cron path. Pre-fix `HCS20_SOFT_VALIDATE` was never set anywhere in
+ * production, so the Phase-6 R8-FG-6 closure (verify-audit consumes
+ * `schemaValidationFailures`) shipped as a silent no-op — the reader's
+ * env-gate skipped every message and the consumer always saw zero.
+ * Setting it at module load means every reader walk inside this
+ * cron run produces the drift signal verify-audit alerts on.
+ */
+process.env.HCS20_SOFT_VALIDATE = '1';
 
 /**
  * R5-FG-35 (P10-CFG-001): explicit function timeout. Pre-fix the
@@ -185,21 +197,64 @@ export const GET = withStore(async (request: Request) => {
   heartbeat.cancel();
   await releaseOperatorLock('reconcile', lockToken);
 
+  // R9-FG-4 / Phase-7 Cluster A: invoke the orphan reconciler after
+  // the main reconcile pass. Pre-fix the orphan reconciler module
+  // documented its wiring as "invoked from the hourly cron endpoint"
+  // but no production caller existed — the Phase-6 R8-FG-9 closure
+  // shipped functionally dead. Stuck claims accumulated invisibly
+  // across every claim namespace (refund 30d, pendingLedger 7d,
+  // idempotency 24h, etc.).
+  //
+  // Best-effort: failures here do not flip the reconcile result
+  // (the operator already has solvent state from the main pass).
+  // Surface count + first-orphan in the response payload so monitors
+  // can alert. Fire the same RECONCILE_FAILURE_WEBHOOK_URL webhook
+  // when count >=5 so an operator gets paged on accumulating debt.
+  let orphans: { count: number; orphans: import('~/lib/orphanReconciler').OrphanedClaim[] } = {
+    count: 0,
+    orphans: [],
+  };
+  try {
+    orphans = await reconcileOrphans({ staleThresholdRatio: 0.75 });
+  } catch (orphanErr) {
+    console.error('[cron/reconcile] orphan reconciler threw:', orphanErr);
+  }
+
   // Webhook on failure (best-effort, never blocks the response).
   // Fire-and-forget so a slow webhook receiver doesn't make the
-  // cron run timeout.
+  // cron run timeout. R9-FG-4: also page when stale orphans exceed
+  // the operator-tunable threshold (default 5).
+  const ORPHAN_PAGE_THRESHOLD = Number(
+    process.env.ORPHAN_RECONCILER_PAGE_THRESHOLD ?? 5,
+  );
+  const shouldPageOnOrphans =
+    orphans.count >= ORPHAN_PAGE_THRESHOLD &&
+    !!process.env.RECONCILE_FAILURE_WEBHOOK_URL;
   if (!result.solvent && process.env.RECONCILE_FAILURE_WEBHOOK_URL) {
     void fireFailureWebhook(result).catch((webhookErr) => {
       console.error('[cron/reconcile] webhook fire failed:', webhookErr);
     });
+  } else if (shouldPageOnOrphans) {
+    void fireFailureWebhook({
+      ...result,
+      // Repurpose the webhook payload to surface the orphan signal.
+      reason: `${orphans.count} stale fenced claim(s) detected — investigate via npm run reconcile:orphans`,
+      orphanCount: orphans.count,
+    } as ReconciliationResult & { orphanCount: number }).catch((webhookErr) => {
+      console.error('[cron/reconcile] orphan webhook fire failed:', webhookErr);
+    });
   }
 
-  // Return 200 on solvent, 503 on insolvent. The body is the same
-  // shape either way so the monitor can parse it for detail.
-  return NextResponse.json(result, {
-    status: result.solvent ? 200 : 503,
-    headers: CORS_HEADERS,
-  });
+  // Return 200 on solvent (with orphan count in body), 503 on
+  // insolvent. The body is the same shape either way plus the
+  // orphan signal so the monitor can alert on either independently.
+  return NextResponse.json(
+    { ...result, orphanCount: orphans.count },
+    {
+      status: result.solvent ? 200 : 503,
+      headers: CORS_HEADERS,
+    },
+  );
 });
 
 /**
