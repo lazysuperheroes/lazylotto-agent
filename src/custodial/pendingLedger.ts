@@ -102,6 +102,17 @@ export async function listPendingLedgerAdjustments(): Promise<
 > {
   try {
     const redis = await getRedis();
+    // R10-FG-11 / Phase-9 Cluster E: LLEN short-circuit on the hot
+    // path. /api/user/status calls this on every dashboard mount +
+    // visibility refresh; the empty-queue case (the common case in
+    // production where pending entries live for at most a few
+    // hours) now returns after one cheap LLEN round-trip instead
+    // of paying the LRANGE+JSON-parse cost. The full per-user
+    // sharding (deferred per Phase-9 dissection §7) is a structural
+    // improvement; this is the cheap behavioral close that
+    // collapses the 99th percentile call cost.
+    const len = await redis.llen(LIST_KEY).catch(() => 0);
+    if (len === 0) return [];
     const raw = await redis.lrange(LIST_KEY, 0, -1);
     const entries: PendingLedgerAdjustment[] = [];
     for (const row of raw) {
@@ -179,6 +190,12 @@ export async function applyPendingLedgerForUser(
   } catch {
     return { applied: 0, failed: 0 };
   }
+
+  // R10-FG-11 / Phase-9 Cluster E: LLEN short-circuit. withUserLock
+  // calls this on every play / withdraw / register / status; the
+  // empty-queue case now exits after one cheap LLEN round-trip.
+  const len = await redis.llen(LIST_KEY).catch(() => 0);
+  if (len === 0) return { applied: 0, failed: 0 };
 
   const rawEntries = await redis
     .lrange(LIST_KEY, 0, -1)
@@ -405,6 +422,12 @@ export async function drainPendingLedgerAdjustments(
   } catch {
     return result;
   }
+
+  // R10-FG-11 / Phase-9 Cluster E: LLEN short-circuit on the
+  // periodic drain path too. The reconcile cron calls this hourly
+  // even when the queue is empty.
+  const len = await redis.llen(LIST_KEY).catch(() => 0);
+  if (len === 0) return result;
 
   const rawEntries = await redis.lrange(LIST_KEY, 0, -1).catch(() => [] as unknown[]);
 

@@ -740,6 +740,34 @@
       ],
       "revertDrill": null,
       "notes": "Phase-9 Cluster D. The bug-shape test simulates the full withUserLock production sequence (refreshUser -> drain -> fn() -> flush) so a Phase-8-ordering revert flips it. R10-FG-1 entry continues to track its named site (call-order + partial-failure replay); R11-FG-4 entry tracks the architectural close that addresses the sibling channel via mutation-after-anchor. The pendingLedgerAppliedSet unbounded-growth medium (P4-002 / R10) is DEFERRED — it is operational hygiene, not a load-bearing bug, per Phase-9 dissection §5 and §7."
+    },
+    {
+      "id": "R10-FG-12",
+      "round": "R10",
+      "severity": "high",
+      "coverageStrategy": "individual",
+      "summary": "Velocity counter inflation via INCRBY without DECRBY rollback. Compromised session retrying withdraw(1500) 10 times against a 1000 cap drove the counter to 15000; every legitimate withdraw for the next 24h returned 503. The pre-Phase-9 inline comment explicitly accepted this as \"intentionally lossy on the over-cap edge\" — but the framing missed the DoS attack vector against the victim user.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/MultiUserAgent.ts",
+            "lines": "applyWithdrawalVelocityCap over-cap branch now does INCRBY then DECRBY(amount) rollback; counter ends at the same value as if the increment had never run"
+          }
+        ],
+        "commit": "Phase-9 Cluster E"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/r10-fg-12-behavioral.test.ts",
+          "name": "counter ends at zero after 10 rejected over-cap attempts"
+        },
+        {
+          "file": "src/__tests__/r10-fg-12-behavioral.test.ts",
+          "name": "legitimate prior usage is preserved across a single rejected over-cap attempt"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-9 Cluster E. Bug-shape test scoped to the Redis primitive (incrby) — testing through the full MultiUserAgent path would require heavy mocking for what is fundamentally a 2-call atomic pattern. Test fixture mirrors the production rollback exactly; reverting the production over-cap branch flips the test against the same shape."
     }
   ]
 }

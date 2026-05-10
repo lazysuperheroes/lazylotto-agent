@@ -2554,21 +2554,32 @@ export class MultiUserAgent {
       // retries timed to a Redis-replication window.
       //
       // INCRBY is atomic on Upstash; we increment FIRST then check
-      // the result. If it overshot, we don't roll back (no atomic
-      // INCRBY-UNLESS-OVER primitive); instead we let it stand AND
-      // return the over-cap signal — the operator's withdraw-attempt
-      // would still fail, leaving the counter slightly inflated for
-      // the day. Net cost: a single rejected withdrawal raises the
-      // counter by `amount` but the user can't actually spend it.
-      // Far better than the pre-fix race where they COULD spend it.
-      // Velocity-cap counters are intentionally lossy on the
-      // over-cap edge (the cap is a safety rail, not a contract).
+      // the result.
+      //
+      // R10-FG-12 / Phase-9 Cluster E: ROLL BACK on the over-cap
+      // branch. Pre-Phase-9 the comment here said "we don't roll
+      // back ... velocity-cap counters are intentionally lossy on
+      // the over-cap edge" — accepting that a rejected withdrawal
+      // raises the counter by `amount`. R10-FG-12 surfaced the
+      // attack: a compromised session retrying `withdraw(1500)` 10
+      // times against a 1000 cap drives the counter to 15000, and
+      // every legitimate withdraw for the next 24h returns 503.
+      // The "user can't actually spend it" framing missed the
+      // point — the attacker's goal is DoS against the victim's
+      // withdraw modal, not theft. INCRBY then DECRBY(amount) on
+      // over-cap is a single extra atomic round-trip; the velocity
+      // counter ends up at the same value as if the increment had
+      // never run.
       const proposed = await redis.incrby(key, amount);
       // (Re)set TTL on every increment so the day-rolling window
       // refreshes from the most-recent activity.
       await redis.expire(key, 24 * 60 * 60);
 
       if (proposed > cap) {
+        // R10-FG-12 rollback: undo the increment so a rejected
+        // attempt doesn't permanently inflate the counter against
+        // the legitimate user.
+        await redis.incrby(key, -amount).catch(() => 0);
         recordRedisSuccess();
         return cap - proposed; // negative = over cap
       }
