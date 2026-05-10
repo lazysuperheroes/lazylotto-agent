@@ -77,20 +77,27 @@ export const FindingEntrySchema = z.object({
    *                           per-finding annotation requirement
    *                           is waived; the test-existence check
    *                           still runs.
-   *   - 'documentation-only' → entry exists for record-keeping only;
-   *                           no locking test at all.
+   *
+   * R11-FG-2 / Phase-9 Cluster A: `documentation-only` enum value
+   * was struck. Pre-Phase-9, 9 R9-FG entries used it to bypass the
+   * placebo gate via relabel — same archetype as R10-FG-4 one
+   * label up. Post-Phase-9 every manifest entry MUST lock at least
+   * one test (or a structural fixture). Entries whose fixes lack
+   * test coverage are dropped from the manifest and archived in
+   * docs/audit-archive-deferred.md so history is preserved without
+   * carrying false-coverage entries forward.
    */
   coverageStrategy: z
-    .enum(['individual', 'structural-gate', 'documentation-only'])
+    .enum(['individual', 'structural-gate'])
     .default('individual')
-    .describe('Phase-6 R8-FG-12 / R9-P10-008 Phase-7 default: explicit per-entry coverage strategy. Replaces accidental notes-substring exemption. Defaults to `individual` so a backport that omits the field gets the strictest setting (annotation cross-check required) rather than failing the whole gate at parse time.'),
+    .describe('Phase-6 R8-FG-12 / R9-P10-008 Phase-7 default. R11-FG-2 / Phase-9: documentation-only struck — every entry MUST lock a test (individual) or a structural gate. Defaults to individual so a backport that omits the field gets the strictest setting.'),
   fix: z.object({
     files: z.array(FixLocationSchema).min(1).describe('Source locations the fix touched'),
     commit: z.string().optional().describe('Git SHA (or a short prefix) where the fix landed'),
   }),
   tests: z
     .array(TestRefSchema)
-    .describe('Test blocks that should fail if the fix is reverted (may be empty for documentation-only entries)'),
+    .describe('Test blocks that should fail if the fix is reverted. Phase-9 Cluster A: every entry MUST link at least one test or a structural fixture; the empty-array exemption (formerly available via documentation-only) is gone.'),
   revertDrill: z
     .object({
       patch: z.string().describe('Filename under src/__tests__/revert-drills/ (e.g. "R6-FG-1.patch")'),

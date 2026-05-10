@@ -41,11 +41,13 @@ const USER = '0.0.7349994';
 const AGENT = '0.0.8456987';
 
 describe('R10-FG-3: parseRefund empty-original-deposit must produce a recoverable signal', () => {
-  // revert-proof: R10-FG-3 — removing the
+  // revert-proof: R10-FG-3 + R9-FG-11 — removing the
   // `stats.refundsDroppedEmptyOriginal` increment in
   // hcs20-reader.ts (or the stats-shape declaration) flips this
   // test. The dispatcher must emit a categorized signal that
-  // does NOT depend on softValidate's env gating.
+  // does NOT depend on softValidate's env gating. R9-FG-11 covered
+  // the reader-side empty-string defense at parseRefund line 1542;
+  // Phase-9 re-promoted that entry to link here.
   it('refund with empty originalDepositTxId either surfaces an event or a categorized stat', async () => {
     const refundMsg: RawTopicMessage = {
       sequence: 1,

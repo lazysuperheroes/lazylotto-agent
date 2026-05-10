@@ -125,8 +125,9 @@ describe('Phase-3 R7: audit-coverage gate', () => {
     for (const f of manifest.findings) {
       // Phase-6: explicit coverageStrategy waivers replace the
       // pre-Phase-6 notes-substring soft-allow.
+      // Phase-9 Cluster A: documentation-only struck (R11-FG-2);
+      // only structural-gate waiver remains.
       if (f.coverageStrategy === 'structural-gate') continue;
-      if (f.coverageStrategy === 'documentation-only') continue;
       // 'individual' coverage: every locking test MUST carry the
       // revert-proof annotation naming the finding id.
       for (const ref of f.tests) {
@@ -186,8 +187,8 @@ describe('Phase-3 R7: audit-coverage gate', () => {
       `Phase-3 placebo-by-elision: ${empty.length} entries declare ` +
         `coverageStrategy:'individual' but ship with tests:[]. ` +
         `Either populate tests:[...] with a real revert-proof-annotated ` +
-        `locking test, or downgrade to ` +
-        `coverageStrategy:'documentation-only' / 'structural-gate'. ` +
+        `locking test, or change to coverageStrategy:'structural-gate' ` +
+        `(only valid when locked by a structural fixture). ` +
         `Offending IDs: ${empty.map((f) => f.id).join(', ')}`,
     );
   });

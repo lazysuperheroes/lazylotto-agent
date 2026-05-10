@@ -251,8 +251,10 @@ function makeUser(userId: string, hbarAvailable: number): UserAccount {
 // ── Test ────────────────────────────────────────────────────────
 
 describe('R10-FG-1: pendingLedger eager drain must be idempotent across mid-protocol kill', () => {
-  // revert-proof: R10-FG-1 — call-order assertion. Reverting
-  // `pendingLedger.ts` to record SADD AFTER flush flips this test.
+  // revert-proof: R10-FG-1 + R9-FG-6 — call-order assertion. Reverting
+  // `pendingLedger.ts` to record SADD AFTER flush flips this test. Same
+  // ordering invariant Phase-7 Cluster E claimed for R9-FG-6 (Phase-9
+  // re-promoted that entry to link here).
   it('SADD records applied-set membership BEFORE flush', async () => {
     // Strong post-fix invariant: a single happy-path drain records
     // the applied-set entry before the persisted flush. Reverting to
@@ -299,9 +301,11 @@ describe('R10-FG-1: pendingLedger eager drain must be idempotent across mid-prot
     }
   });
 
-  // revert-proof: R10-FG-1 — end-to-end idempotence under
+  // revert-proof: R10-FG-1 + R9-FG-6 — end-to-end idempotence under
   // mid-protocol kill. Reverting the SADD-before-flush ordering or
   // re-introducing `.catch(() => 0)` on SADD/flush flips this test.
+  // Same body-idempotency invariant R9-FG-6 documented; Phase-9
+  // re-promoted R9-FG-6 to link here.
   it('partial-failure replay (SADD aborted) does not double-debit on next drain', async () => {
     // Save and replace the global Redis client so getRedis() returns
     // our mock for both pendingLedger and fencedClaim.

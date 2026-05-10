@@ -41,8 +41,9 @@ describe('R10-FG-4: manifest placebo gate (Phase-3 archetype recurrence)', () =>
         `coverageStrategy:'individual' but ship with tests:[]. ` +
         `The annotation cross-check at audit-coverage.test.ts:122-147 loops ` +
         `over the empty array → vacuous pass. ` +
-        `Either populate tests:[...] or downgrade to ` +
-        `coverageStrategy:'documentation-only'/'structural-gate'. ` +
+        `Either populate tests:[...] or change to ` +
+        `coverageStrategy:'structural-gate' (only when locked by a ` +
+        `structural fixture; documentation-only was struck in Phase-9). ` +
         `Offending IDs: ${empty.map((f) => f.id).join(', ')}`,
     );
   });

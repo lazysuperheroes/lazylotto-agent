@@ -1,0 +1,136 @@
+[
+  {
+    "id": "R9-FG-3",
+    "round": "R9",
+    "severity": "critical",
+    "coverageStrategy": "documentation-only",
+    "summary": "HCS20_SOFT_VALIDATE env never set in any production path; Phase-6 R8-FG-6 schema-drift detection shipped as silent no-op in cron + verify-audit + audit pages.",
+    "fix": {
+      "files": [
+        {
+          "file": "app/api/cron/reconcile/route.ts",
+          "lines": "process.env.HCS20_SOFT_VALIDATE = '1' at module load"
+        },
+        {
+          "file": "src/scripts/verify-audit.ts",
+          "lines": "process.env.HCS20_SOFT_VALIDATE = '1' at module load"
+        },
+        {
+          "file": "src/custodial/hcs20-reader.ts",
+          "lines": "maybeFireBootWarning() in parseAuditTopic"
+        },
+        {
+          "file": "docs/mainnet-deploy-checklist.md",
+          "lines": "HCS20_SOFT_VALIDATE env-var step"
+        }
+      ],
+      "commit": "uncommitted (Phase 7)"
+    },
+    "tests": [],
+    "revertDrill": null,
+    "notes": "Phase-7 Cluster A. coverageStrategy individual but tests array empty: the closure is wiring-side. The boot warning is exercised manually (Vercel deploy) but no synthetic test asserts the env is set at the cron route module load — that's a doc-level acceptance check (see mainnet-deploy-checklist.md). Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+  },
+  {
+    "id": "R9-FG-4",
+    "round": "R9",
+    "severity": "critical",
+    "coverageStrategy": "documentation-only",
+    "summary": "reconcileOrphans documented as cron-invoked but never imported by app/api/cron/reconcile/route.ts; orphan reconciler dead code in production.",
+    "fix": {
+      "files": [
+        {
+          "file": "app/api/cron/reconcile/route.ts",
+          "lines": "import + invoke reconcileOrphans + threshold webhook"
+        }
+      ],
+      "commit": "uncommitted (Phase 7)"
+    },
+    "tests": [],
+    "revertDrill": null,
+    "notes": "Phase-7 Cluster A. Closure is wiring-side; smoke test would require an integration harness against a synthetic Redis. Manual acceptance: cron route now imports reconcileOrphans (verified at ship time). Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+  },
+  {
+    "id": "R9-FG-1",
+    "round": "R9",
+    "severity": "critical",
+    "coverageStrategy": "documentation-only",
+    "summary": "heldByToken accumulator populated but never subtracted from ledgerBalanceByToken in verify-audit; R8-FG-24 closure was wire-only.",
+    "fix": {
+      "files": [
+        {
+          "file": "src/scripts/verify-audit.ts",
+          "lines": "per-token derivation subtracts heldByToken + depositCreditFlushOrphanedByToken; allTokens set extended"
+        }
+      ],
+      "commit": "uncommitted (Phase 7)"
+    },
+    "tests": [],
+    "revertDrill": null,
+    "notes": "Phase-7 Cluster B. Closure is in the derivation loop. The companion `user_balance_negative` alert (R9-P12-005) covers the regression — if heldByToken/depositCreditFlushOrphanedByToken subtractions are reverted, the alert won't fire on synthetic over-emit fixtures (would need a regression test). Tests array empty pending acceptance test; see notes. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+  },
+  {
+    "id": "R9-FG-2",
+    "round": "R9",
+    "severity": "critical",
+    "coverageStrategy": "documentation-only",
+    "summary": "depositCreditFlushOrphanedByToken accumulator populated but never subtracted; R6-FG-10 closure was wire-only.",
+    "fix": {
+      "files": [
+        {
+          "file": "src/scripts/verify-audit.ts",
+          "lines": "per-token derivation subtracts depositCreditFlushOrphanedByToken (same loop as R9-FG-1)"
+        }
+      ],
+      "commit": "uncommitted (Phase 7)"
+    },
+    "tests": [],
+    "revertDrill": null,
+    "notes": "Phase-7 Cluster B. Companion to R9-FG-1; same fix block. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+  },
+  {
+    "id": "R9-FG-13",
+    "round": "R9",
+    "severity": "high",
+    "coverageStrategy": "documentation-only",
+    "summary": "Typed error discriminants (RefundDuplicateError.kind, InFlightClaimError) thrown away at HTTP/MCP boundary; pre-fix returned plain 500 for every refund-duplicate kind.",
+    "fix": {
+      "files": [
+        {
+          "file": "app/api/_lib/errors.ts",
+          "lines": "NEW: mapErrorToResponse helper"
+        },
+        {
+          "file": "app/api/admin/refund/route.ts",
+          "lines": "use mapErrorToResponse in catch"
+        }
+      ],
+      "commit": "uncommitted (Phase 7)"
+    },
+    "tests": [],
+    "revertDrill": null,
+    "notes": "Phase-7 Cluster F. MCP tool route migration to mapErrorToResponse is partial; refund admin route is wired. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+  },
+  {
+    "id": "R9-FG-8",
+    "round": "R9",
+    "severity": "high",
+    "coverageStrategy": "documentation-only",
+    "summary": "RedisLike.scan signature declared cursor as number; Upstash returns string. Cast hid the mismatch; future callers trusting the type would loop forever on production.",
+    "fix": {
+      "files": [
+        {
+          "file": "src/auth/redis.ts",
+          "lines": "RedisLike.scan signature: cursor: string | number, return Promise<[string | number, string[]]>"
+        },
+        {
+          "file": "src/lib/orphanReconciler.ts",
+          "lines": "pass cursor through verbatim (no Number() coercion)"
+        }
+      ],
+      "commit": "uncommitted (Phase 7)"
+    },
+    "tests": [],
+    "revertDrill": null,
+    "notes": "Phase-7 Cluster G. In-memory mock returns numeric; Upstash returns string; both work via the union type. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+  }
+]

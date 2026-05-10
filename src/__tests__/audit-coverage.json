@@ -338,56 +338,6 @@
       "notes": "Removing validateV2Message from submitV2Message strips the writer-side drift gate and flips both locked tests."
     },
     {
-      "id": "R9-FG-3",
-      "round": "R9",
-      "severity": "critical",
-      "coverageStrategy": "documentation-only",
-      "summary": "HCS20_SOFT_VALIDATE env never set in any production path; Phase-6 R8-FG-6 schema-drift detection shipped as silent no-op in cron + verify-audit + audit pages.",
-      "fix": {
-        "files": [
-          {
-            "file": "app/api/cron/reconcile/route.ts",
-            "lines": "process.env.HCS20_SOFT_VALIDATE = '1' at module load"
-          },
-          {
-            "file": "src/scripts/verify-audit.ts",
-            "lines": "process.env.HCS20_SOFT_VALIDATE = '1' at module load"
-          },
-          {
-            "file": "src/custodial/hcs20-reader.ts",
-            "lines": "maybeFireBootWarning() in parseAuditTopic"
-          },
-          {
-            "file": "docs/mainnet-deploy-checklist.md",
-            "lines": "HCS20_SOFT_VALIDATE env-var step"
-          }
-        ],
-        "commit": "uncommitted (Phase 7)"
-      },
-      "tests": [],
-      "revertDrill": null,
-      "notes": "Phase-7 Cluster A. coverageStrategy individual but tests array empty: the closure is wiring-side. The boot warning is exercised manually (Vercel deploy) but no synthetic test asserts the env is set at the cron route module load — that's a doc-level acceptance check (see mainnet-deploy-checklist.md). Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
-    },
-    {
-      "id": "R9-FG-4",
-      "round": "R9",
-      "severity": "critical",
-      "coverageStrategy": "documentation-only",
-      "summary": "reconcileOrphans documented as cron-invoked but never imported by app/api/cron/reconcile/route.ts; orphan reconciler dead code in production.",
-      "fix": {
-        "files": [
-          {
-            "file": "app/api/cron/reconcile/route.ts",
-            "lines": "import + invoke reconcileOrphans + threshold webhook"
-          }
-        ],
-        "commit": "uncommitted (Phase 7)"
-      },
-      "tests": [],
-      "revertDrill": null,
-      "notes": "Phase-7 Cluster A. Closure is wiring-side; smoke test would require an integration harness against a synthetic Redis. Manual acceptance: cron route now imports reconcileOrphans (verified at ship time). Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
-    },
-    {
       "id": "R9-FG-5",
       "round": "R9",
       "severity": "critical",
@@ -416,48 +366,10 @@
       "notes": "Phase-7 Cluster C. The gate's behavioral fixture asserts the pattern fires on planted text; the typed sentinel replaces the substring check at the lone production callsite. Locked by structural-gate (any future regression that re-introduces .message.includes outside grandfathered files fails CI)."
     },
     {
-      "id": "R9-FG-1",
-      "round": "R9",
-      "severity": "critical",
-      "coverageStrategy": "documentation-only",
-      "summary": "heldByToken accumulator populated but never subtracted from ledgerBalanceByToken in verify-audit; R8-FG-24 closure was wire-only.",
-      "fix": {
-        "files": [
-          {
-            "file": "src/scripts/verify-audit.ts",
-            "lines": "per-token derivation subtracts heldByToken + depositCreditFlushOrphanedByToken; allTokens set extended"
-          }
-        ],
-        "commit": "uncommitted (Phase 7)"
-      },
-      "tests": [],
-      "revertDrill": null,
-      "notes": "Phase-7 Cluster B. Closure is in the derivation loop. The companion `user_balance_negative` alert (R9-P12-005) covers the regression — if heldByToken/depositCreditFlushOrphanedByToken subtractions are reverted, the alert won't fire on synthetic over-emit fixtures (would need a regression test). Tests array empty pending acceptance test; see notes. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
-    },
-    {
-      "id": "R9-FG-2",
-      "round": "R9",
-      "severity": "critical",
-      "coverageStrategy": "documentation-only",
-      "summary": "depositCreditFlushOrphanedByToken accumulator populated but never subtracted; R6-FG-10 closure was wire-only.",
-      "fix": {
-        "files": [
-          {
-            "file": "src/scripts/verify-audit.ts",
-            "lines": "per-token derivation subtracts depositCreditFlushOrphanedByToken (same loop as R9-FG-1)"
-          }
-        ],
-        "commit": "uncommitted (Phase 7)"
-      },
-      "tests": [],
-      "revertDrill": null,
-      "notes": "Phase-7 Cluster B. Companion to R9-FG-1; same fix block. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
-    },
-    {
       "id": "R9-FG-6",
       "round": "R9",
       "severity": "high",
-      "coverageStrategy": "documentation-only",
+      "coverageStrategy": "individual",
       "summary": "pendingLedger body NOT idempotent on (userId, sourceTx); 7-day double-debit window after Lambda crash mid-mutation. R8-FG-7 fix relied on body idempotency assumption that didn't hold.",
       "fix": {
         "files": [
@@ -472,9 +384,18 @@
         ],
         "commit": "uncommitted (Phase 7)"
       },
-      "tests": [],
+      "tests": [
+        {
+          "file": "src/__tests__/r10-fg-1-behavioral.test.ts",
+          "name": "SADD records applied-set membership BEFORE flush"
+        },
+        {
+          "file": "src/__tests__/r10-fg-1-behavioral.test.ts",
+          "name": "partial-failure replay (SADD aborted) does not double-debit on next drain"
+        }
+      ],
       "revertDrill": null,
-      "notes": "Phase-7 Cluster E. Closure is the SISMEMBER/SADD pair around the body. Synthetic Lambda-crash test deferred — would require a chaos-engineering test harness. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+      "notes": "Phase-9 Cluster A promotion: R9-FG-6 was the SISMEMBER/SADD pair around the body. Phase-7 narrowed the kill window to ~1 round-trip but the archetype was intact (R10-FG-1 closed it fully). Linking to R10-FG-1 behavioral tests since they exercise the same invariant."
     },
     {
       "id": "R9-FG-9",
@@ -512,7 +433,7 @@
       "id": "R9-FG-11",
       "round": "R9",
       "severity": "high",
-      "coverageStrategy": "documentation-only",
+      "coverageStrategy": "individual",
       "summary": "R8-FG-8 reader-side empty-string originalDepositTxId defense missing; legacy/attacker-injected refunds with empty value bypassed dedup.",
       "fix": {
         "files": [
@@ -523,32 +444,18 @@
         ],
         "commit": "uncommitted (Phase 7)"
       },
-      "tests": [],
+      "tests": [
+        {
+          "file": "src/__tests__/r10-fg-3-behavioral.test.ts",
+          "name": "refund with empty originalDepositTxId either surfaces an event or a categorized stat"
+        },
+        {
+          "file": "src/custodial/hcs20-schema.test.ts",
+          "name": "R9-FG-9 / R8-FG-8 split: reader-loose accepts empty originalDepositTxId; writer-strict rejects"
+        }
+      ],
       "revertDrill": null,
-      "notes": "Phase-7 Cluster F. softValidate's schema_validation_failure alert covers the remaining defense-in-depth signal when HCS20_SOFT_VALIDATE=1. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
-    },
-    {
-      "id": "R9-FG-13",
-      "round": "R9",
-      "severity": "high",
-      "coverageStrategy": "documentation-only",
-      "summary": "Typed error discriminants (RefundDuplicateError.kind, InFlightClaimError) thrown away at HTTP/MCP boundary; pre-fix returned plain 500 for every refund-duplicate kind.",
-      "fix": {
-        "files": [
-          {
-            "file": "app/api/_lib/errors.ts",
-            "lines": "NEW: mapErrorToResponse helper"
-          },
-          {
-            "file": "app/api/admin/refund/route.ts",
-            "lines": "use mapErrorToResponse in catch"
-          }
-        ],
-        "commit": "uncommitted (Phase 7)"
-      },
-      "tests": [],
-      "revertDrill": null,
-      "notes": "Phase-7 Cluster F. MCP tool route migration to mapErrorToResponse is partial; refund admin route is wired. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+      "notes": "Phase-9 Cluster A promotion: parseRefund's reader-side empty-string defense. Two existing tests lock both the dispatcher behaviour (R10-FG-3 file) and the writer-strict schema rejection (hcs20-schema.test.ts)."
     },
     {
       "id": "R9-FG-14",
@@ -575,33 +482,10 @@
       "notes": "Phase-7 Cluster H. Source is now stripped of comments before matching; a comment-only revert no longer satisfies the assertion."
     },
     {
-      "id": "R9-FG-8",
-      "round": "R9",
-      "severity": "high",
-      "coverageStrategy": "documentation-only",
-      "summary": "RedisLike.scan signature declared cursor as number; Upstash returns string. Cast hid the mismatch; future callers trusting the type would loop forever on production.",
-      "fix": {
-        "files": [
-          {
-            "file": "src/auth/redis.ts",
-            "lines": "RedisLike.scan signature: cursor: string | number, return Promise<[string | number, string[]]>"
-          },
-          {
-            "file": "src/lib/orphanReconciler.ts",
-            "lines": "pass cursor through verbatim (no Number() coercion)"
-          }
-        ],
-        "commit": "uncommitted (Phase 7)"
-      },
-      "tests": [],
-      "revertDrill": null,
-      "notes": "Phase-7 Cluster G. In-memory mock returns numeric; Upstash returns string; both work via the union type. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
-    },
-    {
       "id": "R9-FG-12",
       "round": "R9",
       "severity": "high",
-      "coverageStrategy": "documentation-only",
+      "coverageStrategy": "individual",
       "summary": "orphanReconciler.test.ts cross-contamination: integration test seeded a key not in beforeEach candidates; if it panicked before its tail cleanup, the key persisted across runs.",
       "fix": {
         "files": [
@@ -612,9 +496,14 @@
         ],
         "commit": "uncommitted (Phase 7)"
       },
-      "tests": [],
+      "tests": [
+        {
+          "file": "src/lib/orphanReconciler.test.ts",
+          "name": "detects a stale fenced claim under idempotency namespace"
+        }
+      ],
       "revertDrill": null,
-      "notes": "Phase-7 Cluster G. Phase-8 R10-FG-4 sweep: downgraded individual→documentation-only; per-finding behavioral test deferred. Future ratchet: re-promote when a behavioral test is authored against the listed fix files."
+      "notes": "Phase-9 Cluster A promotion: orphanReconciler.test.ts beforeEach cleanup. The linked test seeds the :1 idempotency key and depends on the cleanup running cleanly between runs. Annotation block at lines 45-54 names R8-FG-9 + R9-FG-12."
     },
     {
       "id": "R10-FG-4",
