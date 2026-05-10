@@ -768,6 +768,58 @@
       ],
       "revertDrill": null,
       "notes": "Phase-9 Cluster E. Bug-shape test scoped to the Redis primitive (incrby) — testing through the full MultiUserAgent path would require heavy mocking for what is fundamentally a 2-call atomic pattern. Test fixture mirrors the production rollback exactly; reverting the production over-cap branch flips the test against the same shape."
+    },
+    {
+      "id": "R12-FG-4",
+      "round": "R12",
+      "severity": "high",
+      "coverageStrategy": "individual",
+      "summary": "Phase-9 Cluster B claimed parseRefund discriminates 5 null-return reasons but shipped a 4-branch dispatcher that re-derived the categorization from the raw payload AFTER bare-null returns. A future 6th null reason would fall through all four dispatcher branches and re-open R11-FG-1 over-credit. Multi-cause refunds attributed to the FIRST matched bucket only — per-counter arithmetic was wrong.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/hcs20-reader.ts",
+            "lines": "parseRefund returns NormalizedRefundEvent | ParseRefundFailure tagged union; dispatcher uses an exhaustive switch with  exhaustiveness check"
+          }
+        ],
+        "commit": "Phase-9.5 Cluster F"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/r10-fg-3-behavioral.test.ts",
+          "name": "each null-return reason increments its own categorized counter"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-9.5 Cluster F. Tagged-union return + exhaustive switch turns a future 6th parseRefund failure mode into a TypeScript exhaustiveness error rather than a silent skip. The bug-shape test was already in place from Phase-9 Cluster B; the type-level fix is additional belt-and-braces."
+    },
+    {
+      "id": "R12-FG-5",
+      "round": "R12",
+      "severity": "high",
+      "coverageStrategy": "structural-gate",
+      "summary": "structural-gate enum value was the new Goodhart escape after R11-FG-2 struck documentation-only. tests Zod array had no .min(1); annotation cross-check + placebo gate both skipped structural-gate entries; a fresh entry with structural-gate + tests:[] passed every gate vacuously. Same archetype as R10-FG-4 one label deeper.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/__tests__/audit-coverage-scan.ts",
+            "lines": "tests array gains .min(1) Zod refine — every entry MUST link at least one test, full stop"
+          },
+          {
+            "file": "src/__tests__/audit-coverage.test.ts",
+            "lines": "R12-FG-5 it() block enforces structural-gate entries link a recognized structural fixture (allowlist: sibling-archetype-gate, claim-archetype-gate, audit-coverage, r10-fg-4-behavioral)"
+          }
+        ],
+        "commit": "Phase-9.5 Cluster F"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/audit-coverage.test.ts",
+          "name": "R12-FG-5: structural-gate entries link a recognized structural fixture"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-9.5 Cluster F. coverageStrategy:structural-gate because the gate IS a structural fixture (the audit-coverage test file itself)."
     }
   ]
 }

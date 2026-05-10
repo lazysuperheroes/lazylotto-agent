@@ -424,6 +424,30 @@ export const POST = withStore(async (request: Request) => {
       // R4-FG-7 wired body-level dedup for play_uncertain triage; this
       // route-level recordControlEvent was the sibling miss.
       const fenceTs = entry.timestamp ? new Date(entry.timestamp).getTime() : 0;
+      // R12-FG-1 / Phase-9.5 Cluster F: thread userId + tokenReservations
+      // from the dead-letter entry's `details` into the control event.
+      // Pre-Phase-9.5 these were dropped, which made Phase-9 Cluster B's
+      // verify-audit heldByToken decrement (gated on
+      // `event.userId && event.tokenReservations`) DEAD CODE on every
+      // production force_release. Operator triaging a play_uncertain
+      // would still trip the false-positive `user_balance_negative`
+      // alert that R10-FG-16 was supposedly fixed for. The shape mirrors
+      // the play_uncertain_success_pending_triage writer at
+      // handlers.ts:807 — same pattern, just wasn't extended here.
+      const eventUserId =
+        typeof entry.details?.userId === 'string' && entry.details.userId.length > 0
+          ? entry.details.userId
+          : undefined;
+      const eventTokenReservations = Array.isArray(entry.details?.tokenReservations)
+        ? (entry.details.tokenReservations as Array<{ token: string; amount: number }>).filter(
+            (r) =>
+              r &&
+              typeof r.token === 'string' &&
+              typeof r.amount === 'number' &&
+              Number.isFinite(r.amount) &&
+              r.amount > 0,
+          )
+        : undefined;
       await accounting.recordControlEvent('force_release', {
         by: auth.accountId,
         reason,
@@ -431,6 +455,10 @@ export const POST = withStore(async (request: Request) => {
         kind: entry.kind,
         mirrorResult,
         idempotencyKey: `force-release:${id}:${fenceTs}`,
+        ...(eventUserId ? { userId: eventUserId } : {}),
+        ...(eventTokenReservations && eventTokenReservations.length > 0
+          ? { tokenReservations: eventTokenReservations }
+          : {}),
       });
     } catch (auditErr) {
       auditAnchorFailed = true;

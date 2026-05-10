@@ -97,7 +97,8 @@ export const FindingEntrySchema = z.object({
   }),
   tests: z
     .array(TestRefSchema)
-    .describe('Test blocks that should fail if the fix is reverted. Phase-9 Cluster A: every entry MUST link at least one test or a structural fixture; the empty-array exemption (formerly available via documentation-only) is gone.'),
+    .min(1)
+    .describe('Test blocks that should fail if the fix is reverted. Phase-9 Cluster A struck `documentation-only`; Phase-9.5 Cluster F (R12-FG-5) adds `.min(1)` to enforce non-empty at parse time. Pre-Phase-9.5 the gate enforced non-empty for `coverageStrategy:individual` only — `structural-gate` entries with empty tests passed every gate vacuously, the same Goodhart escape one label deeper. Now every entry MUST link at least one test or a structural fixture, full stop.'),
   revertDrill: z
     .object({
       patch: z.string().describe('Filename under src/__tests__/revert-drills/ (e.g. "R6-FG-1.patch")'),

@@ -869,9 +869,21 @@ export class MultiUserAgent {
         ),
       };
 
-      // Record play session and persist user (lastPlayedAt already set above)
+      // Record play session. The user record was already persisted at
+      // line 736 via saveUser({...user, lastPlayedAt: ...}); balance
+      // changes are persisted via this.ledger.settleSpend ->
+      // store.updateBalance internally.
+      //
+      // R12-FG-2 / Phase-9.5 Cluster F: the explicit `this.store.saveUser(user)`
+      // that previously stood here was redundant post-Phase-9 AND
+      // actively harmful — it re-persisted the original Readonly
+      // snapshot bound at line 534, REVERTING the lastPlayedAt update
+      // from line 736. Pre-Phase-9 the `user` reference was mutated in
+      // place (so it carried the new timestamp by line 874), which
+      // masked the redundancy. Phase-9's Readonly migration broke the
+      // mutation path; the redundant saveUser then surfaced as a
+      // sibling-site regression of R10-FG-2's archetype.
       this.store.recordPlaySession(session);
-      this.store.saveUser(user);
 
       // Dead-letter the failure (Task B). When phase 5 exhausts the
       // retry ladder we record a structured entry the operator can

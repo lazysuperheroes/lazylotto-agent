@@ -59,15 +59,22 @@ function refundMsg(seq: number, payload: Record<string, unknown>): RawTopicMessa
 }
 
 describe('R10-FG-3 + R11-FG-1 + R11-FG-5: parseRefund null-drops are categorized per reason', () => {
-  // revert-proof: R10-FG-3 + R11-FG-1 + R11-FG-5 + R9-FG-11 —
-  // bug-shape test, not signal-shape. Asserts that EACH of the four
+  // revert-proof: R10-FG-3 + R11-FG-1 + R11-FG-5 + R12-FG-4 + R9-FG-11
+  // — bug-shape test, not signal-shape. Asserts that EACH of the four
   // discriminated null-return reasons increments its OWN counter on
   // `result.stats.refundsDropped*`. Reverting the dispatcher's per-
   // reason categorization (hcs20-reader.ts inside the `op === 'refund'`
   // branch) flips one or more of these assertions. R11-FG-1 is closed
   // end-to-end by verify-audit's `refund_dropped_malformed` alert
-  // pipeline (consumer-wired) — see `verify-audit.ts`'s
-  // `droppedReasons` loop for the consumer.
+  // pipeline (consumer-wired). R12-FG-4 / Phase-9.5 made parseRefund
+  // return a tagged-union ParseRefundFailure type so the dispatcher
+  // consumes the categorization at the type level (any future 6th
+  // reason becomes a TypeScript exhaustiveness error) — this test
+  // continues to lock the runtime behavior; the type-level lock is
+  // additional belt-and-braces.
+  // revert-proof: R10-FG-3 + R11-FG-1 + R11-FG-5 + R12-FG-4 + R9-FG-11
+  // (close-to-test annotation for the audit-coverage gate's 10-line
+  // lookback).
   it('each null-return reason increments its own categorized counter', async () => {
     const messages: RawTopicMessage[] = [
       // 1. empty originalDepositTxId

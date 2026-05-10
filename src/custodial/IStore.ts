@@ -149,7 +149,15 @@ export interface IStore {
   updateBalance(userId: string, updater: (b: UserBalances) => UserBalances): UserBalances;
 
   // ── Operator ───────────────────────────────────────────────────
-  getOperator(): OperatorState;
+  /**
+   * R12-FG-3 / Phase-9.5 Cluster F: `Readonly<OperatorState>` mirrors
+   * the `Readonly<UserAccount>` migration in Cluster C. Pre-Phase-9.5
+   * this returned a mutable reference to the cached `RedisStore.operator`
+   * — same archetype as R10-FG-2 just on the operator surface. Any
+   * caller doing `op.balances[token] = ...` would have mutated the
+   * live cache. Mutation goes through `updateOperator(updater)`.
+   */
+  getOperator(): Readonly<OperatorState>;
   updateOperator(updater: (s: OperatorState) => OperatorState): OperatorState;
 
   // ── Deposits ───────────────────────────────────────────────────

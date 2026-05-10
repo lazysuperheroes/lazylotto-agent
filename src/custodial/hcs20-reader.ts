@@ -646,32 +646,51 @@ export async function parseAuditTopic(
     // ── refund (v2) ────────────────────────────────────────
     if (op === 'refund') {
       stats.v2Messages++;
-      const ev = parseRefund(msg);
-      if (!ev) {
+      const parsed = parseRefund(msg);
+      // R10-FG-3 + R11-FG-5 + R12-FG-4 / Phase-9.5 Cluster F:
+      // tagged-union dispatch. parseRefund returns either a
+      // NormalizedRefundEvent (has `type: 'refund'`) or a
+      // ParseRefundFailure (has `reason` only). Discriminate via
+      // `type` because NormalizedRefundEvent itself carries a
+      // `reason: string` field for the refund's user-facing reason —
+      // `'reason' in parsed` is true for BOTH variants and would
+      // mis-discriminate.
+      //
+      // Pre-Phase-9.5 the dispatcher re-derived the categorization
+      // from the raw payload AFTER bare-null returns from parseRefund
+      // — a refund with both empty `originalDepositTxId` AND empty
+      // `refundTxId` would increment ONLY refundsDroppedEmptyOriginal
+      // (per-counter arithmetic was wrong), and a future 6th reason
+      // added to parseRefund would fall through all four dispatcher
+      // branches and re-open the R11-FG-1 over-credit signature. The
+      // exhaustive switch turns any future 6th reason into a
+      // TypeScript error.
+      if (!('type' in parsed)) {
         stats.skippedMessages++;
-        // R10-FG-3 + R11-FG-5 / Phase-9 Cluster B: categorize ALL
-        // FIVE null-return reasons from parseRefund (not just
-        // empty-original). Pre-Phase-9 four of the five fell into
-        // the catch-all `skippedMessages` counter and verify-audit
-        // reconstructed user balances OVER-CREDITED by the dropped
-        // refund amount. Now each reason has its own counter that
-        // verify-audit fires as a categorized alert.
-        const orig = String(msg.payload.originalDepositTxId ?? '');
-        const from = String(msg.payload.from ?? '');
-        const to = String(msg.payload.to ?? '');
-        const amt = Number(msg.payload.amt);
-        const refundTxId = String(msg.payload.refundTxId ?? '');
-        if (!orig) {
-          stats.refundsDroppedEmptyOriginal++;
-        } else if (!from || !to) {
-          stats.refundsDroppedMissingParty++;
-        } else if (!Number.isFinite(amt)) {
-          stats.refundsDroppedInvalidAmt++;
-        } else if (!refundTxId) {
-          stats.refundsDroppedMissingRefundTx++;
+        switch (parsed.reason) {
+          case 'empty-original-deposit-tx-id':
+            stats.refundsDroppedEmptyOriginal++;
+            break;
+          case 'missing-from-or-to':
+            stats.refundsDroppedMissingParty++;
+            break;
+          case 'invalid-amt':
+            stats.refundsDroppedInvalidAmt++;
+            break;
+          case 'missing-refund-tx-id':
+            stats.refundsDroppedMissingRefundTx++;
+            break;
+          default: {
+            // Exhaustiveness check. If a new ParseRefundFailureReason
+            // is added without a corresponding dispatcher branch,
+            // this assertion fails at compile time.
+            const _exhaustive: never = parsed.reason;
+            void _exhaustive;
+          }
         }
         continue;
       }
+      const ev = parsed;
       // R4-FG-58 (round-4 medium): skip duplicate refund anchors with
       // the same refundTxId. A retry of `recordRefund` after a partial
       // failure can emit two anchors for one logical refund; without
@@ -1573,23 +1592,48 @@ function parseV1Burn(
   };
 }
 
-function parseRefund(msg: RawTopicMessage): NormalizedRefundEvent | null {
+/**
+ * R12-FG-4 / Phase-9.5 Cluster F: parseRefund returns a discriminated
+ * tagged-union failure type so the dispatcher receives the
+ * categorization at the type level. Pre-Phase-9.5 the dispatcher
+ * re-derived the categorization from the raw payload AFTER parseRefund
+ * returned bare null — meaning a future 6th null-return reason added
+ * to parseRefund would silently fall through all four dispatcher
+ * branches and re-open the R11-FG-1 over-credit signature. The
+ * tagged-union shape makes that future regression a TypeScript error
+ * instead of a silent skip. Also: a refund with multiple missing
+ * fields no longer randomly attributes to whichever-field-was-checked-first
+ * — parseRefund returns the FIRST encountered reason and the dispatcher
+ * increments exactly one counter, deterministically.
+ */
+type ParseRefundFailureReason =
+  | 'empty-original-deposit-tx-id'
+  | 'missing-from-or-to'
+  | 'invalid-amt'
+  | 'missing-refund-tx-id';
+
+interface ParseRefundFailure {
+  reason: ParseRefundFailureReason;
+}
+
+function parseRefund(
+  msg: RawTopicMessage,
+): NormalizedRefundEvent | ParseRefundFailure {
   const from = String(msg.payload.from ?? '');
   const to = String(msg.payload.to ?? '');
   const amt = Number(msg.payload.amt);
   const originalDepositTxId = String(msg.payload.originalDepositTxId ?? '');
   const refundTxId = String(msg.payload.refundTxId ?? '');
   // R9-FG-11 / Phase-7 Cluster F: reader-side empty-string defense
-  // for originalDepositTxId. Closes R8-FG-8 PARTIAL — the writer
-  // strict schema rejects new emissions with empty values, but
-  // legacy/attacker-injected topic messages with empty
-  // originalDepositTxId still reached the reader and bypassed dedup
-  // (truthy `if (orig)` check at the dedup gate). Empty-string is a
-  // wire-level integrity failure; refuse to emit a normalized event.
-  // The softValidate dispatch will record this as
-  // schema_validation_failure when HCS20_SOFT_VALIDATE is on.
-  if (!originalDepositTxId) return null;
-  if (!from || !to || !Number.isFinite(amt) || !refundTxId) return null;
+  // for originalDepositTxId. Closes R8-FG-8 PARTIAL — legacy/
+  // attacker-injected topic messages with empty originalDepositTxId
+  // bypassed the dedup gate before. R12-FG-4 / Phase-9.5: each
+  // null-return reason is now tagged so the dispatcher categorizes
+  // by type rather than re-parsing the payload.
+  if (!originalDepositTxId) return { reason: 'empty-original-deposit-tx-id' };
+  if (!from || !to) return { reason: 'missing-from-or-to' };
+  if (!Number.isFinite(amt)) return { reason: 'invalid-amt' };
+  if (!refundTxId) return { reason: 'missing-refund-tx-id' };
   // R6-FG-7: extract rake reversal so verify-audit reducers can
   // apply operator-balance corrections. Pre-fix this was silently
   // dropped, leaving operator-balance reconstruction short.

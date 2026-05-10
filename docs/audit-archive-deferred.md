@@ -21,13 +21,13 @@ This file documents path 2.
 
 ## R9-FG-1 — `heldByToken` accumulator not subtracted in per-token derivation
 **Originally:** R9 critical. Phase-7 Cluster B closed the named site at `src/scripts/verify-audit.ts` per-token derivation loop.
-**Why deferred:** No per-finding test was authored. Phase-9 Cluster B authors a single conservation-invariant test (`r11-conservation-invariant.behavioral.test.ts`) that asserts the user balance reconstruction obeys conservation invariant 3 across a synthetic topic with `play_uncertain_success_pending_triage` events. That test subsumes R9-FG-1 and R9-FG-2 collectively.
-**Where to find evidence the fix is in place:** `src/scripts/verify-audit.ts:1389-1400` (per-token loop subtracts held + flushOrphan).
+**Why deferred:** No per-finding behavioral test was authored. The Phase-9 dissection initially proposed a `r11-conservation-invariant.behavioral.test.ts` that would subsume R9-FG-1 + R9-FG-2 collectively, but Phase-9 Cluster B did not author that test (extracting `verify-audit.ts`'s reduction loop into an exportable function was deemed too large a refactor for the cluster's scope; see `docs/audit-2026-05-10-round12.md` §"R12-FG-6" for the R12 finding that flagged this rationale gap).
+**Effective coverage today:** the fix at `src/scripts/verify-audit.ts:1389-1400` (per-token loop subtracts held + flushOrphan) is locked only by `tsc` + manual review. A regression that re-removes the subtraction would not flip any test in CI today. Acceptable per the Phase-9.5 scope decision (R12-FG-3 / R12-FG-4 / R12-FG-5 took priority); a future round may author the conservation-invariant test if regression risk surfaces.
 
 ## R9-FG-2 — `depositCreditFlushOrphanedByToken` accumulator not subtracted
 **Originally:** R9 critical. Companion to R9-FG-1; same fix block.
-**Why deferred:** Same as R9-FG-1. Subsumed by Phase-9 Cluster B conservation-invariant test.
-**Where to find evidence:** `src/scripts/verify-audit.ts:1392-1402`.
+**Why deferred:** Same as R9-FG-1. The promised subsumption by a conservation-invariant test was not authored in Phase-9 (see R9-FG-1 above).
+**Effective coverage today:** locked by `tsc` + manual review at `src/scripts/verify-audit.ts:1392-1402`.
 
 ## R9-FG-3 — `HCS20_SOFT_VALIDATE` env never set in production
 **Originally:** R9 critical. Phase-7 Cluster A wired the env into cron + verify-audit module-load and added a boot warning.

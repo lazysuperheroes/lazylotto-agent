@@ -193,6 +193,47 @@ describe('Phase-3 R7: audit-coverage gate', () => {
     );
   });
 
+  // revert-proof: R12-FG-5 / Phase-9.5 Cluster F — structural-gate
+  // entries must point at a recognized structural fixture file.
+  // Pre-Phase-9.5 a fresh entry with `coverageStrategy:'structural-gate'`
+  // and `tests:[{file:'src/lib/fencedClaim.test.ts', name:'PRESERVES the
+  // claim'}]` (or any unrelated real test) passed every gate — same
+  // archetype as R10-FG-4's `documentation-only` loophole one label
+  // deeper. The allowlist below is the canonical set of structural
+  // fixtures; new fixtures can be added explicitly when the project
+  // ships them. Removing this gate or expanding the allowlist without
+  // a real fixture flips this test.
+  it('R12-FG-5: structural-gate entries link a recognized structural fixture', () => {
+    const STRUCTURAL_FIXTURES = new Set([
+      'src/__tests__/sibling-archetype-gate.test.ts',
+      'src/__tests__/claim-archetype-gate.test.ts',
+      'src/__tests__/audit-coverage.test.ts',
+      'src/__tests__/r10-fg-4-behavioral.test.ts',
+    ]);
+    const manifest = loadManifest();
+    const violators: string[] = [];
+    for (const f of manifest.findings) {
+      if (f.coverageStrategy !== 'structural-gate') continue;
+      const linksAStructuralFixture = f.tests.some((t) =>
+        STRUCTURAL_FIXTURES.has(t.file),
+      );
+      if (!linksAStructuralFixture) {
+        violators.push(
+          `${f.id}: structural-gate entry links no recognized structural fixture. ` +
+            `Linked: [${f.tests.map((t) => t.file).join(', ')}]`,
+        );
+      }
+    }
+    assert.equal(
+      violators.length,
+      0,
+      `Phase-9.5 R12-FG-5: structural-gate entries must link at least one ` +
+        `recognized structural fixture (in: ${[...STRUCTURAL_FIXTURES].join(', ')}). ` +
+        `Adding new structural fixtures requires explicit allowlist update here. ` +
+        `Violators:\n  ` + violators.join('\n  '),
+    );
+  });
+
   // smoke-only: surfaces the count + drill availability for visual
   // CI inspection. The other tests do the actual gating.
   it('coverage status snapshot', () => {
