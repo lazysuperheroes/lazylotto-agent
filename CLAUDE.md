@@ -145,6 +145,10 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Three deployment
 11. Registration dedup: `getUserByAccountId` check prevents accidental double-registration
 12. **HCS-20 v2 audit trail is load-bearing**: every play session writes open + N pool_results + close (or aborted). `AccountingService.submitV2Message` hard-fails on >1024 byte messages. `agentSeq` is a monotonic per-agent counter backed by Redis `INCR` (cross-Lambda atomic), seeded once via mirror-scan + `SETNX`.
 13. **Cross-Lambda dedup must hit Redis through atomic primitives** — never read in-process state for correctness across instances. The three primitives: `SADD`-based claim (deposit credit, dead-letter id), `SET NX EX`-based lock (refund replay, user/operator locks), `INCR`-based counter (agentSeq). The local-cache `isTransactionProcessed` is retained ONLY as a soft pre-loop short-circuit where downstream paths are atomic; correctness-critical reads use `isDepositCredited` (Redis SISMEMBER). See `docs/concurrency-invariants.md` for the rule, the primitives, and the table of live invariants. Adding a new shared-state read requires a regression test in `src/custodial/concurrency-invariants.test.ts`.
+14. **Store cache is read-only at the boundary**: `IStore.getUser*` returns `Readonly<UserAccount>`; `IStore.getOperator()` returns `Readonly<OperatorState>`; `IStore.getAllUsers()` returns `ReadonlyArray<Readonly<UserAccount>>`. Mutations route through `updateBalance(updater)`, `updateOperator(updater)`, or `saveUser(freshObject)` — never by direct property assignment on a returned reference. Closes the R10-FG-2 / R11-FG-3 / R12-FG-3 archetype family at compile time.
+15. **pendingLedger drain anchors BEFORE mutation**: `applyPendingLedgerForUser` and `drainPendingLedgerAdjustments` both call `redis.sadd(pendingLedgerAppliedSet, key)` BEFORE `store.updateBalance` and `store.flush`. Order is: SISMEMBER (skip if applied) → SADD anchor → updateBalance → updateOperator → flush → LREM. A SADD throw aborts before any in-memory mutation; a flush throw leaves the anchor as a poison-pill (next drain takes the already-applied branch). This is R10-FG-1 + R11-FG-4 + R12-FG-2's archetype family; the order is load-bearing.
+16. **All balance-bearing routes call `composeBalanceResponse`**: `/api/user/status`, `/api/user/check-deposits`, `/api/user/play`, `/api/user/withdraw` MUST use the shared `app/api/_lib/composeBalances.ts` helper to compose `responseBalances` + `pendingAdjustments`. Never return raw `user.balances` from any of these routes — the dashboard's merge-back paths assume the wire shape is uniform across routes (R11-FG-3 closure).
+17. **parseRefund returns a discriminated tagged union**: `NormalizedRefundEvent | ParseRefundFailure` where `ParseRefundFailure` carries a `reason: 'empty-original-deposit-tx-id' | 'missing-from-or-to' | 'invalid-amt' | 'missing-refund-tx-id'`. The dispatcher uses an exhaustive `switch` with a `never` exhaustiveness check — adding a new failure reason without a corresponding dispatcher case is a TypeScript compile error. Closes R10-FG-3 / R11-FG-1 / R11-FG-5 / R12-FG-4 family at the type level.
 
 ## Local Development Without Redis
 
@@ -173,7 +177,7 @@ npm run setup            — First-time wallet setup
 npm run status           — Check wallet balances
 npm run audit            — Configuration audit
 npm run wizard           — Interactive .env setup
-npm test                 — Run test suite (380 tests)
+npm test                 — Run test suite (~750 tests)
 npm run build            — Compile + shebang injection
 npm run build:web        — Next.js production build
 npm run smoke-test       — Auth flow smoke test
@@ -214,10 +218,31 @@ npx tsx src/scripts/test-v2-reader.ts
 
 ## Documentation
 
-`docs/` contains operational + user-facing material only. Bootstrap design docs
-and shipped PRDs live under `docs/archive/` (do not link to them from current
-docs). The dApp's MCP endpoint is documented in the separate LazyLotto dApp
-repo, not here.
+`docs/` contains operational + user-facing material only. Bootstrap design docs,
+shipped PRDs, and the closed adversarial-audit cycle (rounds 2-12) all live
+under `docs/archive/` (do not link to them from current docs). The dApp's MCP
+endpoint is documented in the separate LazyLotto dApp repo, not here.
+
+## Audit cycle status (closed at Phase-9.5, 2026-05-10)
+
+The 12-persona adversarial-audit cycle ran from rounds 2 through 12 and closed
+at Phase-9.5 (commit `50ddef4`). All load-bearing closures shipped; the live
+regression-detection contract going forward is `src/__tests__/audit-coverage.json`
+(the ratchet manifest) plus the gates at `src/__tests__/audit-coverage.test.ts`
+and `src/__tests__/audit-coverage-scan.ts`.
+
+**Future audit posture:** on-demand against specific subsystems, not 12-persona
+codebase sweeps. Running another full sweep without a concrete bug to chase
+re-enters the diminishing-returns pattern documented in
+`docs/archive/audit-runs/audit-cycle-dissection-2026-05-10.md` §1. If you (the
+agent) think you should kick off a new audit reflexively because "there might
+be something" — don't. Wait for a real signal.
+
+**Finding-ID references in code:** comments throughout the codebase reference
+finding IDs like `R5-FG-3`, `R10-FG-1`, `R12-FG-4`. Those refer to the archived
+audit-runs documents. Don't strip them — they're load-bearing as the
+"why this code is shaped this way" trail. If you need to look one up, it's at
+`docs/archive/audit-runs/`.
 
 **Repo root:**
 - `README.md` — engineering / operator entrypoint (architecture, security, MCP + A2A surfaces, CLI, env vars)
