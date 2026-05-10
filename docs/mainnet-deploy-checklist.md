@@ -122,6 +122,19 @@ NOT have mainnet keys.
 - [ ] `HCS20_TOPIC_ID=<from Phase 1>`
 - [ ] `HCS20_TICK=LLCRED`
 - [ ] `OPERATOR_WITHDRAW_ADDRESS=<address that gets rake withdrawals>`
+- [ ] `HCS20_SOFT_VALIDATE=1` — R9-FG-3 / Phase-7: enables schema-drift
+      detection on the cron path. The cron route at
+      `app/api/cron/reconcile/route.ts` sets this at module load
+      regardless, but having it as an explicit Vercel env makes the
+      flag visible in the dashboard. WITHOUT this var set,
+      `result.stats.schemaValidationFailures` is empty regardless of
+      writer drift — the boot warning at `src/custodial/hcs20-reader.ts`
+      first-use path fires when missing.
+- [ ] `ORPHAN_RECONCILER_PAGE_THRESHOLD=5` — R9-FG-4 / Phase-7:
+      operator-tunable threshold for orphaned-claim webhook page. The
+      cron route invokes `reconcileOrphans` after the main reconcile
+      pass; when stale claim count >= this threshold AND
+      `RECONCILE_FAILURE_WEBHOOK_URL` is set, the operator gets paged.
 
 ### Auth + CORS
 - [ ] `AUTH_PAGE_ORIGIN=https://agent.lazysuperheroes.com`
