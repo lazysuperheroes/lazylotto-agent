@@ -190,6 +190,26 @@ export interface AgentHealth {
 //   - One user's failure never crashes the agent.
 // ─────────────────────────────────────────────────────────────────
 
+/**
+ * R8-FG-25 / Phase-6 Cluster E: typed sentinel for the F24
+ * per-token operator-pending claim "already in flight" condition.
+ *
+ * Pre-fix `operatorWithdrawFees` discriminated this branch via
+ * `claimErr.message.includes('already in flight')` against a string
+ * literal constructed seven lines earlier in the same function.
+ * That's the same archetype-seed that produced R5-FG-3: a future
+ * copy-edit on the message text silently flips the catch's branch
+ * and the operator sees a misleading error wrapping a real claim
+ * conflict as a "Redis unreachable" failure.
+ */
+export class InFlightClaimError extends Error {
+  readonly __claimInFlight = true as const;
+  constructor(message?: string) {
+    super(message);
+    this.name = 'InFlightClaimError';
+  }
+}
+
 export class MultiUserAgent {
   private client!: Client;
   private store!: IStore;
@@ -706,10 +726,14 @@ export class MultiUserAgent {
       const agent = new LottoAgent(userStrategy);
       const report: SessionReport = await agent.play();
 
-      // Set lastPlayedAt BEFORE balance operations so that the user object
-      // written to Redis by updateBalance() already includes the timestamp.
-      // (async fire-and-forget writes can race; the last write wins)
-      user.lastPlayedAt = new Date().toISOString();
+      // R10-FG-2 / Phase-9 Cluster C: store.getUser now returns
+      // Readonly<UserAccount>, so a direct property mutation here
+      // would be a type error (and was a sibling of R10-FG-2's
+      // store-cache mutation hazard). Persist via saveUser of a
+      // fresh object instead. The downstream code reads user.balances
+      // / user.eoaAddress / user.strategySnapshot — none of which
+      // depend on the lastPlayedAt update.
+      this.store.saveUser({ ...user, lastPlayedAt: new Date().toISOString() });
 
       // R2-FG-29 (round-2 G-11 / G-12): `settleHappened` /
       // `partialSpendByToken` are declared OUTSIDE the try so the
@@ -1755,7 +1779,15 @@ export class MultiUserAgent {
         { nx: true, ex: PENDING_CLAIM_TTL_SEC },
       );
       if (claimResult === null) {
-        throw new Error(
+        // R8-FG-25 / Phase-6 Cluster E: typed sentinel replaces the
+        // pre-Phase-6 message-substring discrimination. Pre-fix the
+        // catch below tested
+        // `claimErr.message.includes('already in flight')` against
+        // the literal message string from a few lines up — a future
+        // copy-edit on either side would silently flip the branch.
+        // Now we throw a typed sentinel and discriminate via
+        // `instanceof InFlightClaimError`.
+        throw new InFlightClaimError(
           `Operator fee withdrawal blocked: a same-token withdrawal ` +
             `(${token}) is already in flight on another Lambda or has not ` +
             `yet completed its post-conditions. Wait for the verifier or ` +
@@ -1764,7 +1796,7 @@ export class MultiUserAgent {
       }
       pendingClaimAcquired = true;
     } catch (claimErr) {
-      if (claimErr instanceof Error && claimErr.message.includes('already in flight')) {
+      if (claimErr instanceof InFlightClaimError) {
         throw claimErr;
       }
       // Redis unreachable — fail closed. Operator-fee withdraw is
@@ -2089,8 +2121,12 @@ export class MultiUserAgent {
 
   /**
    * Return all registered users' account and balance information.
+   *
+   * R10-FG-2 / Phase-9 Cluster C: returns ReadonlyArray<Readonly<UserAccount>>
+   * mirroring IStore.getAllUsers — callers receive the same
+   * read-only contract and can't mutate the cached entries.
    */
-  getAllUsersStatus(): UserAccount[] {
+  getAllUsersStatus(): ReadonlyArray<Readonly<UserAccount>> {
     return this.store.getAllUsers();
   }
 
@@ -2509,17 +2545,34 @@ export class MultiUserAgent {
       const key = `${KEY_PREFIX.velocity}${tokenKey}:${userId}`;
 
       // Read current cumulative volume in the rolling window
-      const currentRaw = await redis.get<string>(key);
-      const current = currentRaw ? Number(currentRaw) || 0 : 0;
-      const proposed = current + amount;
+      // R9-P3-002 / Phase-7 Cluster C: atomic increment-then-expire.
+      // Pre-fix this path was `redis.get → compute → redis.set(ex)`.
+      // Two concurrent withdrawals across warm Lambdas both read
+      // `current=X`, both compute `proposed=X+amount`, both SET —
+      // last-write-wins silently undercounts the velocity cap by
+      // `amount`. The cap could be doubled by intentional concurrent
+      // retries timed to a Redis-replication window.
+      //
+      // INCRBY is atomic on Upstash; we increment FIRST then check
+      // the result. If it overshot, we don't roll back (no atomic
+      // INCRBY-UNLESS-OVER primitive); instead we let it stand AND
+      // return the over-cap signal — the operator's withdraw-attempt
+      // would still fail, leaving the counter slightly inflated for
+      // the day. Net cost: a single rejected withdrawal raises the
+      // counter by `amount` but the user can't actually spend it.
+      // Far better than the pre-fix race where they COULD spend it.
+      // Velocity-cap counters are intentionally lossy on the
+      // over-cap edge (the cap is a safety rail, not a contract).
+      const proposed = await redis.incrby(key, amount);
+      // (Re)set TTL on every increment so the day-rolling window
+      // refreshes from the most-recent activity.
+      await redis.expire(key, 24 * 60 * 60);
 
       if (proposed > cap) {
         recordRedisSuccess();
         return cap - proposed; // negative = over cap
       }
 
-      // Within budget — increment and (re)set TTL to 24h
-      await redis.set(key, String(proposed), { ex: 24 * 60 * 60 });
       recordRedisSuccess();
       return cap - proposed; // positive = remaining
     } catch (e) {

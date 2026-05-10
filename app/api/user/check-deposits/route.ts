@@ -21,6 +21,7 @@ import { requireTier, isErrorResponse, CORS_HEADERS } from '../../_lib/auth';
 import { getAgentContext } from '../../_lib/mcp';
 import { withStore } from '../../_lib/withStore';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
+import { composeBalanceResponse } from '../../_lib/composeBalances';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -65,11 +66,27 @@ export const POST = withStore(async (request: Request) => {
       user = store.getUser(user.userId) ?? user;
     }
 
+    // R11-FG-3 / Phase-9 Cluster C: pre-subtract pending-ledger
+    // adjustments via the shared helper. Pre-Phase-9 this route
+    // returned RAW user.balances; the dashboard merges that into
+    // `setStatus({...prev, balances: data.balances})` (page.tsx:415-423),
+    // overwriting the pre-subtracted view from /api/user/status.
+    // Result: phantom-funds view returned every time deposit-check
+    // ran. Same archetype as R10-FG-2 across a sibling route.
+    let responseBalances = user?.balances ?? null;
+    let pendingAdjustments: Awaited<ReturnType<typeof composeBalanceResponse>>['pendingAdjustments'] = [];
+    if (user) {
+      const composed = await composeBalanceResponse(user);
+      responseBalances = composed.responseBalances;
+      pendingAdjustments = composed.pendingAdjustments;
+    }
+
     // withStore guarantees flush() after this returns.
     return NextResponse.json(
       {
         processed,
-        balances: user?.balances ?? null,
+        balances: responseBalances,
+        pendingAdjustments,
         lastPlayedAt: user?.lastPlayedAt ?? null,
       },
       { headers: CORS_HEADERS },

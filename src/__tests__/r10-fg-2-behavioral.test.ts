@@ -1,44 +1,36 @@
 /**
- * R10-FG-2 behavioral test — /api/user/status mutates store-cached user.
+ * R10-FG-2 + R11-FG-3 behavioral test — store-cache contract.
  *
- * Authored 2026-05-09 BEFORE any fix lands, as part of the dissection
- * exercise verifying the hypothesis that "tests catch prior-round
- * archetypes, not current-round introduction archetypes". This test
- * exists to FAIL against current code.
+ * Phase-9 Cluster C closes both findings together via the shared
+ * `composeBalanceResponse` helper in `app/api/_lib/composeBalances.ts`.
+ * The helper is the canonical implementation; all four
+ * balance-bearing routes (`/api/user/status`, `/api/user/check-deposits`,
+ * `/api/user/play`, `/api/user/withdraw`) call it. This test now
+ * IMPORTS the helper directly instead of holding a verbatim copy —
+ * the test/route divergence concern (P1-002, P3-003) that R11
+ * raised against the Phase-8 form of this test is gone because
+ * there is no copy to drift.
  *
- * R10-FG-2 says: at app/api/user/status/route.ts:140-155, `user` is a
- * live reference returned by `store.getUser(userId)`. Line 154
- * reassigns `user.balances = adjustedBalances`, mutating the cached
- * store object. The comment at line 137 explicitly says "we don't
- * mutate the store-cached object" — but the code does. Subsequent
- * reads on the same warm Lambda — including the SAME user's
- * /api/user/withdraw — see balances already net of pending. Withdraw
- * then applies its own pending-debit logic on top → DOUBLE-DEDUCTING.
+ * The bug-shape invariant under test:
+ *   - `user.balances` (the store-cached object passed in) is NEVER
+ *     mutated. Two successive calls observe identical underlying
+ *     state.
+ *   - The returned `responseBalances` reflects pending subtraction
+ *     when entries exist; when no entries exist it's reference-
+ *     identical to `user.balances` (no allocations on the happy
+ *     path).
  *
- * The behavioral invariant: the status route's pending-adjustment
- * logic must not mutate the store-cached user's balances. Two
- * consecutive invocations must observe identical underlying state.
- *
- * Test methodology: this test exercises the EXACT mutation block from
- * the route (lines 114-159, verbatim) against a minimal in-memory
- * store fixture. It does not start a Next.js server — that surface
- * has too many dependencies (auth middleware, Hedera client,
- * rate-limit Redis) for a unit test, but the mutation pattern is
- * fully captured in this isolated reproduction. A fix to the route
- * MUST be paired with a fix to this test (or the inline copy
- * removed) so the two stay in sync.
- *
- * Hypothesis-verification protocol: this test MUST FAIL right now.
+ * Reverting `composeBalanceResponse` to mutate `user.balances` (or
+ * any other route to bypass the helper and reassign on a live
+ * reference) flips this test.
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  queuePendingLedgerAdjustment,
-  listPendingLedgerAdjustments,
-} from '../custodial/pendingLedger.js';
+import { queuePendingLedgerAdjustment } from '../custodial/pendingLedger.js';
 import { KEY_PREFIX } from '../auth/redis.js';
 import type { UserAccount } from '../custodial/types.js';
+import { composeBalanceResponse } from '../../app/api/_lib/composeBalances.js';
 
 interface MockState {
   sets: Map<string, Set<string>>;
@@ -139,72 +131,13 @@ function makeUser(userId: string, hbarAvailable: number, hbarTotal: number): Use
   };
 }
 
-/**
- * Verbatim reproduction of the pending-adjustment block from
- * app/api/user/status/route.ts (Phase-8, 2026-05-10). The `user`
- * parameter is a live reference returned by `store.getUser` —
- * mirrors the route's variable. The function returns the shape the
- * route stuffs into the response body, including the response-only
- * `responseBalances` so the test can assert no store-cache mutation
- * occurred while still observing the per-token subtraction the
- * dashboard expects.
- *
- * Keeping this verbatim (not refactored) preserves the test's
- * regression-detection power. If the route's logic changes, this
- * test must be re-synced — the comment block at the top of the
- * route documents this contract.
- */
-async function applyPendingAdjustmentsLikeRoute(user: UserAccount): Promise<{
-  pendingAdjustments: Array<{ tokenKey: string; amount: number; reason: string; sourceTx: string; createdAt: string }>;
-  responseBalances: UserAccount['balances'];
-}> {
-  const pendingAdjustments: Array<{
-    tokenKey: string; amount: number; reason: string; sourceTx: string; createdAt: string;
-  }> = [];
-  let responseBalances = user.balances;
-  try {
-    const allPending = await listPendingLedgerAdjustments();
-    const userPending = allPending.filter((p) => p.userId === user.userId);
-    const pendingByToken: Record<string, number> = {};
-    for (const p of userPending) {
-      pendingByToken[p.tokenKey] = (pendingByToken[p.tokenKey] ?? 0) + p.amount;
-      pendingAdjustments.push({
-        tokenKey: p.tokenKey,
-        amount: p.amount,
-        reason: p.reason,
-        sourceTx: p.sourceTx,
-        createdAt: p.createdAt,
-      });
-    }
-    if (Object.keys(pendingByToken).length > 0) {
-      const adjustedBalances = {
-        ...user.balances,
-        tokens: { ...user.balances.tokens },
-      };
-      for (const [tokenKey, pendingSum] of Object.entries(pendingByToken)) {
-        const t = adjustedBalances.tokens[tokenKey];
-        if (t) {
-          adjustedBalances.tokens[tokenKey] = {
-            ...t,
-            available: Math.max(0, t.available - pendingSum),
-          };
-        }
-      }
-      // R10-FG-2 / Phase-8 Cluster C fix site: the response stashes
-      // the adjusted view; `user.balances` is left untouched so the
-      // store cache stays clean.
-      responseBalances = adjustedBalances;
-    }
-  } catch {
-    /* informational only — leave pendingAdjustments empty */
-  }
-  return { pendingAdjustments, responseBalances };
-}
-
-describe('R10-FG-2: /api/user/status must not mutate the store-cached user', () => {
-  // revert-proof: R10-FG-2 — restoring `user.balances = adjustedBalances`
-  // (route.ts:154 pre-Phase-8) flips this test. The verbatim
-  // mutation block in this file must stay synced with the route.
+describe('R10-FG-2 + R11-FG-3: composeBalanceResponse must not mutate the store-cached user', () => {
+  // revert-proof: R10-FG-2 + R11-FG-3 — exercising the shared
+  // helper directly. Reverting `composeBalanceResponse` to assign
+  // `user.balances = adjustedBalances` (or any of the 4 balance-
+  // bearing routes to bypass the helper and mutate user) flips
+  // this test. The helper IS the production code, so the test no
+  // longer relies on a verbatim copy contract.
   it('two consecutive invocations observe identical store-cached balances', async () => {
     const g = globalThis as unknown as { __lazylottoRedisClient__?: unknown };
     const saved = g.__lazylottoRedisClient__;
@@ -239,7 +172,7 @@ describe('R10-FG-2: /api/user/status must not mutate the store-cached user', () 
       );
 
       // First /status call.
-      const firstResult = await applyPendingAdjustmentsLikeRoute(user);
+      const firstResult = await composeBalanceResponse(user);
       assert.equal(firstResult.pendingAdjustments.length, 1);
       assert.equal(firstResult.pendingAdjustments[0]!.amount, 10);
       // The dashboard view subtracts pending from available — that's
@@ -271,7 +204,7 @@ describe('R10-FG-2: /api/user/status must not mutate the store-cached user', () 
       );
 
       // Belt-and-braces: re-run and confirm idempotence under repeated calls.
-      const secondResult = await applyPendingAdjustmentsLikeRoute(user);
+      const secondResult = await composeBalanceResponse(user);
       assert.equal(
         user.balances.tokens.hbar!.available,
         originalAvailable,

@@ -117,10 +117,32 @@ export interface IStore {
   close(): Promise<void>;
 
   // ── Users ──────────────────────────────────────────────────────
-  getUser(userId: string): UserAccount | undefined;
-  getUserByMemo(memo: string): UserAccount | undefined;
-  getUserByAccountId(accountId: string): UserAccount | undefined;
-  getAllUsers(): UserAccount[];
+  /**
+   * R10-FG-2 / R11-FG-3 / Phase-9 Cluster C: read accessors return
+   * `Readonly<UserAccount>` so the store cache can't be mutated by
+   * route handlers building response views. Pre-Phase-9 the
+   * /api/user/status route reassigned `user.balances` on a live
+   * reference (route.ts:154), which was R10-FG-2; a sibling pattern
+   * in /api/user/check-deposits + /api/user/play + /api/user/withdraw
+   * was R11-FG-3 (dashboard merge-back showed phantom funds after
+   * any of those routes returned raw balances).
+   *
+   * The Readonly type is shallow (top-level fields only). Deep
+   * mutation of `balances.tokens[token].available` would still
+   * compile, but routes don't do that — `updateBalance(updater)` is
+   * the controlled write path, and its callback receives a mutable
+   * `UserBalances` by design. Catching the named archetype
+   * (top-level reassignment) at compile time is what closes both
+   * findings.
+   *
+   * If a future contributor needs to mutate, they go through
+   * `updateBalance` or `saveUser` — both of which take fresh objects
+   * the caller owns. The cache stays clean.
+   */
+  getUser(userId: string): Readonly<UserAccount> | undefined;
+  getUserByMemo(memo: string): Readonly<UserAccount> | undefined;
+  getUserByAccountId(accountId: string): Readonly<UserAccount> | undefined;
+  getAllUsers(): ReadonlyArray<Readonly<UserAccount>>;
   saveUser(user: UserAccount): void;
 
   // ── Balances ───────────────────────────────────────────────────

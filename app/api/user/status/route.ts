@@ -17,7 +17,7 @@ import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { getOperatorAccountId } from '~/hedera/wallet';
 import { withChecksum } from '~/utils/checksum';
 import { readVelocityStates } from '~/custodial/velocity';
-import { listPendingLedgerAdjustments } from '~/custodial/pendingLedger';
+import { composeBalanceResponse } from '../../_lib/composeBalances';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -104,71 +104,16 @@ export const GET = withStore(async (request: Request) => {
       /* informational only — leave velocity empty */
     }
 
-    // R9-FG-10 / Phase-7 Cluster E: subtract pending-ledger
-    // adjustments from the user's available balances. Pre-fix the
-    // route returned `user.balances` verbatim — a refund queued for
-    // this user (pending until next drain) showed PHANTOM funds in
-    // the dashboard for up to 1 hour. The Withdraw modal would let
-    // the user request the refunded amount AGAIN (per-user lock
-    // catches it at withdraw time, but the UX was misleading).
-    //
-    // R10-FG-2 / Phase-8 Cluster C: build a separate response
-    // balance object; do NOT reassign `user.balances`. `user` is a
-    // live reference to the store-cached UserAccount — reassigning
-    // its `.balances` property mutated the cache, so a subsequent
-    // /api/user/withdraw call on the same warm Lambda saw balances
-    // already net of pending and applied its own pending-debit on
-    // top → DOUBLE-DEDUCT. The store cache must be treated as
-    // read-only by routes that compose response views.
-    const pendingAdjustments: Array<{
-      tokenKey: string;
-      amount: number;
-      reason: string;
-      sourceTx: string;
-      createdAt: string;
-    }> = [];
-    let responseBalances = user.balances;
-    try {
-      const allPending = await listPendingLedgerAdjustments();
-      const userPending = allPending.filter((p) => p.userId === user.userId);
-      // Build per-token sum to subtract.
-      const pendingByToken: Record<string, number> = {};
-      for (const p of userPending) {
-        pendingByToken[p.tokenKey] = (pendingByToken[p.tokenKey] ?? 0) + p.amount;
-        pendingAdjustments.push({
-          tokenKey: p.tokenKey,
-          amount: p.amount,
-          reason: p.reason,
-          sourceTx: p.sourceTx,
-          createdAt: p.createdAt,
-        });
-      }
-      // Apply subtraction to a SHALLOW COPY of balances so we don't
-      // mutate the store-cached object. `available` reduces by the
-      // pending sum; `total` is unchanged (pending is a debit not
-      // applied yet).
-      if (Object.keys(pendingByToken).length > 0) {
-        const adjustedBalances = {
-          ...user.balances,
-          tokens: { ...user.balances.tokens },
-        };
-        for (const [tokenKey, pendingSum] of Object.entries(pendingByToken)) {
-          const t = adjustedBalances.tokens[tokenKey];
-          if (t) {
-            adjustedBalances.tokens[tokenKey] = {
-              ...t,
-              available: Math.max(0, t.available - pendingSum),
-            };
-          }
-        }
-        // R10-FG-2: stash on response-only variable; user.balances
-        // stays pointing at the store-cached object.
-        responseBalances = adjustedBalances;
-      }
-    } catch {
-      /* pending-ledger lookup is informational; if it fails just
-         return the raw store balances and skip the badge. */
-    }
+    // R9-FG-10 / R10-FG-2 / R11-FG-3 / Phase-9 Cluster C: pre-subtract
+    // pending-ledger adjustments via the shared `composeBalanceResponse`
+    // helper. The helper owns the contract that the store-cached
+    // user is read-only and the response carries a fresh
+    // `responseBalances` / `pendingAdjustments` pair. Sibling routes
+    // (/api/user/check-deposits, /api/user/play, /api/user/withdraw)
+    // call the same helper so the dashboard never receives raw
+    // balances that would re-introduce the phantom-funds view
+    // (R11-FG-3 archetype). Phase-9 dissection §6 Cluster C.
+    const { responseBalances, pendingAdjustments } = await composeBalanceResponse(user);
 
     return NextResponse.json(
       {

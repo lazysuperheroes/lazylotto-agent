@@ -23,6 +23,7 @@ import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { getAgentContext } from '../../_lib/mcp';
 import { withdrawForUser } from '~/services/userOps';
 import { assertRedisHealthy, RedisDegradedError } from '~/lib/redisHealth';
+import { composeBalanceResponse } from '../../_lib/composeBalances';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -150,15 +151,19 @@ export const POST = withStore(async (request: Request) => {
       case 'duplicate':
       case 'ok': {
         await store.refreshUser(user.userId);
-        const refreshed = store.getUser(user.userId);
+        const refreshed = store.getUser(user.userId) ?? user;
         const responseHeaders: Record<string, string> = { ...CORS_HEADERS };
         if (opResult.kind === 'duplicate') {
           responseHeaders['X-Idempotent-Replayed'] = 'true';
         }
+        // R11-FG-3 / Phase-9 Cluster C: pre-subtract pending entries.
+        // Sibling-route fix to R10-FG-2.
+        const { responseBalances, pendingAdjustments } = await composeBalanceResponse(refreshed);
         return NextResponse.json(
           {
             record: opResult.result,
-            balances: refreshed?.balances ?? user.balances,
+            balances: responseBalances,
+            pendingAdjustments,
           },
           { headers: responseHeaders },
         );

@@ -664,6 +664,58 @@
       ],
       "revertDrill": null,
       "notes": "Phase-9 Cluster B. Companion to R11-FG-1; same locking test asserts all 4 discriminated counters fire correctly."
+    },
+    {
+      "id": "R11-FG-3",
+      "round": "R11",
+      "severity": "critical",
+      "coverageStrategy": "individual",
+      "summary": "Dashboard merge-back paths overwrite the R10-FG-2 pre-subtracted view with raw balances. /api/user/check-deposits, /api/user/play, /api/user/withdraw all returned raw user.balances; the dashboard merged those into local state, restoring the phantom-funds view R10-FG-2 was supposed to close. R10-FG-2 was symptom-only at one route.",
+      "fix": {
+        "files": [
+          {
+            "file": "app/api/_lib/composeBalances.ts",
+            "lines": "NEW shared helper: composeBalanceResponse(user) returns { responseBalances, pendingAdjustments }"
+          },
+          {
+            "file": "app/api/user/status/route.ts",
+            "lines": "use composeBalanceResponse helper (replaces inline Phase-8 logic)"
+          },
+          {
+            "file": "app/api/user/check-deposits/route.ts",
+            "lines": "apply composeBalanceResponse before returning balances + pendingAdjustments"
+          },
+          {
+            "file": "app/api/user/play/route.ts",
+            "lines": "apply composeBalanceResponse to refreshed user"
+          },
+          {
+            "file": "app/api/user/withdraw/route.ts",
+            "lines": "apply composeBalanceResponse to refreshed user"
+          },
+          {
+            "file": "src/custodial/IStore.ts",
+            "lines": "getUser/getUserByMemo/getUserByAccountId/getAllUsers return Readonly<UserAccount> — compile-time guarantee against the R10-FG-2 archetype across all callers"
+          },
+          {
+            "file": "src/custodial/MultiUserAgent.ts",
+            "lines": "replace direct user mutation at playForUser with saveUser of fresh object; getAllUsersStatus return type updated"
+          },
+          {
+            "file": "src/custodial/NegotiationHandler.ts",
+            "lines": "replace direct strategy mutation with saveUser of fresh object"
+          }
+        ],
+        "commit": "Phase-9 Cluster C"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/r10-fg-2-behavioral.test.ts",
+          "name": "two consecutive invocations observe identical store-cached balances"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-9 Cluster C. The behavioral test now imports composeBalanceResponse directly from the production code (no verbatim copy contract — closes the P1-002 / P3-003 weakness raised against the Phase-8 form of this test). Type-system close: Readonly<UserAccount> at the IStore boundary catches future R10-FG-2-style mutations at compile time. R10-FG-2 manifest entry continues to track its named site; this entry tracks the architectural close that subsumes the sibling-route work."
     }
   ]
 }

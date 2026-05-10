@@ -193,11 +193,19 @@ export class NegotiationHandler {
     }
 
     const newStrategy = this.loadStrategy(newStrategyName);
-    user.strategyName = newStrategy.name;
-    user.strategyVersion = newStrategy.version;
-    user.strategySnapshot = newStrategy;
-    this.store.saveUser(user);
-    return user;
+    // R10-FG-2 / Phase-9 Cluster C: store.getUser returns
+    // Readonly<UserAccount>; build a fresh object instead of
+    // mutating in place. saveUser writes the new snapshot into
+    // the cache so subsequent getUser calls see the updated
+    // strategy.
+    const updated: UserAccount = {
+      ...user,
+      strategyName: newStrategy.name,
+      strategyVersion: newStrategy.version,
+      strategySnapshot: newStrategy,
+    };
+    this.store.saveUser(updated);
+    return updated;
   }
 
   /**
