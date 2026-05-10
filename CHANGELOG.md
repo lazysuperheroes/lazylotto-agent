@@ -2,6 +2,122 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.5] - 2026-05-10
+
+> **Audit cycle closure release.** The 0.3.4 changelog ended with a three-agent
+> security sweep that surfaced 15 fresh findings. That seeded a longer
+> adversarial-audit cycle: 12-persona codebase sweeps repeated weekly,
+> rounds R5 through R12 over four days (May 6 – May 10). The cycle ran
+> seven full rounds; this release is what shipped from rounds R5-R12 and
+> closes the cycle.
+>
+> **What this release contains, at a glance:**
+> - 12 critical bug fixes across the multi-user / cross-Lambda surface
+>   (concurrency races, double-debit windows, balance-conservation
+>   violations, store-cache mutation hazards).
+> - 4 architectural primitives that close entire archetype families at
+>   compile time or via shared production helpers (`Readonly<UserAccount>`,
+>   `Readonly<OperatorState>`, `composeBalanceResponse`, parseRefund
+>   tagged-union).
+> - The audit-coverage manifest + ratchet (`src/__tests__/audit-coverage.json`
+>   plus the gates in `audit-coverage.test.ts` and `audit-coverage-scan.ts`)
+>   as the live regression-detection contract going forward.
+> - The full cycle history archived under `docs/archive/audit-runs/` for
+>   traceability — finding IDs in code comments (e.g. `R10-FG-1`) reference
+>   those documents.
+>
+> **Why we're comfortable shipping:** the closure pattern shifted from
+> chasing-the-named-site (rounds R5-R8) to compile-time and architectural
+> guarantees (Phase-9 + Phase-9.5). The four invariants in the §Architecture
+> section below are enforced by the type system, by shared helpers all
+> consumers must call, or by the audit-coverage gate's structural-fixture
+> allowlist. Reverting any of them is a `tsc` error, a runtime test
+> failure, or both. R12's verification audit found 5 deduped bugs against
+> Phase-9 closures — all mechanical sibling-site misses, all closed in
+> Phase-9.5 — and 0 new structural concerns.
+>
+> **Where we should have stopped:** R8 (32 findings) was probably the
+> right exit point. We ran four more rounds (R9 → R12) in the wild-goose-
+> chase pattern documented at
+> `docs/archive/audit-runs/audit-cycle-dissection-2026-05-10.md` §1 — each
+> round's closures introduced new code that the next round audited, and
+> roughly half of each round's findings were quality complaints, observability
+> gaps, or process discipline rather than user-visible bugs. The Phase-9
+> dissection introduced a four-category triage primitive (`bug` vs `error`
+> vs `quality` vs `process`) that, applied retroactively, would have
+> compressed R6-R10 into ≤2 rounds total. Future audits should run on-demand
+> against specific subsystems with the triage primitive at finding time —
+> not as 12-persona codebase sweeps. CLAUDE.md's "Audit cycle status" section
+> codifies this for future contributors.
+>
+> Testnet only — no users affected. Phase-9.5 hotfix verified clean before
+> archive.
+
+### Audit cycle summary
+
+| Round | Phase | Verdict | Critical bugs closed |
+|-------|-------|---------|---------------------|
+| R5 | R5-1..4 | individual fixes (R5-FG-1..111) | 15 |
+| R6 | R6-0/R6-1 | structural gate against PreserveClaim sibling-miss archetype | 5 |
+| R7 (Phase 1-3) | bundled into Phase-8 | revert-proof annotations + audit-coverage manifest infrastructure | — |
+| R8 (Phase 6) | bundled into Phase-8 | wire-only closures (heldByToken, depositCreditFlushOrphanedByToken, schemaValidationFailures consumers) | — |
+| R9 (Phase 7) | bundled into Phase-8 | per-token reservation refinements; tagged-error sentinels | — |
+| R10 (Phase 8) | clusters A-D | manifest placebo, parseRefund silent-null, user-status mutation, pendingLedger SADD-after-flush | 4 |
+| R11 (Phase 9) | clusters A-E | conservation invariant + store-cache contract + pending-ledger idempotent + security/DoS sweep | 5 |
+| R12 (Phase 9.5) | cluster F | force_release writer + playForUser saveUser revert + getOperator Readonly + parseRefund tagged-union + structural-gate loophole + archive doc rationale | 6 |
+
+**Cumulative across the cycle:** 35 critical bug closures (deduped); ~120 high/medium closures (most quality-categorized in retrospect); two architectural migrations (Readonly cache contract + tagged-union parsers); one ratchet manifest gate-set that survives forward as the regression-lock.
+
+### Fixed (CRITICAL — load-bearing user-visible bugs)
+
+- **pendingLedger drain double-debit windows (R10-FG-1 + R11-FG-4 + R12-FG-2 family).** Three sequential closures of the same archetype: SADD anchor must precede balance mutation in both eager and periodic drain paths; mutation must occur AFTER anchor so a SADD throw aborts before any in-memory dirty state; `MultiUserAgent.playForUser`'s redundant second `saveUser(user)` was reverting the lastPlayedAt timestamp post-Phase-9 and is now removed. The order is now: SISMEMBER (skip if applied) → SADD anchor → updateBalance → updateOperator → flush → LREM. A flush throw leaves the anchor as a poison-pill (next drain takes the already-applied branch); a SADD throw aborts cleanly. Closes the multi-Lambda double-debit hazard at every entry point. Locked by `r10-fg-1-behavioral.test.ts` (3 tests including a withUserLock-faithful simulator across two pseudo-Lambdas).
+- **Conservation invariant violation via parseRefund silent null-drop (R10-FG-3 + R11-FG-1 + R11-FG-5 + R12-FG-4 family).** parseRefund returned bare null on FIVE distinct payload-malformation reasons; the dispatcher only categorized empty-`originalDepositTxId` and let four sibling reasons fall into the catch-all `skippedMessages` counter. Verify-audit's reducer couldn't distinguish a dropped legitimate refund from any other skip — reconstructed user balances OVER-CREDITED by the dropped refund amount. Phase-8 added the first counter; Phase-9 wired the consumer into verify-audit's alert pipeline; Phase-9.5 made parseRefund return a discriminated `NormalizedRefundEvent | ParseRefundFailure` tagged union with an exhaustive switch + `never` exhaustiveness check. Future 6th reason becomes a TypeScript error, not a silent skip. Locked by `r10-fg-3-behavioral.test.ts`.
+- **Store-cache mutation hazards via /api/user/status (R10-FG-2 + R11-FG-3 family).** The Phase-7 fix to subtract pending-ledger debits from the dashboard balance view mutated `user.balances` directly on a live store reference, leaking phantom-deficit state across requests on warm Lambdas. Phase-8 introduced a `responseBalances` local variable at the named route only; R11 found three sibling routes (/api/user/check-deposits, /api/user/play, /api/user/withdraw) returning raw user.balances and the dashboard merging those back, restoring the phantom-funds view R10-FG-2 was supposed to close. Phase-9 closed the architectural contract: `IStore.getUser*` returns `Readonly<UserAccount>` (compile-time guarantee), all four balance-bearing routes call the shared `composeBalanceResponse` helper, the behavioral test imports the helper directly so test/route divergence is structurally impossible. Phase-9.5 extended Readonly to `IStore.getOperator()` after R12 found the operator surface uncovered. Locked by `r10-fg-2-behavioral.test.ts` + the type system.
+- **`force_release` writer dropped userId + tokenReservations; heldByToken decrement was dead code (R10-FG-16 + R12-FG-1).** Phase-9 Cluster B added a `verify-audit.ts` reducer-side decrement of `heldByToken` on `force_release` / `force_release_override` events, gated on `event.userId && event.tokenReservations`. R12 P5-001 surfaced that the only production writer (`app/api/admin/uncertain-tx/[id]/force-release/route.ts`) never passed those fields. The Phase-9 closure was decorative on production topics; every operator force-release of a triaged play would still trip the false-positive `user_balance_negative` alert R10-FG-16 was supposedly fixed for. Phase-9.5 threads `userId` and `tokenReservations` from the dead-letter entry's `details` into the writer (mirrors the play_uncertain_success_pending_triage writer at handlers.ts:807).
+- **Velocity counter inflation 24h-DoS (R10-FG-12).** `MultiUserAgent.applyWithdrawalVelocityCap` did atomic INCRBY then checked the proposed value, but the over-cap branch did NOT roll back the increment. A compromised session retrying `withdraw(1500)` 10 times against a 1000 cap drove the counter to 15000; every legitimate withdraw for the next 24h returned 503. Pre-Phase-9 the inline comment accepted this as "intentionally lossy on the over-cap edge" — that framing missed the DoS attack vector against the victim user. Now does INCRBY(amount) then INCRBY(-amount) rollback on the over-cap branch; counter ends at the same value as if the increment had never run. Locked by `r10-fg-12-behavioral.test.ts`.
+- **SignatureValidationError migration completion (R10-FG-14).** R9-FG-5 / Phase-7 Cluster C introduced a typed sentinel for signature failures but stopped halfway: three security-critical throws in `src/auth/verify.ts` (challenge expiry L87, account mismatch L94, signature failure L154 — the most security-sensitive throw in the auth path) were still plain `Error` and required substring matching downstream. Phase-9 Cluster E completed the migration; the R9-FG-5 archetype is now structurally retired across the auth surface.
+- **Aggregate `ledgerBalance` formula stale vs per-token (R10-FG-9).** `verify-audit.ts:1377` aggregate formula omitted held + flushOrphan from the subtraction (per-token formula was correct; aggregate was stale). JSON consumers reading the top-level `ledgerBalance` saw drifted numbers vs the per-token sum. Now subtracts both; PerUserLedger.ledgerBalance docstring updated in lockstep.
+- **pendingAdjustments hot-path LRANGE on every dashboard poll (R10-FG-11).** `/api/user/status` and `withUserLock` both called `redis.lrange(pendingLedgerList, 0, -1)` per request. With cluster-wide pending volume in the hundreds, LRANGE+JSON-parse cost dominated the dashboard hot path. LLEN short-circuit added at all three call sites: empty-queue case (the common case in production where pending entries live for at most a few hours) now returns after one cheap LLEN round-trip. Full per-user sharding deferred — current volume is far from any Redis cap; if R13 surfaces it as load-bearing, follow up.
+
+### Architecture (load-bearing invariants enforced going forward)
+
+These four are the new contracts. Future contributors who break them either hit a `tsc` error, a runtime test failure, or both. Documented in CLAUDE.md "Multi-User Security Rules" 14-17.
+
+- **Store cache is read-only at the boundary.** `IStore.getUser*` returns `Readonly<UserAccount>`; `IStore.getOperator()` returns `Readonly<OperatorState>`; `IStore.getAllUsers()` returns `ReadonlyArray<Readonly<UserAccount>>`. Mutations route through `updateBalance(updater)`, `updateOperator(updater)`, or `saveUser(freshObject)` — never by direct property assignment on a returned reference.
+- **pendingLedger drain anchors BEFORE mutation.** Order is load-bearing: SISMEMBER → SADD anchor → updateBalance → updateOperator → flush → LREM. The order is documented inline in `pendingLedger.ts` and asserted by `r10-fg-1-behavioral.test.ts`.
+- **All balance-bearing routes call `composeBalanceResponse`.** `/api/user/status`, `/api/user/check-deposits`, `/api/user/play`, `/api/user/withdraw` MUST use the shared `app/api/_lib/composeBalances.ts` helper. The dashboard's merge-back paths assume the wire shape is uniform across routes; raw `user.balances` returns from any route reintroduce the phantom-funds view.
+- **parseRefund returns a discriminated tagged union.** `NormalizedRefundEvent | ParseRefundFailure` where `ParseRefundFailure` carries a `reason` enum. The dispatcher uses an exhaustive switch with a `never` exhaustiveness check. Adding a new failure mode without a corresponding dispatcher case is a TypeScript compile error.
+
+### Process / discipline (audit-coverage manifest infrastructure)
+
+- **`src/__tests__/audit-coverage.json`** — the ratchet manifest, one entry per locked fix. Schema validated via Zod; entries require non-empty `tests` array (R12-FG-5 closure of the `structural-gate` loophole).
+- **`audit-coverage.test.ts`** — gate suite enforcing: file-existence on linked tests, revert-proof annotation cross-reference (R4-0 discipline), placebo gate (R10-FG-4: `individual` strategy must have ≥1 test), structural-gate fixture allowlist (R12-FG-5: `structural-gate` entries must link a recognized structural fixture).
+- **`revert-proof.test.ts`** — per-file undocumented-block ratchet against a baseline. Forces every new test to declare what regression it locks via `// revert-proof:` or `// smoke-only:` annotations.
+- **`sibling-archetype-gate.ts`** — regex-based source scan blocking sibling-class catch (`PostSubmitError` masquerading as `ReceiptUncertainError` siblings) and string-control-flow patterns (`.message.includes`).
+- **`claim-archetype-gate.ts`** — regex gate blocking hand-rolled `redis.set(..., { nx: true })` outside approved files (must use `fencedClaim` primitive).
+
+### Documentation
+
+- Audit cycle (rounds 2-12, all dissection docs, all 24 R11+R12 persona reports) archived under `docs/archive/audit-runs/`. Pointer + retrospective rationale at `docs/archive/README.md` "audit-runs/" section.
+- CLAUDE.md gains "Audit cycle status (closed at Phase-9.5, 2026-05-10)" section + Multi-User Security Rules 14-17 codifying the load-bearing invariants.
+- `docs/archive/audit-runs/audit-cycle-dissection-2026-05-10.md` is the canonical retrospective — read this before kicking off any future audit work.
+
+### Tests
+
+- 521 → 748 total node tests (+227 across the cycle). 4 R10/R11/R12 behavioral tests + the audit-coverage gate suite + sibling/claim archetype gate fixtures + per-cluster regression tests. All green at HEAD.
+
+### Where we should have stopped (the honest retrospective)
+
+For anyone reading this changelog 12 months from now wondering why the audit cycle ran seven rounds:
+
+- **R5 → R8 closed the real bugs.** Phase-1 through Phase-3 of the cycle (revert-proof annotations, audit-coverage manifest, sibling-archetype gate) shipped the structural primitives that broke the obvious failure modes (PostSubmitError sibling-miss, hand-rolled SET-NX claims, mutation-disguised-as-mutation). At R8 the codebase was in 9-load-bearing-bugs shape.
+- **R9 → R10 was wild-goose-chase territory.** Each round's closures shipped new code that the next round's adversarial agents found new "issues" in — most of which were quality complaints, observability gaps, or comment-vs-code mismatches in fresh diffs. The audit-machinery was auditing itself; we mistook the framework's bias toward "always find more" for the codebase's bug rate.
+- **The Phase-9 dissection (round 11) named the meta-pattern.** A four-category triage (`bug` / `error` / `quality` / `process`) made the wild-goose-chase visible. Applied retroactively, ~70% of R6-R10 findings would have triaged as non-bug; the cycle should have stopped at R8 with deferral notes for the rest.
+- **R11 + R12 were mechanically necessary because Phase-9 closures had sibling-site scope creep.** The architectural primitives (Readonly migrations, tagged-union parsers, shared response helpers) are worth their LOC; the cluster-fix scope-creep that needed Phase-9.5 to clean up was preventable with stricter `git grep` discipline at fix time.
+- **What we'd tell future-us:** if a round's findings split heavily toward error/quality/process and only 2-3 items triage as bug, declare victory and ship. The next round will find another 30 things. They will not be more bugs. The codebase has a structural floor — reaching it requires architectural extraction (separately-conformance-tested IStore + cross-Lambda primitives + audit reducer packages), not more audit rounds.
+
+The cycle is closed. Future audits run on-demand against specific subsystems, not as 12-persona sweeps. See CLAUDE.md "Audit cycle status" for the standing posture.
+
 ## [0.3.4] - 2026-05-05
 
 > Three-agent post-0.3.3 security audit (security + analyzer + debt-hunter
