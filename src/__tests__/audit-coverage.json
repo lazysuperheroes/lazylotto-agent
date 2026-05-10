@@ -643,6 +643,30 @@
       ],
       "revertDrill": null,
       "notes": "Phase-8 Cluster A. Locked by structural-gate (the new it() block in audit-coverage.test.ts). Removing the gate flips against any future individual-strategy entry that ships without a real test reference. Standalone behavioral mirror lives at src/__tests__/r10-fg-4-behavioral.test.ts as a dissection-discipline artifact."
+    },
+    {
+      "id": "R10-FG-3",
+      "round": "R10",
+      "severity": "critical",
+      "coverageStrategy": "individual",
+      "summary": "parseRefund returned null on empty originalDepositTxId; dispatcher only incremented the catch-all skippedMessages counter. Verify-audit reducers could not distinguish a dropped legitimate-but-malformed refund from any other skip - reconstructed user balance OVER-CREDITED by the refund amount. Inverse failure to pre-Phase-7 (which double-counted via truthy gate bypass).",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/hcs20-reader.ts",
+            "lines": "AuditReaderResult.stats.refundsDroppedEmptyOriginal counter; dispatcher increments it when parseRefund returns null with empty originalDepositTxId"
+          }
+        ],
+        "commit": "Phase-8 Cluster B"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/r10-fg-3-behavioral.test.ts",
+          "name": "refund with empty originalDepositTxId either surfaces an event or a categorized stat"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-8 Cluster B. The categorized counter gives consumers (verify-audit, monitoring panel, ops dashboard) a recoverable signal without requiring HCS20_SOFT_VALIDATE to be enabled (the softValidate path was the only pre-fix signal and was disabled on user-facing paths)."
     }
   ]
 }

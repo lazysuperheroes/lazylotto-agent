@@ -31,6 +31,8 @@ import {
   type PlaySessionAbortedMessage,
   computePoolsRoot,
   SESSION_INFLIGHT_TIMEOUT_MS,
+  HCS20_SCHEMAS,
+  type Hcs20OpName,
 } from './hcs20-v2.js';
 
 // ── Input shape ─────────────────────────────────────────────────
@@ -133,6 +135,18 @@ export interface NormalizedRefundEvent extends BaseEvent {
   refundTxId: string;
   reason: string;
   performedBy: string;
+  /**
+   * R6-FG-7 (round-6): the rake amount reversed back from operator
+   * state when refunding a previously-raked deposit. Pre-fix
+   * `parseRefund` did not extract this, so verify-audit's reducers
+   * treated every refund as `rakeReversed=0` even when the writer
+   * emitted a non-zero value — operator balance reconstruction
+   * ran short by exactly the sum of un-credited reversals. Default
+   * 0 when absent (legacy refunds predate the field).
+   */
+  rakeReversed?: number;
+  /** Token of the reversed rake (mirrors deposit token). */
+  rakeReversedToken?: string;
 }
 
 export interface NormalizedPrizeRecoveryEvent extends BaseEvent {
@@ -198,6 +212,17 @@ export interface NormalizedControlEvent extends BaseEvent {
    * monitoring panel, audit page) double-counted reservations.
    */
   idempotencyKey?: string;
+  /**
+   * R6-FG-9 / Phase-6 Cluster C: gross deposit amount + token + cause
+   * for `event === 'deposit_credit_flush_orphaned'`. The writer
+   * stamps these fields on the topic; verify-audit consumes them
+   * during reconstruction to subtract un-credited amounts from the
+   * naive deposit total. Pre-Phase-6 the reader silently dropped them
+   * even though the writer (post-R5-FG-45) emitted them.
+   */
+  grossAmount?: string;
+  token?: string;
+  cause?: string;
 }
 
 /**
@@ -245,7 +270,144 @@ export interface AuditReaderResult {
      * verifier surfaces this as a critical alert.
      */
     agentSeqDuplicates: { agent: string; seq: number; sessions: string[] }[];
+    /**
+     * Phase-2 R7: schema-validation failures detected by the soft
+     * loose-mode pass. Each entry is `(op, count, sample)` so a
+     * dashboard can surface "the writer emitted N messages of op=X
+     * that didn't match the schema". Soft mode means we still parse
+     * and emit normalized events via the legacy hand-coded extractors
+     * — the schemas are a regression DETECTOR for now, not the
+     * source of truth for the read path. After one soak cycle the
+     * legacy parsers can be removed and the schema becomes the only
+     * gate.
+     */
+    schemaValidationFailures: {
+      op: string;
+      count: number;
+      firstError?: string;
+    }[];
+    /**
+     * R10-FG-3 / Phase-8 Cluster B: refund messages dropped at
+     * `parseRefund` because the on-chain payload carried an empty
+     * `originalDepositTxId`. Pre-fix the dispatcher only incremented
+     * the catch-all `skippedMessages` counter when parseRefund
+     * returned null — verify-audit's reducers couldn't distinguish
+     * a dropped legitimate-but-malformed refund from any other skip,
+     * so reconstructed user balances OVER-CREDITED by the refund
+     * amount.
+     *
+     * The categorized counter gives consumers (verify-audit,
+     * monitoring panel, ops dashboard) a recoverable signal: a
+     * non-zero value means the topic carried at least one refund
+     * with an empty `originalDepositTxId` (legacy testnet anchor
+     * before the writer-strict schema landed, or an attacker
+     * injection). Either case warrants operator attention; neither
+     * is hidden in the `skippedMessages` aggregate.
+     */
+    refundsDroppedEmptyOriginal: number;
   };
+}
+
+// ── Soft schema validation (Phase-2 R7) ─────────────────────────
+//
+// Run each incoming message against its op-specific Zod schema and
+// surface failures as a stat. Pure observation — does NOT short-
+// circuit the existing dispatch. Lets us catch writer/schema drift
+// at the read site without flipping a behavior change in the same
+// release. After soak, the legacy hand-coded extractors at the
+// bottom of this file get retired in favor of the schemas.
+
+interface SchemaSoftReport {
+  failures: Map<string, { count: number; firstError?: string }>;
+  recordFailure: (op: string, error: string) => void;
+}
+
+function makeSchemaSoftReport(): SchemaSoftReport {
+  const failures = new Map<string, { count: number; firstError?: string }>();
+  return {
+    failures,
+    recordFailure(op, error) {
+      const entry = failures.get(op);
+      if (entry) {
+        entry.count++;
+      } else {
+        failures.set(op, { count: 1, firstError: error });
+      }
+    },
+  };
+}
+
+/**
+ * R8-FG-15 / Phase-6 Cluster C: env-gated soft validation.
+ *
+ * Pre-fix `softValidate` ran unconditionally on every message. Zod
+ * `safeParse` is ~5-50µs per call; for a 10k-message topic walk
+ * (testnet has been writing v2 for weeks) this added ~50-500ms per
+ * audit-page render. The user audit page invokes the reader
+ * synchronously per request — direct user-facing latency cost for
+ * what is operationally a CI/CRON-only signal.
+ *
+ * The gate: enable only when `HCS20_SOFT_VALIDATE=1` (cron +
+ * verify-audit set this) OR `process.env.NODE_ENV === 'test'` (so
+ * the existing test fixtures keep their assertions). Default off
+ * for hot user paths.
+ */
+function isSoftValidateEnabled(): boolean {
+  return (
+    process.env.HCS20_SOFT_VALIDATE === '1' ||
+    process.env.NODE_ENV === 'test' ||
+    // R8-FG-15: also enable in CLI tests run via tsx without NODE_ENV.
+    // node:test sets process.env.NODE_TEST_CONTEXT in its workers.
+    typeof process.env.NODE_TEST_CONTEXT === 'string'
+  );
+}
+
+/**
+ * R9-FG-3 / Phase-7 Cluster A: one-time boot warning when soft-validate
+ * is disabled in production. Pre-fix the env was never set anywhere
+ * and operators had no signal — the schema-drift detector silently
+ * shipped dead. This warn lights up on Vercel deploys missing the
+ * env var so the operator sees the gap during the first cold start.
+ *
+ * Fires once per Lambda warm cycle. The `__softValidateBootWarned`
+ * flag pins to globalThis so HMR / multi-import doesn't re-fire it.
+ */
+function maybeFireBootWarning(): void {
+  const g = globalThis as { __softValidateBootWarned?: boolean };
+  if (g.__softValidateBootWarned) return;
+  if (process.env.VERCEL === '1' && !isSoftValidateEnabled()) {
+    console.warn(
+      '[hcs20-reader] HCS20_SOFT_VALIDATE not set on Vercel — schema-drift detection ' +
+        'is disabled. `result.stats.schemaValidationFailures` will be empty regardless ' +
+        'of writer drift. Set HCS20_SOFT_VALIDATE=1 on cron + verify-audit paths or ' +
+        'check the deploy checklist (docs/mainnet-deploy-checklist.md).',
+    );
+  }
+  g.__softValidateBootWarned = true;
+}
+
+function softValidate(
+  op: string,
+  payload: Record<string, unknown>,
+  report: SchemaSoftReport,
+): void {
+  if (!isSoftValidateEnabled()) return;
+  // R8-FG-18 / Phase-6 Cluster C: unknown ops must surface as a
+  // signal too. Pre-fix `if (!(op in HCS20_SCHEMAS)) return;` silently
+  // dropped them; an attacker injection or v3 message left no
+  // trace in `schemaValidationFailures`. Now we record under the
+  // sentinel `<unknown>` so dashboards see the count.
+  if (!(op in HCS20_SCHEMAS)) {
+    report.recordFailure('<unknown>', `op="${op}" has no registered schema`);
+    return;
+  }
+  const schema = HCS20_SCHEMAS[op as Hcs20OpName];
+  const result = schema.safeParse(payload);
+  if (!result.success) {
+    const firstIssue = result.error.issues[0];
+    const path = firstIssue?.path.join('.') ?? '<root>';
+    report.recordFailure(op, `${path}: ${firstIssue?.message ?? 'schema mismatch'}`);
+  }
 }
 
 // ── Legacy Merkle cutover (R5-FG-2) ─────────────────────────────
@@ -299,6 +461,10 @@ export async function parseAuditTopic(
   messages: RawTopicMessage[],
   now: number = Date.now(),
 ): Promise<AuditReaderResult> {
+  // R9-FG-3 / Phase-7 Cluster A: surface boot warning once per
+  // Lambda warm cycle if soft-validate is disabled in production.
+  maybeFireBootWarning();
+
   // Phase 1: classify each message and emit non-session events.
   // Pool/open/close/aborted messages are stashed in sessionBuckets
   // for phase 2.
@@ -407,10 +573,16 @@ export async function parseAuditTopic(
     },
     agentSeqGaps: [],
     agentSeqDuplicates: [],
+    schemaValidationFailures: [],
+    // R10-FG-3 / Phase-8 Cluster B: see field docstring on
+    // AuditReaderResult.stats.refundsDroppedEmptyOriginal.
+    refundsDroppedEmptyOriginal: 0,
   };
+  const schemaReport = makeSchemaSoftReport();
 
   for (const msg of messages) {
     const op = String(msg.payload.op ?? 'unknown');
+    softValidate(op, msg.payload, schemaReport);
 
     // ── v2 messages ────────────────────────────────────────
     if (
@@ -471,6 +643,15 @@ export async function parseAuditTopic(
       const ev = parseRefund(msg);
       if (!ev) {
         stats.skippedMessages++;
+        // R10-FG-3 / Phase-8 Cluster B: categorize the null-drop
+        // when the payload carried an empty `originalDepositTxId`.
+        // The catch-all `skippedMessages` increment is retained for
+        // back-compat; the dedicated counter lets verify-audit /
+        // monitoring distinguish a dropped refund from other skips.
+        const orig = String(msg.payload.originalDepositTxId ?? '');
+        if (!orig) {
+          stats.refundsDroppedEmptyOriginal++;
+        }
         continue;
       }
       // R4-FG-58 (round-4 medium): skip duplicate refund anchors with
@@ -612,6 +793,18 @@ export async function parseAuditTopic(
           : {}),
         ...(typeof msg.payload.mirrorResult === 'string'
           ? { mirrorResult: msg.payload.mirrorResult }
+          : {}),
+        // R6-FG-9 / Phase-6 Cluster C: extract grossAmount/token/cause
+        // for the deposit_credit_flush_orphaned event so verify-audit
+        // can subtract un-credited deposits during reconstruction.
+        ...(typeof msg.payload.grossAmount === 'string'
+          ? { grossAmount: msg.payload.grossAmount }
+          : {}),
+        ...(typeof msg.payload.token === 'string' && eventKind === 'deposit_credit_flush_orphaned'
+          ? { token: msg.payload.token }
+          : {}),
+        ...(typeof msg.payload.cause === 'string'
+          ? { cause: msg.payload.cause }
           : {}),
         ...(typeof msg.payload.userId === 'string'
           ? { userId: msg.payload.userId }
@@ -812,6 +1005,18 @@ export async function parseAuditTopic(
   events.sort((a, b) => a.sequence - b.sequence);
   sessions.sort((a, b) => a.firstSeq - b.firstSeq);
 
+  // Flush the soft schema-validation report into stats so dashboards
+  // and CI can surface writer/schema drift. Soft mode — the existing
+  // dispatch already produced normalized events; this is observation
+  // only.
+  for (const [op, entry] of schemaReport.failures.entries()) {
+    stats.schemaValidationFailures.push({
+      op,
+      count: entry.count,
+      ...(entry.firstError ? { firstError: entry.firstError } : {}),
+    });
+  }
+
   return { events, sessions, stats };
 }
 
@@ -893,6 +1098,22 @@ async function reconstructSession(
   let totalPrizeValue = 0;
   const totalPrizeValueByToken: Record<string, number> = {};
   let totalNftCount = 0;
+  // R8-FG-16 / Phase-6 Cluster C: surface slim-truncation count.
+  // The writer's slimPoolResult helper drops prizes (cap=10 by descending
+  // amount) when a pool message exceeds 1024 bytes and stamps
+  // `slim_truncated_prizes:N` so a topic-only auditor knows prizes
+  // were dropped. Pre-fix the reader never read this field — the
+  // session reported `totalPrizeValue` smaller than what actually
+  // landed on chain. The R5-FG-110 fix shipped writer-side; this
+  // is the reader-side closure.
+  let truncatedPrizesDropped = 0;
+
+  for (const pool of bucket.pools) {
+    const slim = (pool as unknown as { slim_truncated_prizes?: number }).slim_truncated_prizes;
+    if (typeof slim === 'number' && slim > 0) {
+      truncatedPrizesDropped += slim;
+    }
+  }
 
   for (const pool of pools) {
     totalSpent += pool.spent;
@@ -1139,6 +1360,19 @@ async function reconstructSession(
     }
   }
 
+  // R8-FG-16: surface slim-truncation as a session warning so
+  // verify-audit can promote it. Pool prizes were dropped to fit
+  // the 1024-byte HCS topic cap; the on-chain prize transfer
+  // happened with the FULL prize set, so the topic's
+  // `totalPrizeValue` here under-reports actual on-chain value.
+  // External auditors must reconcile against on-chain wallet
+  // state, not the topic alone, when this warning is present.
+  if (truncatedPrizesDropped > 0) {
+    warnings.push(
+      `slim_truncated_prizes: ${truncatedPrizesDropped} prize(s) dropped for size; topic totalPrizeValue under-reports on-chain truth`,
+    );
+  }
+
   return {
     sessionId,
     user,
@@ -1167,6 +1401,8 @@ async function reconstructSession(
     ...(bucket.open?.sequence != null ? { openSeq: bucket.open.sequence } : {}),
     // R5-FG-59: surface strategyDeviation from the writer.
     ...(strategyDeviation ? { strategyDeviation } : {}),
+    // R8-FG-16: surface count of slim-truncated prizes.
+    ...(truncatedPrizesDropped > 0 ? { truncatedPrizesDropped } : {}),
   };
 }
 
@@ -1325,7 +1561,31 @@ function parseRefund(msg: RawTopicMessage): NormalizedRefundEvent | null {
   const amt = Number(msg.payload.amt);
   const originalDepositTxId = String(msg.payload.originalDepositTxId ?? '');
   const refundTxId = String(msg.payload.refundTxId ?? '');
+  // R9-FG-11 / Phase-7 Cluster F: reader-side empty-string defense
+  // for originalDepositTxId. Closes R8-FG-8 PARTIAL — the writer
+  // strict schema rejects new emissions with empty values, but
+  // legacy/attacker-injected topic messages with empty
+  // originalDepositTxId still reached the reader and bypassed dedup
+  // (truthy `if (orig)` check at the dedup gate). Empty-string is a
+  // wire-level integrity failure; refuse to emit a normalized event.
+  // The softValidate dispatch will record this as
+  // schema_validation_failure when HCS20_SOFT_VALIDATE is on.
+  if (!originalDepositTxId) return null;
   if (!from || !to || !Number.isFinite(amt) || !refundTxId) return null;
+  // R6-FG-7: extract rake reversal so verify-audit reducers can
+  // apply operator-balance corrections. Pre-fix this was silently
+  // dropped, leaving operator-balance reconstruction short.
+  const rakeReversedRaw = msg.payload.rakeReversed;
+  const rakeReversed =
+    typeof rakeReversedRaw === 'number'
+      ? rakeReversedRaw
+      : typeof rakeReversedRaw === 'string' && rakeReversedRaw.length > 0
+        ? Number(rakeReversedRaw)
+        : undefined;
+  const rakeReversedToken =
+    typeof msg.payload.rakeReversedToken === 'string'
+      ? (msg.payload.rakeReversedToken as string)
+      : undefined;
   return {
     sequence: msg.sequence,
     timestamp: msg.timestamp,
@@ -1333,11 +1593,17 @@ function parseRefund(msg: RawTopicMessage): NormalizedRefundEvent | null {
     agent: from,
     user: to,
     amount: amt,
+    // R6-FG-8: prefer the explicit `token` field; fall back to the
+    // legacy tick→HBAR resolution for pre-fix refund messages.
     token: resolveTokenField(msg.payload),
     originalDepositTxId,
     refundTxId,
     reason: String(msg.payload.reason ?? ''),
     performedBy: String(msg.payload.performedBy ?? ''),
+    ...(rakeReversed !== undefined && Number.isFinite(rakeReversed)
+      ? { rakeReversed }
+      : {}),
+    ...(rakeReversedToken ? { rakeReversedToken } : {}),
   };
 }
 
