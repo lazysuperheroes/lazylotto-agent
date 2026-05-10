@@ -411,4 +411,99 @@ describe('R10-FG-1: pendingLedger eager drain must be idempotent across mid-prot
       g.__lazylottoRedisClient__ = saved;
     }
   });
+
+  // revert-proof: R11-FG-4 — withUserLock-faithful simulation. The
+  // production sequence (locks.ts:158-200) is:
+  //   1. acquireUserLock
+  //   2. refreshUser (live ← persisted)
+  //   3. applyPendingLedgerForUser (the drain — may mutate live)
+  //   4. fn() (the user's withdraw/play; reads live)
+  //   5. store.flush() (live → persisted)
+  //   6. releaseUserLock
+  //
+  // Phase-9 Cluster D moved updateBalance AFTER SADD inside the drain
+  // body. So a SADD throw in step 3 leaves live UNCHANGED. Step 5
+  // therefore commits a clean live, persisted stays at the original
+  // value, and the next drain (on a different Lambda) replays
+  // cleanly: one debit applied, total.
+  //
+  // Reverting the SADD<->updateBalance order (back to Phase-8: mutate
+  // first, then SADD) flips this test: step 3 leaves live=90, step 5
+  // commits persisted=90 with no applied-set anchor, and the next
+  // drain re-debits → DOUBLE-DEBIT through the sibling channel
+  // R11-FG-4 named.
+  //
+  // revert-proof: R11-FG-4 — close-to-test annotation so the
+  // audit-coverage gate's 10-line lookback finds it.
+  it('R11-FG-4: SADD-throw under withUserLock simulator does not double-debit', async () => {
+    const g = globalThis as unknown as { __lazylottoRedisClient__?: unknown };
+    const saved = g.__lazylottoRedisClient__;
+    const state: MockState = {
+      sets: new Map(), kv: new Map(), lists: new Map(),
+      saddBroken: false, lremBroken: false, callLog: [],
+    };
+    g.__lazylottoRedisClient__ = makeMockRedis(state);
+
+    try {
+      const userId = 'user-r11-fg-4';
+      const user = makeUser(userId, 100);
+      const store = makeMockStore(user, state);
+      await queuePendingLedgerAdjustment({
+        userId,
+        tokenKey: 'hbar',
+        amount: 10,
+        reason: 'refund',
+        sourceTx: '0.0.123@1234567890.000000004',
+        createdAt: '2026-04-07T23:58:00.000Z',
+      });
+
+      // === Lambda A: withUserLock for an unrelated user op ===
+      // Step 2: refreshUser
+      await store.refreshUser(userId);
+
+      // Step 3: drain runs. Simulate SADD failure.
+      state.saddBroken = true;
+      await applyPendingLedgerForUser(store, userId);
+      state.saddBroken = false;
+
+      // Step 4: fn() runs. We don't simulate user logic here —
+      // the assertion under test is that fn() reads the original
+      // (clean) live balance, NOT the dirty post-mutation 90.
+      assert.equal(
+        store.getUser(userId)!.balances.tokens.hbar!.available,
+        100,
+        `R11-FG-4: live cache must remain clean after SADD-throw. ` +
+          `Reverting the Phase-9 SADD-before-mutation order would ` +
+          `make this 90 (Phase-8 ordering: updateBalance ran before ` +
+          `SADD, mutation persists into withUserLock's flush even ` +
+          `though SADD threw).`,
+      );
+
+      // Step 5: withUserLock's post-body flush. Commits live to
+      // persisted. Live is clean, so persisted stays at 100.
+      await store.flush();
+
+      // === Lambda B: withUserLock for a different request ===
+      // Step 2: refreshUser pulls persisted into Lambda B's live.
+      await store.refreshUser(userId);
+      // Step 3: drain runs cleanly this time (saddBroken=false).
+      await applyPendingLedgerForUser(store, userId);
+      // Step 5: flush.
+      await store.flush();
+
+      const finalAvailable = store.getUser(userId)!.balances.tokens.hbar!.available;
+      assert.equal(
+        finalAvailable,
+        90,
+        `R11-FG-4: after SADD-throw + clean retry, balance must reflect ` +
+          `EXACTLY ONE debit. Got ${finalAvailable}. Phase-8 ordering ` +
+          `would produce 80 (double-debit) because the dirty live from ` +
+          `Lambda A's interrupted drain bleeds into withUserLock's flush, ` +
+          `committing the debit without anchor; Lambda B's drain then ` +
+          `re-debits because SISMEMBER=0.`,
+      );
+    } finally {
+      g.__lazylottoRedisClient__ = saved;
+    }
+  });
 });

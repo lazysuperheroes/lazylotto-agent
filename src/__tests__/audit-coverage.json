@@ -716,6 +716,30 @@
       ],
       "revertDrill": null,
       "notes": "Phase-9 Cluster C. The behavioral test now imports composeBalanceResponse directly from the production code (no verbatim copy contract — closes the P1-002 / P3-003 weakness raised against the Phase-8 form of this test). Type-system close: Readonly<UserAccount> at the IStore boundary catches future R10-FG-2-style mutations at compile time. R10-FG-2 manifest entry continues to track its named site; this entry tracks the architectural close that subsumes the sibling-route work."
+    },
+    {
+      "id": "R11-FG-4",
+      "round": "R11",
+      "severity": "high",
+      "coverageStrategy": "individual",
+      "summary": "Phase-8 ordering (updateBalance -> SADD -> flush -> LREM) left a sibling double-debit channel: SADD throw aborted before flush but updateBalance had ALREADY mutated live cache. withUserLock's outer catch continued into fn() against the dirty live, then flushed at locks.ts:197 — committing the debit to persisted state with NO applied-set anchor. Next drain on a different Lambda re-applied the debit because SISMEMBER=0.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/pendingLedger.ts",
+            "lines": "eager + periodic: SADD now runs BEFORE updateBalance + updateOperator. A SADD throw aborts before any in-memory mutation, so the dirty-cache bleed-into-fn() path no longer exists. Flush-throw branch (after both SADD and updateBalance ran) is acceptable because applied-set anchor protects against next-drain re-debit."
+          }
+        ],
+        "commit": "Phase-9 Cluster D"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/r10-fg-1-behavioral.test.ts",
+          "name": "R11-FG-4: SADD-throw under withUserLock simulator does not double-debit"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-9 Cluster D. The bug-shape test simulates the full withUserLock production sequence (refreshUser -> drain -> fn() -> flush) so a Phase-8-ordering revert flips it. R10-FG-1 entry continues to track its named site (call-order + partial-failure replay); R11-FG-4 entry tracks the architectural close that addresses the sibling channel via mutation-after-anchor. The pendingLedgerAppliedSet unbounded-growth medium (P4-002 / R10) is DEFERRED — it is operational hygiene, not a load-bearing bug, per Phase-9 dissection §5 and §7."
     }
   ]
 }

@@ -253,6 +253,47 @@ export async function applyPendingLedgerForUser(
             return { ok: false as const, reason: 'user-not-found' as const };
           }
 
+          // R10-FG-1 / Phase-8 Cluster D + R11-FG-4 / Phase-9 Cluster D:
+          // SADD goes FIRST, BEFORE any in-memory mutation. Pre-Phase-9
+          // the order was updateBalance → SADD → flush → LREM: a SADD
+          // throw left the in-memory cache dirty (debit applied, no
+          // anchor, flush never ran). withUserLock's outer catch then
+          // continued into `fn()` against the dirty live state; the
+          // post-body `store.flush()` at locks.ts:197 committed the
+          // dirty cache to persisted state — DOUBLE-DEBIT through a
+          // sibling channel R10-FG-1 didn't address.
+          //
+          // Post-fix (Phase-9): SADD-before-mutation. If SADD throws,
+          // no in-memory mutation has happened, so the dirty-cache
+          // bleed-into-fn() path doesn't exist. The flush-throw branch
+          // (after SADD + updateBalance both ran) is still acceptable:
+          // applied-set anchor is set, so next drain takes the
+          // already-applied branch and doesn't re-debit even if the
+          // flush eventually retries via withUserLock's flush.
+          //
+          //   - SADD throws → body propagates → fencedClaim releases →
+          //     outer try/catch logs and continues. Live cache clean,
+          //     persisted clean, anchor empty, row queued. Next drain
+          //     replays cleanly.
+          //   - flush throws after SADD+updateBalance → body propagates
+          //     → outer catch continues. Live dirty, persisted clean,
+          //     anchor SET. withUserLock continues; fn() reads dirty
+          //     live (over-conservatively) and locks.ts:197 flushes;
+          //     persisted catches up. Next drain SISMEMBER=1 →
+          //     already-applied → no re-debit. No double-debit possible.
+          //   - LREM keeps `.catch(() => 0)`; idempotent under
+          //     SISMEMBER=1 already-applied recovery.
+          await redis.sadd(
+            KEY_PREFIX.pendingLedgerAppliedSet,
+            `${entry.userId}:${entry.sourceTx}`,
+          );
+
+          // SADD landed; only NOW mutate the in-memory cache. A throw
+          // from any of these (e.g. updater bug, getUser race) leaves
+          // the anchor set and live possibly partially mutated; the
+          // next drain takes the already-applied branch via SISMEMBER
+          // and the operational hold is the lesser evil compared to
+          // double-debit.
           store.updateBalance(entry.userId, (b) => {
             const tokenEntry = b.tokens[entry.tokenKey];
             if (!tokenEntry) return b;
@@ -278,40 +319,6 @@ export async function applyPendingLedgerForUser(
             }));
           }
 
-          // R10-FG-1 / Phase-8 Cluster D: SADD-before-flush, no
-          // silent-swallow on either. Pre-Phase-8 the order was
-          // flush → SADD → LREM with all three wrapped in
-          // `.catch(() => 0)` — a Lambda kill (or a Redis SADD
-          // failure) between flush and SADD left the user balance
-          // debited and the applied-set empty, so the next drain
-          // re-applied → DOUBLE-DEBIT. The author's own comment at
-          // the prior site (R9-FG-6) recommended SADD-before-flush
-          // as the right ordering, but the code did the opposite.
-          //
-          // Post-fix:
-          //   - SADD first, no catch. If SADD throws, the body
-          //     propagates → fencedClaim's catch releases the fence
-          //     → applyPendingLedgerForUser's outer try/catch logs
-          //     and continues. The next drain re-acquires, runs the
-          //     body cleanly. updateBalance's in-memory mutation is
-          //     reverted when the caller's `withUserLock` runs
-          //     `store.refreshUser` at lock-acquire time
-          //     (locks.ts:172).
-          //   - flush bare. If flush throws, the body propagates →
-          //     same path. Applied-set entry stays as a poison-pill;
-          //     next drain takes the already-applied branch (LREM
-          //     the orphaned row, return reason='already-applied').
-          //     The debit is silently lost — acceptable per the
-          //     audit's "silent loss vs. double-debit" trade. The
-          //     reconcile cron's debit-vs-refund-anchor cross-check
-          //     surfaces silent loss as a non-conservation alert.
-          //   - LREM keeps `.catch(() => 0)`. LREM failure leaves
-          //     the row in the queue; next drain takes the
-          //     already-applied branch and re-LREMs. Idempotent.
-          await redis.sadd(
-            KEY_PREFIX.pendingLedgerAppliedSet,
-            `${entry.userId}:${entry.sourceTx}`,
-          );
           await store.flush();
 
           const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
@@ -455,6 +462,20 @@ export async function drainPendingLedgerAdjustments(
             return { ok: false as const, reason: 'user-not-found' as const };
           }
 
+          // R10-FG-1 / Phase-8 Cluster D + R11-FG-4 / Phase-9 Cluster D:
+          // SADD goes BEFORE updateBalance so a SADD throw never leaves
+          // dirty in-memory state. Mirrors the eager path's fix; see
+          // its full rationale at the corresponding site above.
+          // Periodic path's user-lock contract (acquireUserLock at the
+          // outer drain loop) means the dirty-cache bleed-into-fn()
+          // hazard the eager path described doesn't apply here, but
+          // the consistency of "SADD first, mutate second" is worth
+          // having across both paths.
+          await redis.sadd(
+            KEY_PREFIX.pendingLedgerAppliedSet,
+            `${entry.userId}:${entry.sourceTx}`,
+          );
+
           store.updateBalance(entry.userId, (b) => {
             const tokenEntry = b.tokens[entry.tokenKey];
             if (!tokenEntry) return b;
@@ -502,15 +523,6 @@ export async function drainPendingLedgerAdjustments(
               },
             }));
           }
-          // R10-FG-1 / Phase-8 Cluster D: SADD-before-flush. See
-          // the eager path's full rationale at the corresponding
-          // fix site above. Periodic path mirrors the same ordering
-          // and same no-catch contract: SADD propagates, flush
-          // propagates, LREM tolerates.
-          await redis.sadd(
-            KEY_PREFIX.pendingLedgerAppliedSet,
-            `${entry.userId}:${entry.sourceTx}`,
-          );
           await store.flush();
           // Remove exactly this entry from the list (count=1).
           const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
