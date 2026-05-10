@@ -26,6 +26,7 @@
 import type { IStore } from './IStore.js';
 import { getRedis, KEY_PREFIX } from '../auth/redis.js';
 import { acquireUserLock, releaseUserLock } from '../lib/locks.js';
+import { fencedClaim } from '../lib/fencedClaim.js';
 import { logger } from '../lib/logger.js';
 
 // ── Types ───────────────────────────────────────────────────────
@@ -200,103 +201,182 @@ export async function applyPendingLedgerForUser(
     // Filter to the requested user only.
     if (entry.userId !== userId) continue;
 
-    // R5-FG-4 (P3-001 + P5-RU-003): SET-NX a per-(userId, sourceTx)
-    // atomic claim before mutating. Pre-fix two concurrent drain
-    // passes (eager inside withUserLock for Lambda A, periodic
+    // R5-FG-4 (P3-001 + P5-RU-003) + R6-FG-12 + R6-Phase-4: claim
+    // ownership of this row before mutating. Pre-fix two concurrent
+    // drain passes (eager inside withUserLock for Lambda A, periodic
     // reconcile on Lambda B) both LRANGE'd, captured overlapping
     // snapshots, and after Lambda A LREM'd, Lambda B's snapshot still
     // contained the row — so B re-applied the debit + rake reversal.
-    // The user lock is RELEASED between A and B's acquires, so the
-    // lock alone doesn't serialize. Now: claim atomically before the
-    // mutation; LREM is belt-and-braces; 7d TTL bounds the claim.
+    //
+    // R6-FG-12 found the prior implementation hand-rolled
+    // `redis.set(claimKey, '1', {nx:true, ex:7d})` with NO fence
+    // token: any mutation failure left the claim stuck for 7 days
+    // AND left the LIST row in place. The next drain saw the held
+    // claim, took the "sibling already applied" branch, and LREM'd
+    // the row → debit silently lost.
+    //
+    // R6-Phase-4 routes the claim through `fencedClaim`: a
+    // mutation throw inside the body releases the claim via
+    // compare-and-DEL so the next drain pass can retry. The LIST
+    // row is only LREM'd inside the fenced body, AFTER the
+    // store mutation succeeds.
     const claimKey = `${KEY_PREFIX.pendingLedgerClaim}${entry.userId}:${entry.sourceTx}`;
-    const claimed = await redis
-      .set(claimKey, '1', { nx: true, ex: 7 * 24 * 60 * 60 })
-      .catch(() => null);
-    if (claimed === null) {
-      // Another drain pass already claimed this entry. Skip the
-      // mutation; that pass will LREM. Belt-and-braces: also LREM in
-      // case the claimer crashed mid-flight (leaving the row), since
-      // the claim's 7d TTL keeps re-application safe.
-      const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
-      await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
-      continue;
-    }
-
+    // R9-FG-6 / Phase-7 Cluster E: idempotency anchor on (userId, sourceTx).
+    // No TTL — once a row is applied, it's applied forever.
+    const appliedKey = `${KEY_PREFIX.pendingLedgerApplied}${entry.userId}:${entry.sourceTx}`;
+    let outcome;
     try {
-      const user = store.getUser(entry.userId);
-      if (!user) {
-        const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
-        await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
-        failed++;
-        logger.warn('pending ledger entry dropped — user not found', {
-          component: 'PendingLedger',
-          userId: entry.userId,
-          sourceTx: entry.sourceTx,
-        });
-        continue;
-      }
+      outcome = await fencedClaim(
+        claimKey,
+        async () => {
+          // R9-FG-6 / Phase-7 Cluster E: SADD-membership check BEFORE
+          // mutation. Pre-Phase-7 the body assumed bodies are
+          // idempotent, but Lambda crash mid-mutation (between
+          // updateBalance and lrem) leaves balance debited, row in
+          // queue, claim held. After 7-day TTL, sibling re-acquires,
+          // re-runs body → double-debit. Now: check the applied-set
+          // first; if present, the prior body succeeded but didn't
+          // get to LREM the row — we just LREM and return without
+          // re-applying.
+          const alreadyApplied = await redis.sismember(KEY_PREFIX.pendingLedgerAppliedSet, `${entry.userId}:${entry.sourceTx}`);
+          if (alreadyApplied === 1) {
+            const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
+            await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
+            return { ok: false as const, reason: 'already-applied' as const };
+          }
 
-      store.updateBalance(entry.userId, (b) => {
-        const tokenEntry = b.tokens[entry.tokenKey];
-        if (!tokenEntry) return b;
-        tokenEntry.available = Math.max(0, tokenEntry.available - entry.amount);
-        return b;
-      });
+          const user = store.getUser(entry.userId);
+          if (!user) {
+            // User was deleted since the entry was queued — drop it.
+            // We're inside the fenced body so the claim is held;
+            // return a marker to let the outer scope LREM + log.
+            return { ok: false as const, reason: 'user-not-found' as const };
+          }
 
-      // R4-FG-13: apply the operator-rake reversal too. Pre-fix the
-      // operator silently retained rake when the refund was queued.
-      if (entry.rakeReversal && entry.rakeReversal.amount > 0) {
-        const rakeKey = entry.rakeReversal.tokenKey;
-        const rakeAmt = entry.rakeReversal.amount;
-        store.updateOperator((op) => ({
-          ...op,
-          balances: {
-            ...op.balances,
-            [rakeKey]: Math.max(0, (op.balances[rakeKey] ?? 0) - rakeAmt),
-          },
-          totalRakeCollected: {
-            ...op.totalRakeCollected,
-            [rakeKey]: Math.max(0, (op.totalRakeCollected[rakeKey] ?? 0) - rakeAmt),
-          },
-        }));
-      }
+          store.updateBalance(entry.userId, (b) => {
+            const tokenEntry = b.tokens[entry.tokenKey];
+            if (!tokenEntry) return b;
+            tokenEntry.available = Math.max(0, tokenEntry.available - entry.amount);
+            return b;
+          });
 
-      const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
-      await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
+          // R4-FG-13: apply the operator-rake reversal. Pre-fix the
+          // operator silently retained rake when the refund was queued.
+          if (entry.rakeReversal && entry.rakeReversal.amount > 0) {
+            const rakeKey = entry.rakeReversal.tokenKey;
+            const rakeAmt = entry.rakeReversal.amount;
+            store.updateOperator((op) => ({
+              ...op,
+              balances: {
+                ...op.balances,
+                [rakeKey]: Math.max(0, (op.balances[rakeKey] ?? 0) - rakeAmt),
+              },
+              totalRakeCollected: {
+                ...op.totalRakeCollected,
+                [rakeKey]: Math.max(0, (op.totalRakeCollected[rakeKey] ?? 0) - rakeAmt),
+              },
+            }));
+          }
 
-      // R5-FG-61 (P5-RU-002): flush after lrem so a sibling Lambda
-      // or cold-start reads the post-mutation state. Pre-fix the
-      // periodic drain flushed but the eager path didn't; sibling
-      // Lambdas could read stale Redis with the queue entry already
-      // applied locally but not yet persisted.
-      await store.flush().catch((flushErr) => {
-        logger.warn('eager pending ledger flush failed', {
-          component: 'PendingLedger',
-          userId: entry.userId,
-          sourceTx: entry.sourceTx,
-          error: flushErr instanceof Error ? flushErr.message : String(flushErr),
-        });
-      });
+          // R10-FG-1 / Phase-8 Cluster D: SADD-before-flush, no
+          // silent-swallow on either. Pre-Phase-8 the order was
+          // flush → SADD → LREM with all three wrapped in
+          // `.catch(() => 0)` — a Lambda kill (or a Redis SADD
+          // failure) between flush and SADD left the user balance
+          // debited and the applied-set empty, so the next drain
+          // re-applied → DOUBLE-DEBIT. The author's own comment at
+          // the prior site (R9-FG-6) recommended SADD-before-flush
+          // as the right ordering, but the code did the opposite.
+          //
+          // Post-fix:
+          //   - SADD first, no catch. If SADD throws, the body
+          //     propagates → fencedClaim's catch releases the fence
+          //     → applyPendingLedgerForUser's outer try/catch logs
+          //     and continues. The next drain re-acquires, runs the
+          //     body cleanly. updateBalance's in-memory mutation is
+          //     reverted when the caller's `withUserLock` runs
+          //     `store.refreshUser` at lock-acquire time
+          //     (locks.ts:172).
+          //   - flush bare. If flush throws, the body propagates →
+          //     same path. Applied-set entry stays as a poison-pill;
+          //     next drain takes the already-applied branch (LREM
+          //     the orphaned row, return reason='already-applied').
+          //     The debit is silently lost — acceptable per the
+          //     audit's "silent loss vs. double-debit" trade. The
+          //     reconcile cron's debit-vs-refund-anchor cross-check
+          //     surfaces silent loss as a non-conservation alert.
+          //   - LREM keeps `.catch(() => 0)`. LREM failure leaves
+          //     the row in the queue; next drain takes the
+          //     already-applied branch and re-LREMs. Idempotent.
+          await redis.sadd(
+            KEY_PREFIX.pendingLedgerAppliedSet,
+            `${entry.userId}:${entry.sourceTx}`,
+          );
+          await store.flush();
 
-      applied++;
-      logger.info('pending ledger adjustment applied (eager)', {
-        component: 'PendingLedger',
-        event: 'pending_ledger_applied_eager',
-        userId: entry.userId,
-        amount: entry.amount,
-        token: entry.tokenKey,
-        sourceTx: entry.sourceTx,
-      });
+          const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
+          await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
+
+          return { ok: true as const };
+        },
+        { ttlSec: 7 * 24 * 60 * 60, context: 'pending-ledger-eager' },
+      );
     } catch (err) {
+      // fencedClaim only rethrows on PreserveClaimError. The body
+      // doesn't submit on-chain actions so this branch is impossible
+      // in practice, but if it ever fires we propagate so callers
+      // see the failure instead of silently corrupting the queue.
       failed++;
-      logger.error('eager pending ledger apply failed', {
+      logger.error('eager pending ledger apply failed (preserve-claim)', {
         component: 'PendingLedger',
         userId: entry.userId,
         sourceTx: entry.sourceTx,
         error: err,
       });
+      continue;
     }
+
+    if (outcome.kind === 'busy') {
+      // R8-FG-7 / Phase-6 Cluster E: do NOT LREM here. Pre-fix this
+      // branch best-effort LREM'd the LIST row "in case the sibling
+      // crashed mid-flight". But fencedClaim's catch path releases
+      // the claim on ANY non-preserve throw — release happens
+      // EXACTLY when the in-body LREM did NOT run. So a Lambda B
+      // that sees `kind:'busy'` while Lambda A is mid-body, then A
+      // throws non-preserve, would: A releases the claim → B has
+      // already removed the LIST row → next drain sees nothing to
+      // process → user's debit silently lost. The exact R6-FG-12
+      // archetype in a slightly different shape.
+      //
+      // Correct behavior: leave the row in place. A's release means
+      // the next drain pass re-acquires the claim and processes
+      // the row to completion. The fence guarantees serialization,
+      // not LREM ordering.
+      continue;
+    }
+
+    if (!outcome.result.ok) {
+      // user-not-found path: drop the row + log.
+      const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
+      await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
+      failed++;
+      logger.warn('pending ledger entry dropped — user not found', {
+        component: 'PendingLedger',
+        userId: entry.userId,
+        sourceTx: entry.sourceTx,
+      });
+      continue;
+    }
+
+    applied++;
+    logger.info('pending ledger adjustment applied (eager)', {
+      component: 'PendingLedger',
+      event: 'pending_ledger_applied_eager',
+      userId: entry.userId,
+      amount: entry.amount,
+      token: entry.tokenKey,
+      sourceTx: entry.sourceTx,
+    });
   }
 
   return { applied, failed };
@@ -344,111 +424,149 @@ export async function drainPendingLedgerAdjustments(
       continue;
     }
 
-    // R5-FG-4: per-(userId, sourceTx) claim. See `applyPendingLedgerForUser`.
+    // R5-FG-4 + R6-FG-12 + R6-Phase-4: route the per-(userId, sourceTx)
+    // claim through `fencedClaim`. See `applyPendingLedgerForUser`
+    // for the full archetype rationale. Pre-fix the hand-rolled
+    // `redis.set(claimKey, '1', { nx: true, ex: 7d })` left the
+    // claim stuck for 7d on a mutation throw.
     const claimKey = `${KEY_PREFIX.pendingLedgerClaim}${entry.userId}:${entry.sourceTx}`;
-    const claimed = await redis
-      .set(claimKey, '1', { nx: true, ex: 7 * 24 * 60 * 60 })
-      .catch(() => null);
-    if (claimed === null) {
-      // Sibling drain already applied (or is mid-apply). Best-effort
-      // LREM in case the row was left behind, then release the lock.
-      const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
-      await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
-      await releaseUserLock(entry.userId, lockToken);
-      continue;
-    }
-
+    let outcome;
     try {
-      // Refresh the user from the store before mutating, so we don't
-      // clobber concurrent balance changes.
-      await store.refreshUser(entry.userId);
-      const user = store.getUser(entry.userId);
-      if (!user) {
-        // User was deleted since the entry was queued — drop it and log.
-        const removeRaw =
-          typeof row === 'string' ? row : JSON.stringify(row);
-        await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
-        result.failed++;
-        logger.warn('pending ledger entry dropped — user not found', {
-          component: 'PendingLedger',
-          userId: entry.userId,
-          sourceTx: entry.sourceTx,
-        });
-        continue;
-      }
-
-      store.updateBalance(entry.userId, (b) => {
-        const tokenEntry = b.tokens[entry.tokenKey];
-        if (!tokenEntry) return b;
-        tokenEntry.available = Math.max(0, tokenEntry.available - entry.amount);
-        return b;
-      });
-      // R4-FG-13: apply rake reversal in the periodic drain path too.
-      // R5-FG-96 (P3-014): cross-check the queued rakeAmount against
-      // the deposit record's current rakeAmount. The two should match
-      // (the queue snapshot was built from the same DepositRecord),
-      // but operator-side migrations or hand-edits could drift the
-      // values; if they differ we use the deposit record's value
-      // (canonical) and log a warning.
-      if (entry.rakeReversal && entry.rakeReversal.amount > 0) {
-        const rakeKey = entry.rakeReversal.tokenKey;
-        let rakeAmt = entry.rakeReversal.amount;
-        if (store.getDepositByTxId) {
-          try {
-            const dep = await store.getDepositByTxId(entry.sourceTx);
-            if (dep && typeof dep.rakeAmount === 'number' && dep.rakeAmount !== rakeAmt) {
-              logger.warn('pending ledger rake amount drifted from deposit record', {
-                component: 'PendingLedger',
-                event: 'pending_ledger_rake_drift',
-                userId: entry.userId,
-                sourceTx: entry.sourceTx,
-                queuedAmount: rakeAmt,
-                depositRecordAmount: dep.rakeAmount,
-              });
-              rakeAmt = dep.rakeAmount;
-            }
-          } catch {
-            /* deposit record lookup is advisory; proceed with queued amount */
+      outcome = await fencedClaim(
+        claimKey,
+        async () => {
+          // R9-FG-6 / Phase-7 Cluster E: SADD-membership idempotency
+          // check (see eager-path body for full rationale).
+          const alreadyApplied = await redis.sismember(
+            KEY_PREFIX.pendingLedgerAppliedSet,
+            `${entry.userId}:${entry.sourceTx}`,
+          );
+          if (alreadyApplied === 1) {
+            const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
+            await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
+            return { ok: false as const, reason: 'already-applied' as const };
           }
-        }
-        store.updateOperator((op) => ({
-          ...op,
-          balances: {
-            ...op.balances,
-            [rakeKey]: Math.max(0, (op.balances[rakeKey] ?? 0) - rakeAmt),
-          },
-          totalRakeCollected: {
-            ...op.totalRakeCollected,
-            [rakeKey]: Math.max(0, (op.totalRakeCollected[rakeKey] ?? 0) - rakeAmt),
-          },
-        }));
-      }
-      await store.flush();
 
-      // Remove exactly this entry from the list (count=1)
-      const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
-      await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
+          // Refresh the user from the store before mutating so we don't
+          // clobber concurrent balance changes.
+          await store.refreshUser(entry.userId);
+          const user = store.getUser(entry.userId);
+          if (!user) {
+            return { ok: false as const, reason: 'user-not-found' as const };
+          }
 
-      result.applied++;
-      logger.info('pending ledger adjustment applied', {
-        component: 'PendingLedger',
-        event: 'pending_ledger_applied',
-        userId: entry.userId,
-        amount: entry.amount,
-        token: entry.tokenKey,
-        sourceTx: entry.sourceTx,
-      });
+          store.updateBalance(entry.userId, (b) => {
+            const tokenEntry = b.tokens[entry.tokenKey];
+            if (!tokenEntry) return b;
+            tokenEntry.available = Math.max(0, tokenEntry.available - entry.amount);
+            return b;
+          });
+
+          // R4-FG-13: apply rake reversal in the periodic drain path too.
+          // R5-FG-96 (P3-014): cross-check the queued rakeAmount against
+          // the deposit record's current rakeAmount. The two should match
+          // (the queue snapshot was built from the same DepositRecord),
+          // but operator-side migrations or hand-edits could drift the
+          // values; if they differ we use the deposit record's value
+          // (canonical) and log a warning.
+          if (entry.rakeReversal && entry.rakeReversal.amount > 0) {
+            const rakeKey = entry.rakeReversal.tokenKey;
+            let rakeAmt = entry.rakeReversal.amount;
+            if (store.getDepositByTxId) {
+              try {
+                const dep = await store.getDepositByTxId(entry.sourceTx);
+                if (dep && typeof dep.rakeAmount === 'number' && dep.rakeAmount !== rakeAmt) {
+                  logger.warn('pending ledger rake amount drifted from deposit record', {
+                    component: 'PendingLedger',
+                    event: 'pending_ledger_rake_drift',
+                    userId: entry.userId,
+                    sourceTx: entry.sourceTx,
+                    queuedAmount: rakeAmt,
+                    depositRecordAmount: dep.rakeAmount,
+                  });
+                  rakeAmt = dep.rakeAmount;
+                }
+              } catch {
+                /* deposit record lookup is advisory; proceed with queued amount */
+              }
+            }
+            store.updateOperator((op) => ({
+              ...op,
+              balances: {
+                ...op.balances,
+                [rakeKey]: Math.max(0, (op.balances[rakeKey] ?? 0) - rakeAmt),
+              },
+              totalRakeCollected: {
+                ...op.totalRakeCollected,
+                [rakeKey]: Math.max(0, (op.totalRakeCollected[rakeKey] ?? 0) - rakeAmt),
+              },
+            }));
+          }
+          // R10-FG-1 / Phase-8 Cluster D: SADD-before-flush. See
+          // the eager path's full rationale at the corresponding
+          // fix site above. Periodic path mirrors the same ordering
+          // and same no-catch contract: SADD propagates, flush
+          // propagates, LREM tolerates.
+          await redis.sadd(
+            KEY_PREFIX.pendingLedgerAppliedSet,
+            `${entry.userId}:${entry.sourceTx}`,
+          );
+          await store.flush();
+          // Remove exactly this entry from the list (count=1).
+          const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
+          await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
+          return { ok: true as const };
+        },
+        { ttlSec: 7 * 24 * 60 * 60, context: 'pending-ledger-periodic' },
+      );
     } catch (err) {
+      // PreserveClaim path is impossible here (no on-chain action),
+      // but propagate just in case so the operator sees it.
       result.failed++;
-      logger.error('pending ledger drain failed for entry', {
+      logger.error('pending ledger drain failed (preserve-claim path)', {
         component: 'PendingLedger',
         userId: entry.userId,
         sourceTx: entry.sourceTx,
         error: err,
       });
-    } finally {
       await releaseUserLock(entry.userId, lockToken);
+      continue;
     }
+
+    if (outcome.kind === 'busy') {
+      // R8-FG-7 / Phase-6 Cluster E: do NOT LREM here. See the
+      // identical fix in `applyPendingLedgerForUser`. Removing
+      // the row before the sibling's body completes (or after
+      // the sibling's catch released the claim without LREMing)
+      // silently loses the user debit. Leave the row in place so
+      // the next drain pass re-acquires and processes it.
+      await releaseUserLock(entry.userId, lockToken);
+      continue;
+    }
+
+    if (!outcome.result.ok) {
+      const removeRaw = typeof row === 'string' ? row : JSON.stringify(row);
+      await redis.lrem(LIST_KEY, 1, removeRaw).catch(() => 0);
+      await releaseUserLock(entry.userId, lockToken);
+      result.failed++;
+      logger.warn('pending ledger entry dropped — user not found', {
+        component: 'PendingLedger',
+        userId: entry.userId,
+        sourceTx: entry.sourceTx,
+      });
+      continue;
+    }
+
+    result.applied++;
+    logger.info('pending ledger adjustment applied', {
+      component: 'PendingLedger',
+      event: 'pending_ledger_applied',
+      userId: entry.userId,
+      amount: entry.amount,
+      token: entry.tokenKey,
+      sourceTx: entry.sourceTx,
+    });
+    await releaseUserLock(entry.userId, lockToken);
   }
 
   return result;

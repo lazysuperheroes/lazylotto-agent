@@ -691,6 +691,34 @@
       ],
       "revertDrill": null,
       "notes": "Phase-8 Cluster C. Test exercises a verbatim copy of the route mutation block against an in-memory store fixture; resync required if the route logic changes (documented at the top of the test)."
+    },
+    {
+      "id": "R10-FG-1",
+      "round": "R10",
+      "severity": "critical",
+      "coverageStrategy": "individual",
+      "summary": "pendingLedger eager + periodic drains recorded SADD AFTER flush; a Lambda kill between flush and SADD left the user balance debited but the applied-set un-recorded - next drain re-applied -> DOUBLE-DEBIT. R9-FG-6 was not actually closed by Phase-7 (window narrowed from 7 days to ~1 round-trip, archetype intact). Comment-vs-code mismatch: the author wrote a 12-line comment recommending SADD-before-flush, then coded the opposite.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/pendingLedger.ts",
+            "lines": "eager + periodic: SADD before flush, no .catch swallow on either"
+          }
+        ],
+        "commit": "Phase-8 Cluster D"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/r10-fg-1-behavioral.test.ts",
+          "name": "SADD records applied-set membership BEFORE flush"
+        },
+        {
+          "file": "src/__tests__/r10-fg-1-behavioral.test.ts",
+          "name": "partial-failure replay (SADD aborted) does not double-debit on next drain"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-8 Cluster D. Two behavioral tests: (a) call-order assertion (SADD precedes flush in normal operation); (b) end-to-end idempotence under kill-mid-protocol with simulated Lambda restart via store.refreshUser. The new tests would have caught the bug at PR time."
     }
   ]
 }
