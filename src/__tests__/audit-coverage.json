@@ -667,6 +667,30 @@
       ],
       "revertDrill": null,
       "notes": "Phase-8 Cluster B. The categorized counter gives consumers (verify-audit, monitoring panel, ops dashboard) a recoverable signal without requiring HCS20_SOFT_VALIDATE to be enabled (the softValidate path was the only pre-fix signal and was disabled on user-facing paths)."
+    },
+    {
+      "id": "R10-FG-2",
+      "round": "R10",
+      "severity": "critical",
+      "coverageStrategy": "individual",
+      "summary": "/api/user/status mutated the store-cached user.balances on a live reference; subsequent /api/user/withdraw on the same warm Lambda saw balances already net of pending and applied its own pending-debit on top - DOUBLE-DEDUCT. Comment-vs-code mismatch (the route comment said \"we don't mutate the store-cached object\" but line 154 reassigned user.balances anyway).",
+      "fix": {
+        "files": [
+          {
+            "file": "app/api/user/status/route.ts",
+            "lines": "build separate responseBalances variable; do not reassign user.balances"
+          }
+        ],
+        "commit": "Phase-8 Cluster C"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/r10-fg-2-behavioral.test.ts",
+          "name": "two consecutive invocations observe identical store-cached balances"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-8 Cluster C. Test exercises a verbatim copy of the route mutation block against an in-memory store fixture; resync required if the route logic changes (documented at the top of the test)."
     }
   ]
 }
