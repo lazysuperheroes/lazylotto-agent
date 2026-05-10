@@ -1,34 +1,38 @@
 /**
- * R10-FG-3 behavioral test — parseRefund silent-null over-credits user.
+ * R10-FG-3 + R11-FG-1 + R11-FG-5 behavioral test — parseRefund
+ * categorized null-drops; over-credit invariant locked.
  *
- * Authored 2026-05-09 BEFORE any fix lands, as part of the dissection
- * exercise verifying the hypothesis that "tests catch prior-round
- * archetypes, not current-round introduction archetypes". This test
- * exists to FAIL against current code.
+ * Authored 2026-05-09 (Phase-8 closure of R10-FG-3) and rewritten
+ * 2026-05-10 (Phase-9 Cluster B) to assert the BUG-shape invariant
+ * instead of the SIGNAL-existence shape:
  *
- * R10-FG-3 says: when a refund message has empty `originalDepositTxId`,
- * `parseRefund` returns null at hcs20-reader.ts:1542 and the dispatcher
- * (lines 619-672) only increments the generic `stats.skippedMessages++`
- * counter. Verify-audit's reducers cannot distinguish a dropped refund
- * from any other skip — `totalRefundedByToken[token]` stays short and
- * the reconstructed user balance OVER-CREDITS by the refund amount.
+ *   - Phase-8's test asserted "some categorized signal exists" — it
+ *     passed against any implementation that incremented some counter,
+ *     including the wire-only one that no consumer read (R11-FG-1).
+ *   - Phase-9's test asserts the FIVE distinct null-return reasons
+ *     each map to a NAMED, DISCRIMINATED counter the dispatcher
+ *     increments. verify-audit (`src/scripts/verify-audit.ts`) wires
+ *     each non-zero counter into a `refund_dropped_malformed` alert,
+ *     so the over-credit invariant is closed end-to-end (counter
+ *     incremented → alert fires → operator sees the dropped refund
+ *     instead of silent over-credit).
  *
- * Pre-Phase-7 the truthy `if (originalDepositTxId)` gate let empty-string
- * messages through and the dispatcher double-counted them. R9-FG-11 /
- * Phase-7 Cluster F flipped to "refuse to emit a normalized event",
- * which inverts the failure direction (over-credit instead of
- * double-count) but breaks invariant 3 either way.
+ * The 5 parseRefund null-return reasons (`hcs20-reader.ts`
+ * `parseRefund` body):
+ *   1. empty `originalDepositTxId`     → refundsDroppedEmptyOriginal
+ *   2. missing `from` or `to`           → refundsDroppedMissingParty
+ *   3. non-finite `amt`                 → refundsDroppedInvalidAmt
+ *   4. missing `refundTxId`             → refundsDroppedMissingRefundTx
+ *   (5. valid payload                   → emits NormalizedRefundEvent)
  *
- * The behavioral invariant: a refund message that hits the dispatcher
- * MUST produce SOME recoverable signal that downstream reducers /
- * verify-audit / monitoring can act on — either (a) the event surfaces
- * in `result.events` (with a sentinel for the malformed field), or (b)
- * a categorized `stats` counter is incremented that names this specific
- * failure mode (NOT the catch-all `skippedMessages` and NOT the
- * coincidental Zod softValidate output, which only fires when an env
- * variable happens to be set).
- *
- * Hypothesis-verification protocol: this test MUST FAIL right now.
+ * If parseRefund's body is reverted to a single bare `return null`
+ * for any of these reasons, the corresponding counter stops
+ * incrementing and this test flips. If verify-audit's alert
+ * consumer is reverted, the over-credit invariant remains open
+ * but the test (which scopes to the reader's stats) still flips
+ * because it asserts each reason has its own counter — see
+ * verify-audit's `refund_dropped_malformed` alert pipeline for the
+ * downstream consumer that this test pairs with.
  */
 
 import { describe, it } from 'node:test';
@@ -40,72 +44,114 @@ const T0 = '2026-04-07T23:59:00.000Z';
 const USER = '0.0.7349994';
 const AGENT = '0.0.8456987';
 
-describe('R10-FG-3: parseRefund empty-original-deposit must produce a recoverable signal', () => {
-  // revert-proof: R10-FG-3 + R9-FG-11 — removing the
-  // `stats.refundsDroppedEmptyOriginal` increment in
-  // hcs20-reader.ts (or the stats-shape declaration) flips this
-  // test. The dispatcher must emit a categorized signal that
-  // does NOT depend on softValidate's env gating. R9-FG-11 covered
-  // the reader-side empty-string defense at parseRefund line 1542;
-  // Phase-9 re-promoted that entry to link here.
-  it('refund with empty originalDepositTxId either surfaces an event or a categorized stat', async () => {
-    const refundMsg: RawTopicMessage = {
-      sequence: 1,
-      timestamp: T0,
-      payload: {
-        p: 'hcs-20',
-        op: 'refund',
+function refundMsg(seq: number, payload: Record<string, unknown>): RawTopicMessage {
+  return {
+    sequence: seq,
+    timestamp: T0,
+    payload: {
+      p: 'hcs-20',
+      op: 'refund',
+      reason: 'manual_admin',
+      performedBy: AGENT,
+      ...payload,
+    },
+  };
+}
+
+describe('R10-FG-3 + R11-FG-1 + R11-FG-5: parseRefund null-drops are categorized per reason', () => {
+  // revert-proof: R10-FG-3 + R11-FG-1 + R11-FG-5 + R9-FG-11 —
+  // bug-shape test, not signal-shape. Asserts that EACH of the four
+  // discriminated null-return reasons increments its OWN counter on
+  // `result.stats.refundsDropped*`. Reverting the dispatcher's per-
+  // reason categorization (hcs20-reader.ts inside the `op === 'refund'`
+  // branch) flips one or more of these assertions. R11-FG-1 is closed
+  // end-to-end by verify-audit's `refund_dropped_malformed` alert
+  // pipeline (consumer-wired) — see `verify-audit.ts`'s
+  // `droppedReasons` loop for the consumer.
+  it('each null-return reason increments its own categorized counter', async () => {
+    const messages: RawTopicMessage[] = [
+      // 1. empty originalDepositTxId
+      refundMsg(1, {
         from: AGENT,
         to: USER,
         amt: 5,
         token: 'HBAR',
-        originalDepositTxId: '', // legacy / malformed — the case under test
-        refundTxId: '0.0.123@1234567890.123456789',
-        reason: 'manual_admin',
-        performedBy: AGENT,
-      },
-    };
+        originalDepositTxId: '',
+        refundTxId: '0.0.123@1.1',
+      }),
+      // 2. missing from
+      refundMsg(2, {
+        to: USER,
+        amt: 5,
+        token: 'HBAR',
+        originalDepositTxId: '0.0.111@222.333',
+        refundTxId: '0.0.123@2.2',
+      }),
+      // 3. non-finite amt
+      refundMsg(3, {
+        from: AGENT,
+        to: USER,
+        amt: 'NaN',
+        token: 'HBAR',
+        originalDepositTxId: '0.0.111@222.444',
+        refundTxId: '0.0.123@3.3',
+      }),
+      // 4. missing refundTxId
+      refundMsg(4, {
+        from: AGENT,
+        to: USER,
+        amt: 5,
+        token: 'HBAR',
+        originalDepositTxId: '0.0.111@222.555',
+      }),
+      // 5. valid — must NOT increment any drop counter
+      refundMsg(5, {
+        from: AGENT,
+        to: USER,
+        amt: 5,
+        token: 'HBAR',
+        originalDepositTxId: '0.0.111@222.666',
+        refundTxId: '0.0.123@5.5',
+      }),
+    ];
 
-    const result = await parseAuditTopic([refundMsg], NOW);
+    const result = await parseAuditTopic(messages, NOW);
+
+    assert.equal(
+      result.stats.refundsDroppedEmptyOriginal,
+      1,
+      'empty originalDepositTxId must increment refundsDroppedEmptyOriginal exactly once',
+    );
+    assert.equal(
+      result.stats.refundsDroppedMissingParty,
+      1,
+      'missing from/to must increment refundsDroppedMissingParty exactly once',
+    );
+    assert.equal(
+      result.stats.refundsDroppedInvalidAmt,
+      1,
+      'non-finite amt must increment refundsDroppedInvalidAmt exactly once',
+    );
+    assert.equal(
+      result.stats.refundsDroppedMissingRefundTx,
+      1,
+      'missing refundTxId must increment refundsDroppedMissingRefundTx exactly once',
+    );
+    // The 5th (valid) message must NOT bump any drop counter.
+    // Per-reason invariant: total drops = 4, and the valid message
+    // surfaces a refund event in the events stream.
+    const totalDropped =
+      result.stats.refundsDroppedEmptyOriginal +
+      result.stats.refundsDroppedMissingParty +
+      result.stats.refundsDroppedInvalidAmt +
+      result.stats.refundsDroppedMissingRefundTx;
+    assert.equal(totalDropped, 4, 'valid refund must not bump any drop counter');
 
     const refundEvents = result.events.filter((e) => e.type === 'refund');
-    const stats = result.stats as unknown as Record<string, unknown>;
-
-    // Acceptable signals (any one of these makes the dispatcher's
-    // dropped-refund recoverable for downstream reducers):
-    //   (a) the event surfaces with a sentinel originalDepositTxId
-    //   (b) a categorized counter on stats names the failure mode
-    //
-    // Generic `stats.skippedMessages` does NOT count — it conflates
-    // dozens of different skip reasons and reducers can't act on it.
-    // `stats.schemaValidationFailures` does NOT count by itself —
-    // it's softValidate's coincidental output, only fires when
-    // HCS20_SOFT_VALIDATE=1 / NODE_ENV=test, and is observation-only.
-    const surfacedAsEvent = refundEvents.length === 1;
-    const numericGt0 = (v: unknown) => typeof v === 'number' && v > 0;
-    const arrNonEmpty = (v: unknown) => Array.isArray(v) && v.length > 0;
-    // Accept any reasonable categorization shape — numeric counter,
-    // populated array, or an event surfaced with sentinel. Generic
-    // `skippedMessages` and softValidate's `schemaValidationFailures`
-    // do NOT count (see header comment for rationale).
-    const hasCategorizedCounter =
-      numericGt0(stats.legacyEmptyOriginalRefund) ||
-      numericGt0(stats.refundsDroppedEmptyOriginal) ||
-      numericGt0(stats.refundsWithEmptyOriginal) ||
-      arrNonEmpty(stats.refundsDroppedEmptyOriginal) ||
-      arrNonEmpty(stats.refundsWithEmptyOriginal);
-
-    assert.ok(
-      surfacedAsEvent || hasCategorizedCounter,
-      `R10-FG-3: refund message with empty originalDepositTxId produced ` +
-        `no recoverable signal. parseRefund returns null at ` +
-        `hcs20-reader.ts:1542; dispatcher only increments ` +
-        `stats.skippedMessages++. result.events has ${refundEvents.length} ` +
-        `refund events; result.stats has no categorized counter for this ` +
-        `failure mode. Verify-audit's reducers cannot distinguish this ` +
-        `from any other skip → user balance OVER-CREDITS by the refund ` +
-        `amount. Fix requires either (a) emit event with sentinel for ` +
-        `originalDepositTxId, or (b) add a categorized counter.`,
+    assert.equal(
+      refundEvents.length,
+      1,
+      'valid refund (only) must surface as a NormalizedRefundEvent',
     );
   });
 });

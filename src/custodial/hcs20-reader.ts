@@ -287,24 +287,27 @@ export interface AuditReaderResult {
       firstError?: string;
     }[];
     /**
-     * R10-FG-3 / Phase-8 Cluster B: refund messages dropped at
-     * `parseRefund` because the on-chain payload carried an empty
-     * `originalDepositTxId`. Pre-fix the dispatcher only incremented
-     * the catch-all `skippedMessages` counter when parseRefund
-     * returned null — verify-audit's reducers couldn't distinguish
-     * a dropped legitimate-but-malformed refund from any other skip,
-     * so reconstructed user balances OVER-CREDITED by the refund
-     * amount.
+     * R10-FG-3 / Phase-8 Cluster B + R11-FG-5 / Phase-9 Cluster B:
+     * refund messages dropped at `parseRefund` because the on-chain
+     * payload was malformed. `parseRefund` returns null for FIVE
+     * distinct reasons; pre-Phase-9 only the empty-`originalDepositTxId`
+     * branch was categorized, so the other four (missing from/to,
+     * non-finite amt, missing refundTxId) fell through to the
+     * catch-all `skippedMessages` and verify-audit's reducers couldn't
+     * distinguish them — same OVER-CREDIT signature R10-FG-3 named.
      *
-     * The categorized counter gives consumers (verify-audit,
-     * monitoring panel, ops dashboard) a recoverable signal: a
-     * non-zero value means the topic carried at least one refund
-     * with an empty `originalDepositTxId` (legacy testnet anchor
-     * before the writer-strict schema landed, or an attacker
-     * injection). Either case warrants operator attention; neither
-     * is hidden in the `skippedMessages` aggregate.
+     * Phase-9 splits the counter into per-reason fields so verify-audit's
+     * alert array can fire one alert per category. Consumers wire
+     * each non-zero counter into a categorized alert (mirror
+     * `schemaValidationFailures` pattern).
      */
     refundsDroppedEmptyOriginal: number;
+    /** R11-FG-5: missing `from` or `to` field on the refund payload. */
+    refundsDroppedMissingParty: number;
+    /** R11-FG-5: `amt` field absent or not a finite number. */
+    refundsDroppedInvalidAmt: number;
+    /** R11-FG-5: missing `refundTxId` field on the refund payload. */
+    refundsDroppedMissingRefundTx: number;
   };
 }
 
@@ -574,9 +577,12 @@ export async function parseAuditTopic(
     agentSeqGaps: [],
     agentSeqDuplicates: [],
     schemaValidationFailures: [],
-    // R10-FG-3 / Phase-8 Cluster B: see field docstring on
-    // AuditReaderResult.stats.refundsDroppedEmptyOriginal.
+    // R10-FG-3 + R11-FG-5: see field docstrings on
+    // AuditReaderResult.stats.refundsDropped* fields.
     refundsDroppedEmptyOriginal: 0,
+    refundsDroppedMissingParty: 0,
+    refundsDroppedInvalidAmt: 0,
+    refundsDroppedMissingRefundTx: 0,
   };
   const schemaReport = makeSchemaSoftReport();
 
@@ -643,14 +649,26 @@ export async function parseAuditTopic(
       const ev = parseRefund(msg);
       if (!ev) {
         stats.skippedMessages++;
-        // R10-FG-3 / Phase-8 Cluster B: categorize the null-drop
-        // when the payload carried an empty `originalDepositTxId`.
-        // The catch-all `skippedMessages` increment is retained for
-        // back-compat; the dedicated counter lets verify-audit /
-        // monitoring distinguish a dropped refund from other skips.
+        // R10-FG-3 + R11-FG-5 / Phase-9 Cluster B: categorize ALL
+        // FIVE null-return reasons from parseRefund (not just
+        // empty-original). Pre-Phase-9 four of the five fell into
+        // the catch-all `skippedMessages` counter and verify-audit
+        // reconstructed user balances OVER-CREDITED by the dropped
+        // refund amount. Now each reason has its own counter that
+        // verify-audit fires as a categorized alert.
         const orig = String(msg.payload.originalDepositTxId ?? '');
+        const from = String(msg.payload.from ?? '');
+        const to = String(msg.payload.to ?? '');
+        const amt = Number(msg.payload.amt);
+        const refundTxId = String(msg.payload.refundTxId ?? '');
         if (!orig) {
           stats.refundsDroppedEmptyOriginal++;
+        } else if (!from || !to) {
+          stats.refundsDroppedMissingParty++;
+        } else if (!Number.isFinite(amt)) {
+          stats.refundsDroppedInvalidAmt++;
+        } else if (!refundTxId) {
+          stats.refundsDroppedMissingRefundTx++;
         }
         continue;
       }

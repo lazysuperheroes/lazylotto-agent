@@ -447,7 +447,7 @@
       "tests": [
         {
           "file": "src/__tests__/r10-fg-3-behavioral.test.ts",
-          "name": "refund with empty originalDepositTxId either surfaces an event or a categorized stat"
+          "name": "each null-return reason increments its own categorized counter"
         },
         {
           "file": "src/custodial/hcs20-schema.test.ts",
@@ -551,7 +551,7 @@
       "tests": [
         {
           "file": "src/__tests__/r10-fg-3-behavioral.test.ts",
-          "name": "refund with empty originalDepositTxId either surfaces an event or a categorized stat"
+          "name": "each null-return reason increments its own categorized counter"
         }
       ],
       "revertDrill": null,
@@ -608,6 +608,62 @@
       ],
       "revertDrill": null,
       "notes": "Phase-8 Cluster D. Two behavioral tests: (a) call-order assertion (SADD precedes flush in normal operation); (b) end-to-end idempotence under kill-mid-protocol with simulated Lambda restart via store.refreshUser. The new tests would have caught the bug at PR time."
+    },
+    {
+      "id": "R11-FG-1",
+      "round": "R11",
+      "severity": "critical",
+      "coverageStrategy": "individual",
+      "summary": "stats.refundsDroppedEmptyOriginal counter shipped wire-only by Phase-8 Cluster B; no consumer in verify-audit, monitoring panel, or audit routes. Verify-audit reconstructed user balances OVER-CREDITED on topics with malformed refunds. R10-FG-3 was decoratively closed.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/scripts/verify-audit.ts",
+            "lines": "droppedReasons loop fires refund_dropped_malformed alert per non-zero counter"
+          },
+          {
+            "file": "src/scripts/verify-audit-crosscheck.ts",
+            "lines": "AlertCategory enum gains refund_dropped_malformed"
+          },
+          {
+            "file": "src/custodial/hcs20-reader.ts",
+            "lines": "dispatcher categorizes all 5 parseRefund null-reasons (was: only empty-original)"
+          }
+        ],
+        "commit": "Phase-9 Cluster B"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/r10-fg-3-behavioral.test.ts",
+          "name": "each null-return reason increments its own categorized counter"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-9 Cluster B. Bug-shape test: the rewritten r10-fg-3 test asserts each of the 4 discriminated null-reasons increments its own counter, AND that a valid refund does not. The verify-audit consumer wiring (alert pipeline) is reviewed in the commit body; if a future round finds the consumer reverted, the consumer-wired-gate idea from the dissection doc may need to land."
+    },
+    {
+      "id": "R11-FG-5",
+      "round": "R11",
+      "severity": "high",
+      "coverageStrategy": "individual",
+      "summary": "parseRefund returns null for FIVE distinct reasons; pre-Phase-9 only the empty-originalDepositTxId branch was categorized. Four other reasons (missing party, invalid amt, missing refundTxId) fell through to the catch-all skippedMessages and verify-audit reconstruction OVER-CREDITED for all four sibling cases.",
+      "fix": {
+        "files": [
+          {
+            "file": "src/custodial/hcs20-reader.ts",
+            "lines": "dispatcher inspects payload to discriminate all 5 null-return reasons; each increments its own stats counter"
+          }
+        ],
+        "commit": "Phase-9 Cluster B"
+      },
+      "tests": [
+        {
+          "file": "src/__tests__/r10-fg-3-behavioral.test.ts",
+          "name": "each null-return reason increments its own categorized counter"
+        }
+      ],
+      "revertDrill": null,
+      "notes": "Phase-9 Cluster B. Companion to R11-FG-1; same locking test asserts all 4 discriminated counters fire correctly."
     }
   ]
 }

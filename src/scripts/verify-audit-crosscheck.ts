@@ -57,6 +57,59 @@ export type AlertCategory =
   | 'play_uncertain_success_pending_triage'
   | 'killswitch_enabled'
   | 'killswitch_disabled'
+  /**
+   * R6-FG-10 / Phase-6 Cluster C: deposit credit flush orphaned —
+   * deposit hit chain but local-store credit failed. Subtract
+   * grossAmount from naive deposit total during reconstruction.
+   */
+  | 'deposit_credit_flush_orphaned'
+  /**
+   * R8-FG-6 / Phase-6 Cluster C: reader's softValidate flagged a
+   * schema-violating message on the topic. Each entry surfaces as
+   * a critical alert with the op + first-error path.
+   */
+  | 'schema_validation_failure'
+  /**
+   * R8-FG-16 / Phase-6 Cluster C: a play_pool_result message had
+   * `slim_truncated_prizes>0` — on-chain prize transfer carried
+   * MORE prizes than the topic records. Surface as a warning so
+   * external auditors reconcile against on-chain wallet state.
+   */
+  | 'slim_truncated_prizes'
+  /**
+   * R8-FG-24 / Phase-6 Cluster C: tokenReservations on a triage
+   * event represent funds held pending manual reconstruction.
+   * Surface as informational alongside the held-balance reduction
+   * the verifier applies to the user's reconstructed ledger.
+   */
+  | 'tokenReservations_held'
+  /**
+   * R8-FG-5 / Phase-6 Cluster C: refund had rakeReversed but no
+   * rakeReversedToken. Verify-audit applies a fallback to event.token;
+   * surfacing a warning so an operator can investigate why the
+   * writer omitted it (possibly a legacy refund pre-Phase-6
+   * cross-field invariant).
+   */
+  | 'rake_reversed_token_fallback'
+  /**
+   * R9-P12-005 / Phase-7 Cluster B: symmetric to
+   * `operator_balance_negative` — flagged when a user's
+   * reconstructed per-token balance goes negative after subtracting
+   * deposits, rake, spent, withdrawn, refunded, held, and
+   * flush-orphaned amounts. Conservation invariant 3 violation.
+   */
+  | 'user_balance_negative'
+  /**
+   * R10-FG-3 + R11-FG-1 + R11-FG-5 / Phase-9 Cluster B: refund
+   * messages were dropped at parseRefund's null return because the
+   * payload was malformed. Five distinct reasons (empty
+   * originalDepositTxId, missing from/to, non-finite amt, missing
+   * refundTxId). The reader's `result.stats.refundsDropped*`
+   * counters categorize them; verify-audit fires this alert per
+   * non-zero counter so the over-credit is visible in the alert
+   * stream rather than buried in the catch-all skippedMessages.
+   */
+  | 'refund_dropped_malformed'
   | 'unverified';
 
 export interface AuditAlert {

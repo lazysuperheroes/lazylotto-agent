@@ -39,6 +39,18 @@
  * corrupt sessions, agentSeq gaps).
  */
 
+/**
+ * R9-FG-3 / Phase-7 Cluster A: enable schema-drift detection. Pre-fix
+ * `HCS20_SOFT_VALIDATE` was never set anywhere — the reader's env-gate
+ * skipped every message and the consumer below (which iterates
+ * `result.stats.schemaValidationFailures`) always saw zero entries.
+ * The verify-audit thesis ("R8-FG-6: schema drift surfaces as critical
+ * alerts") was shipped but functionally dead. Setting the env at module
+ * load means the reader runs softValidate on every message walked
+ * during this script's run.
+ */
+process.env.HCS20_SOFT_VALIDATE = '1';
+
 import { parseAuditTopic, type RawTopicMessage } from '../custodial/hcs20-reader.js';
 import {
   MirrorTxCache,
@@ -186,9 +198,36 @@ interface PerUserLedger {
   totalPrizeValue: number;
   totalPrizeValueByToken: Record<string, number>;
   totalNftPrizes: number;
-  /** Derived: deposited - rake - spent - withdrawn - refunded. */
+  /**
+   * Derived: deposited - rake - spent - withdrawn - refunded - held - flushOrphaned.
+   *
+   * R10-FG-9 / Phase-9 Cluster B: aggregate formula now matches the
+   * per-token formula. Pre-Phase-9 the docstring AND the computation
+   * at the assignment site read `dep - rk - sp - wd - rf` (omitting
+   * held + flushOrphan), so JSON consumers and the printed table saw
+   * different numbers from the per-token sum. R8-FG-24 / R6-FG-10
+   * shipped the per-token subtractions; R10-FG-9 / R11-P5-002 surfaced
+   * the aggregate-stale-vs-per-token-correct discrepancy.
+   */
   ledgerBalance: number;
   ledgerBalanceByToken: Record<string, number>;
+  /**
+   * R8-FG-24 / Phase-6 Cluster C: amounts held by
+   * `play_uncertain_success_pending_triage` events for this user.
+   * Reduces the "available" component of `ledgerBalanceByToken` —
+   * pre-fix verify-audit only formatted held reservations into the
+   * alert message, never actually reduced the user's reconstructed
+   * balance, so the user could withdraw more than the agent had
+   * reserved.
+   */
+  heldByToken: Record<string, number>;
+  /**
+   * R6-FG-10 / Phase-6 Cluster C: per-token sum of orphaned
+   * deposit-credit-flush amounts. Subtract from `totalDeposited`
+   * during reconstruction so a topic-only DR replay produces the
+   * right balance.
+   */
+  depositCreditFlushOrphanedByToken: Record<string, number>;
   sessionCount: number;
   sessionStatusCounts: Record<string, number>;
   warnings: string[];
@@ -213,6 +252,8 @@ function emptyLedger(userAccountId: string): PerUserLedger {
     totalNftPrizes: 0,
     ledgerBalance: 0,
     ledgerBalanceByToken: {},
+    heldByToken: {},
+    depositCreditFlushOrphanedByToken: {},
     sessionCount: 0,
     sessionStatusCounts: {},
     warnings: [],
@@ -700,8 +741,27 @@ async function main() {
       // F9 / F20: rake reversal (when the refund anchor includes it).
       const reversed = (event as { rakeReversed?: number }).rakeReversed;
       const reversedToken = (event as { rakeReversedToken?: string }).rakeReversedToken;
-      if (typeof reversed === 'number' && reversed > 0 && reversedToken) {
-        const rT = normalizeLegacyToken(reversedToken);
+      if (typeof reversed === 'number' && reversed > 0) {
+        // R8-FG-5 / Phase-6 Cluster C: fall back to the refund's own
+        // `event.token` when `rakeReversedToken` is missing. Pre-fix
+        // a wire-conforming refund with `rakeReversed: '5'` and no
+        // `rakeReversedToken` silently dropped the reversal from
+        // operator balance — invariant 4 (operator_balance =
+        // totalRakeCollected - operatorWithdrawn - rakeReversed)
+        // collapsed silently. The strict writer schema (Cluster A)
+        // now refuses these payloads outbound, but legacy refund
+        // anchors on testnet may pre-date the cross-field invariant.
+        const tokenForReversal = reversedToken ?? event.token;
+        if (!reversedToken) {
+          alerts.push({
+            severity: 'warning',
+            category: 'rake_reversed_token_fallback',
+            message:
+              `refund ${event.refundTxId} has rakeReversed=${reversed} but no rakeReversedToken; ` +
+              `falling back to refund event.token=${event.token}. Investigate why writer omitted the field.`,
+          });
+        }
+        const rT = normalizeLegacyToken(tokenForReversal);
         addToToken(operatorLedger.totalRakeReversed, rT, reversed);
         // R2-FG-22: track per-user reversed rake so we can cross-check
         // against accumulated rake at the end of the reducer.
@@ -782,6 +842,25 @@ async function main() {
             category: 'force_release_override',
             message: `force_release_override (operator overrode verifier with double-spend ack): ${desc}`,
           });
+          // R10-FG-16 / Phase-9 Cluster B: subtract previously-held
+          // reservations when the operator force-releases. Pre-Phase-9
+          // the held amount accumulated forever, eventually firing a
+          // false-positive `user_balance_negative` critical alert. The
+          // override flavour also clears the hold (operator
+          // acknowledged the double-spend; the on-chain state is
+          // irreversibly committed but the reservation overlay must
+          // release so reconstruction reflects truth).
+          if (event.userId && event.tokenReservations) {
+            const led = ledgerByUser.get(event.userId);
+            if (led) {
+              for (const r of event.tokenReservations) {
+                led.heldByToken[r.token] = Math.max(
+                  0,
+                  (led.heldByToken[r.token] ?? 0) - r.amount,
+                );
+              }
+            }
+          }
           break;
         case 'force_release':
           alerts.push({
@@ -789,6 +868,20 @@ async function main() {
             category: 'force_release',
             message: `force_release: ${desc}`,
           });
+          // R10-FG-16 / Phase-9 Cluster B: subtract held reservations
+          // on the non-override flavour too. Same archetype as
+          // force_release_override; same fix.
+          if (event.userId && event.tokenReservations) {
+            const led = ledgerByUser.get(event.userId);
+            if (led) {
+              for (const r of event.tokenReservations) {
+                led.heldByToken[r.token] = Math.max(
+                  0,
+                  (led.heldByToken[r.token] ?? 0) - r.amount,
+                );
+              }
+            }
+          }
           break;
         case 'play_uncertain_success_pending_triage':
           alerts.push({
@@ -801,7 +894,58 @@ async function main() {
                 ? ` reservations=${JSON.stringify(event.tokenReservations)}`
                 : ''),
           });
+          // R8-FG-24 / Phase-6 Cluster C: reduce user's reconstructed
+          // ledger by held reservations. Pre-fix verify-audit only
+          // FORMATTED the field into the alert — never reduced
+          // user balance. User reads "available" higher than agent
+          // has reserved. Now we pull the held amounts out of the
+          // user's ledger so reconstructed balance reflects the
+          // actually-spendable funds.
+          if (event.userId && event.tokenReservations) {
+            const led = ledgerByUser.get(event.userId);
+            if (led) {
+              for (const r of event.tokenReservations) {
+                led.heldByToken[r.token] = (led.heldByToken[r.token] ?? 0) + r.amount;
+              }
+              alerts.push({
+                severity: 'info',
+                category: 'tokenReservations_held',
+                message:
+                  `tokenReservations held for user=${event.userId}: ${JSON.stringify(event.tokenReservations)}`,
+              });
+            }
+          }
           break;
+        // R6-FG-10 / Phase-6 Cluster C: deposit credit flush orphan.
+        // Deposit succeeded on chain but the local-store credit
+        // failed. Subtract grossAmount from the user's reconstructed
+        // ledger so the topic-only DR replay produces the right balance.
+        case 'deposit_credit_flush_orphaned': {
+          const grossNum = event.grossAmount ? Number(event.grossAmount) : 0;
+          alerts.push({
+            severity: 'critical',
+            category: 'deposit_credit_flush_orphaned',
+            message:
+              `deposit_credit_flush_orphaned: ${desc}` +
+              (event.userId ? ` user=${event.userId}` : '') +
+              (event.grossAmount ? ` grossAmount=${event.grossAmount}` : '') +
+              (event.token ? ` token=${event.token}` : '') +
+              (event.cause ? ` cause="${event.cause}"` : ''),
+          });
+          if (
+            event.userId &&
+            event.token &&
+            Number.isFinite(grossNum) &&
+            grossNum > 0
+          ) {
+            const led = ledgerByUser.get(event.userId);
+            if (led) {
+              led.depositCreditFlushOrphanedByToken[event.token] =
+                (led.depositCreditFlushOrphanedByToken[event.token] ?? 0) + grossNum;
+            }
+          }
+          break;
+        }
         case 'killswitch_enabled':
           alerts.push({
             severity: 'warning',
@@ -1185,6 +1329,71 @@ async function main() {
     }
   }
 
+  // R8-FG-6 / Phase-6 Cluster C: surface schema-validation failures
+  // detected by the reader's softValidate. Pre-fix the failures
+  // were stored in `result.stats.schemaValidationFailures` but no
+  // consumer ever read them — the clean-conservation summary masked
+  // reader-side schema failures. Now: every entry surfaces as a
+  // critical alert with the op + first-error path. Operators see
+  // writer drift in the same dashboard as conservation breaks.
+  for (const sf of result.stats.schemaValidationFailures ?? []) {
+    alerts.push({
+      severity: 'critical',
+      category: 'schema_validation_failure',
+      message:
+        `schema_validation_failure: op=${sf.op} count=${sf.count}` +
+        (sf.firstError ? ` firstError="${sf.firstError}"` : ''),
+    });
+  }
+
+  // R10-FG-3 + R11-FG-1 + R11-FG-5 / Phase-9 Cluster B: refund
+  // messages dropped at parseRefund's null return. The reader's
+  // categorized counters distinguish five reasons (empty original,
+  // missing party, invalid amt, missing refundTx). Pre-Phase-9 the
+  // counters either did not exist (R10) or had no consumer (Phase-8
+  // wire-only). Each non-zero counter fires a critical alert because
+  // a dropped refund means the user's reconstructed balance
+  // OVER-CREDITED by that refund's amount.
+  const droppedReasons: Array<[number, string]> = [
+    [result.stats.refundsDroppedEmptyOriginal, 'empty_original_deposit_tx_id'],
+    [result.stats.refundsDroppedMissingParty, 'missing_from_or_to'],
+    [result.stats.refundsDroppedInvalidAmt, 'invalid_amt'],
+    [result.stats.refundsDroppedMissingRefundTx, 'missing_refund_tx_id'],
+  ];
+  for (const [count, reason] of droppedReasons) {
+    if (count > 0) {
+      alerts.push({
+        severity: 'critical',
+        category: 'refund_dropped_malformed',
+        message:
+          `refund_dropped_malformed: ${count} refund anchor(s) dropped at parseRefund ` +
+          `(reason=${reason}). Each dropped refund means the user balance reconstruction ` +
+          `OVER-CREDITED by the refund amount. Inspect the topic for messages with op=refund ` +
+          `that fail the named field invariant; refund-anchor authoring is operator-controlled, ` +
+          `so this most likely indicates writer regression or attacker-injected anchors.`,
+      });
+    }
+  }
+
+  // R8-FG-16 / Phase-6 Cluster C: surface slim-truncated-prizes per
+  // session as warnings. The session.warnings array already carries
+  // the message string (from reader's reconstructSession); we lift
+  // it to a top-level alert so dashboards see it as a distinct
+  // category.
+  for (const session of result.sessions) {
+    const dropped = (session as { truncatedPrizesDropped?: number }).truncatedPrizesDropped;
+    if (typeof dropped === 'number' && dropped > 0) {
+      alerts.push({
+        severity: 'warning',
+        category: 'slim_truncated_prizes',
+        message:
+          `session ${session.sessionId.slice(0, 8)} (user=${session.user}): ` +
+          `${dropped} prize(s) dropped by slim-fallback. On-chain prize transfer carried more ` +
+          `prizes than the topic records; reconcile against on-chain wallet state.`,
+      });
+    }
+  }
+
   // R2-FG-18: surface agentSeq duplicates as critical alerts.
   for (const dup of result.stats.agentSeqDuplicates) {
     alerts.push({
@@ -1218,10 +1427,36 @@ async function main() {
     });
   }
 
-  // Derive ledger balance per user (deposited - rake - spent - withdrawn - refunded)
+  // Derive ledger balance per user (deposited - rake - spent - withdrawn - refunded - held - flushOrphaned).
+  //
+  // R9-FG-1 / R9-FG-2 / Phase-7 Cluster B: Phase-6 added the
+  // `heldByToken` and `depositCreditFlushOrphanedByToken` accumulators
+  // and populated them, but the per-token derivation still used the
+  // pre-Phase-6 formula `dep - rk - sp - wd - rf`. Both R8-FG-24
+  // and R6-FG-10 closures shipped wire-only — the data was
+  // captured but never used. Subtracting them here closes both:
+  //
+  //   - heldByToken: amounts under play_uncertain_success_pending_triage.
+  //     User can't spend these until manual reconstruction; reconstructed
+  //     balance must reflect the lock so the user-status route doesn't
+  //     show phantom funds.
+  //   - depositCreditFlushOrphanedByToken: deposit lands on chain but
+  //     local-store credit failed. Topic-only DR replay must subtract
+  //     the un-credited grossAmount from naive deposit total to reach
+  //     truth.
   for (const led of ledgers.values()) {
+    // R10-FG-9 / Phase-9 Cluster B: aggregate formula now matches
+    // per-token (held + flushOrphan subtracted). Both the docstring
+    // on PerUserLedger.ledgerBalance and the computation here are
+    // updated in lockstep.
+    const totalHeld = Object.values(led.heldByToken).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    const totalFlushOrphaned = Object.values(led.depositCreditFlushOrphanedByToken)
+      .reduce((a, b) => a + b, 0);
     led.ledgerBalance =
-      led.totalDeposited - led.totalRake - led.totalSpent - led.totalWithdrawn - led.totalRefunded;
+      led.totalDeposited - led.totalRake - led.totalSpent - led.totalWithdrawn - led.totalRefunded - totalHeld - totalFlushOrphaned;
 
     // Per-token balance
     const allTokens = new Set<string>([
@@ -1230,6 +1465,11 @@ async function main() {
       ...Object.keys(led.totalSpentByToken),
       ...Object.keys(led.totalWithdrawnByToken),
       ...Object.keys(led.totalRefundedByToken),
+      // Phase-7 Cluster B: pull held + flush-orphan tokens into the
+      // derivation set so per-token balance reflects them even when
+      // the user has no other activity in that token.
+      ...Object.keys(led.heldByToken),
+      ...Object.keys(led.depositCreditFlushOrphanedByToken),
     ]);
     for (const token of allTokens) {
       const dep = led.totalDepositedByToken[token] ?? 0;
@@ -1237,9 +1477,34 @@ async function main() {
       const sp = led.totalSpentByToken[token] ?? 0;
       const wd = led.totalWithdrawnByToken[token] ?? 0;
       const rf = led.totalRefundedByToken[token] ?? 0;
-      const balance = dep - rk - sp - wd - rf;
+      const held = led.heldByToken[token] ?? 0;
+      const flushOrphaned = led.depositCreditFlushOrphanedByToken[token] ?? 0;
+      const balance = dep - rk - sp - wd - rf - held - flushOrphaned;
       // Round to 4 decimals
       led.ledgerBalanceByToken[token] = Math.round(balance * 10000) / 10000;
+    }
+  }
+
+  // R9-P12-005 / Phase-7 Cluster B: symmetric `user_balance_negative`
+  // alert mirroring `operator_balance_negative`. Pre-Phase-7 there
+  // was no signal when reconstructed user balance went negative;
+  // operators saw it only by reading the raw printed table. With
+  // R9-FG-1/2 subtractions wired, an over-emitted held/orphan event
+  // (or a writer regression dropping a deposit) can push balance
+  // below zero — operator must triage.
+  for (const led of ledgers.values()) {
+    for (const [token, bal] of Object.entries(led.ledgerBalanceByToken)) {
+      if (bal < -1e-9) {
+        alerts.push({
+          severity: 'critical',
+          category: 'user_balance_negative',
+          message:
+            `user ${led.userAccountId} reconstructed balance NEGATIVE for ${token}: ${bal.toFixed(4)} ` +
+            `(deposited=${led.totalDepositedByToken[token] ?? 0}, refunded=${led.totalRefundedByToken[token] ?? 0}, ` +
+            `held=${led.heldByToken[token] ?? 0}, flushOrphaned=${led.depositCreditFlushOrphanedByToken[token] ?? 0}). ` +
+            `Conservation invariant 3 violated; investigate over-emitted control events or missing deposit anchors.`,
+        });
+      }
     }
   }
 
