@@ -2,6 +2,55 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-06-10
+
+> **Hedera Commerce Agent release.** Two opt-in, flag-gated commerce surfaces
+> on top of the existing audited custodial core. EVERYTHING DEFAULTS OFF;
+> production runs untouched until a flag is flipped, and neither surface alters
+> the audited HCS-20 settlement path.
+
+### Added
+
+- **AI chat** (`CHAT_ENABLED`): `/chat` + `/api/chat` backed by the **Hedera
+  Agent Kit** used as a READ-ONLY tool router — read-only Hedera `*Query`
+  plugins plus a custom plugin wrapping the audited MCP tools. The kit's
+  MUTATING plugins are never loaded (structural guarantee, source-test locked).
+  Scope-restricting system prompt + per-turn output/input/history/step caps +
+  per-identity daily cap.
+- **play-via-chat** (`CHAT_ALLOW_PLAY`, default off even when chat is on): the
+  only mutating chat tool, two-step by construction (`multi_user_play` refuses
+  unless `confirm === true`), routed through the audited MCP path. Withdrawals
+  never exposed to chat.
+- **x402-on-Hedera payment gate** (`X402_ENABLED` + `X402_PAY_TO`): `POST
+  /api/premium/rake-holiday` sells a USD-priced "rake holiday" (USDC or live
+  HBAR equivalent) → 0% deposit rake for N days. `402` → buyer-signed Hedera
+  transfer → facilitator settle → grant. `x402Version: 2`, CAIP-2 `hedera:<net>`.
+  WalletConnect picker (`RakeHolidayModal`) + `uat-x402.ts` reference payer.
+- **Rake holiday mechanism**: single-seam `getEffectiveRakePercent` in the
+  deposit path; grant in auth-Redis, idempotent per settlement tx. Optional
+  flag-gated HCS-20 receipt anchor (`X402_RECORD_TO_HCS20`) via a non-balance-
+  affecting `x402_rake_holiday_granted` control event. `/api/user/status`
+  surfaces the effective rake so the dashboard + `/account` reflect an active
+  holiday.
+- **Commerce discovery**: `/api/discover` `commerce` block + `capabilities`
+  flags, and the A2A Agent Card description names the capability, when x402 is
+  active.
+- **Dashboard UX**: first-run rake box + one-time rake explainer
+  (`RakeTutorialModal`), audit-page type filter, sidebar session-change sync +
+  conditional Chat link.
+- **Tooling**: `npm run typecheck` gate over both tsconfigs; `docs/` (UAT
+  runbook, x402 payment guide, AI Studio feedback, agentic-commerce blog post).
+
+### Fixed
+
+- `getRakeHoliday` guards the Upstash JSON double-parse (`typeof v === 'string'`)
+  so an active holiday is reflected in the UI instead of silently showing the
+  base rate.
+- `tsconfig.cli.json` bumped `Node16` → `NodeNext`, fixing a latent CLI build
+  break on the `package.json` import attribute.
+- Two `idempotency.test.ts` fixtures now implement `PreserveClaimError`'s
+  abstract `transactionId` (whole-program `tsc` was the only gate that caught it).
+
 ## [0.3.5] - 2026-05-10
 
 > **Audit cycle closure release.** The 0.3.4 changelog ended with a three-agent

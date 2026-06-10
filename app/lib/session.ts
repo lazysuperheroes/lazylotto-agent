@@ -29,7 +29,27 @@ export const SESSION_KEYS = [
   // previous user's quiet window.
   'lazylotto:mascot:visits',
   'lazylotto:mascot:lastSpokenAt',
+  // First-run rake explainer — clear on sign-out so each user who signs in
+  // on this browser sees the one-time explainer once.
+  'lazylotto:seenRakeTutorial',
 ] as const;
+
+/**
+ * Same-tab broadcast that session state changed (sign-in, disconnect, re-auth).
+ * localStorage's native `storage` event does NOT fire in the tab that performed
+ * the write, so components that MIRROR session state (the sidebar's account +
+ * mascot section) must listen for this instead of only reading on mount —
+ * otherwise the bottom-left stays stale after a disconnect or a fresh sign-in,
+ * because the sidebar lives in the layout and never unmounts on navigation.
+ * Mirrors the CHARACTER_CHANGE_EVENT pattern used for mascot reroll sync.
+ */
+export const SESSION_CHANGED_EVENT = 'lazylotto:session-changed';
+
+/** Broadcast a session-state change to same-tab listeners. SSR-safe. */
+export function notifySessionChanged(): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new Event(SESSION_CHANGED_EVENT));
+}
 
 /**
  * Remove every session-related key from localStorage. SSR-safe — does
@@ -41,6 +61,7 @@ export function clearSession(): void {
   for (const key of SESSION_KEYS) {
     localStorage.removeItem(key);
   }
+  notifySessionChanged();
 }
 
 /**

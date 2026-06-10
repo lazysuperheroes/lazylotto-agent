@@ -113,6 +113,16 @@ winning, which is the worst possible psychology for a game. We'd rather
 charge a flat, predictable infrastructure fee up front and let your wins
 stay yours.
 
+Where does the rake go? Every time the agent plays for you, the platform pays
+the Hedera network fees — you never pay gas per play. The rake is what funds
+that, so a deposit is never "money lost," it's prepaid infrastructure for an
+agent that plays on your schedule.
+
+And where the operator has enabled it, you can pay once for a 30-day **rake
+holiday** — 0% rake on every deposit for a month — settled on-chain. If it's
+available, you'll see it on your dashboard; if it isn't, the normal rake just
+applies as above.
+
 ---
 
 ## The honest safety story

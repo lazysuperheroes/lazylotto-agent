@@ -252,6 +252,22 @@ function typeLabel(type: AuditEntry['type']): string {
   }
 }
 
+// Canonical chip order for the type filter. We only render a chip for a type
+// that's actually present in the loaded data (computed at render time), so this
+// is purely the display ordering — money-flow types first, then operational.
+const TYPE_FILTER_ORDER: AuditEntry['type'][] = [
+  'deposit',
+  'rake',
+  'play',
+  'withdrawal',
+  'refund',
+  'operator_withdrawal',
+  'prize_recovery',
+  'strategy_change',
+  'deploy',
+  'unknown',
+];
+
 // ---------------------------------------------------------------------------
 // Skeleton — structural placeholder shown while the first payload loads.
 // The audit route is slower than most (mirror node topic scan) so giving the
@@ -316,6 +332,12 @@ export default function AuditPage() {
   const [notRegistered, setNotRegistered] = useState(false);
   const [data, setData] = useState<AuditResponse | null>(null);
   const [showAll, setShowAll] = useState(false);
+  // Type filter: an empty set means "show everything" (the default — users who
+  // never touch the filter see no change). A non-empty set is an inclusive
+  // whitelist of entry types to display.
+  const [activeTypes, setActiveTypes] = useState<Set<AuditEntry['type']>>(
+    () => new Set(),
+  );
 
   // Admin state
   const [isAdmin, setIsAdmin] = useState(false);
@@ -556,7 +578,39 @@ export default function AuditPage() {
   // activity is on top rather than buried under months of history.
   const orderedSessions = (v2Sessions ?? []).slice().reverse();
   const orderedEntries = nonPlayEntries.slice().reverse();
-  const displayedEntries = showAll ? orderedEntries : orderedEntries.slice(0, 20);
+
+  // ---- Type filter derivation ----------------------------------------
+  // presentTypes is the set of types actually in the loaded data. Plays
+  // render as session cards (orderedSessions), not in orderedEntries, so
+  // 'play' is added when any session is present. The chip row only shows
+  // when more than one type exists (nothing to filter otherwise). An empty
+  // activeTypes set = "show all" so the default view is unchanged.
+  const presentTypeSet = new Set<AuditEntry['type']>(
+    orderedEntries.map((e) => e.type),
+  );
+  if (orderedSessions.length > 0) presentTypeSet.add('play');
+  const presentTypes = TYPE_FILTER_ORDER.filter((t) => presentTypeSet.has(t));
+  const filterActive = activeTypes.size > 0;
+  const filteredEntries = filterActive
+    ? orderedEntries.filter((e) => activeTypes.has(e.type))
+    : orderedEntries;
+  const filteredSessions =
+    !filterActive || activeTypes.has('play') ? orderedSessions : [];
+  const nothingToShow =
+    filteredEntries.length === 0 && filteredSessions.length === 0;
+  const displayedEntries = showAll
+    ? filteredEntries
+    : filteredEntries.slice(0, 20);
+
+  const toggleType = (t: AuditEntry['type']) => {
+    setShowAll(false);
+    setActiveTypes((prev) => {
+      const next = new Set(prev);
+      if (next.has(t)) next.delete(t);
+      else next.add(t);
+      return next;
+    });
+  };
 
   return (
     <div className="w-full px-4 py-8 sm:px-6 lg:px-8">
@@ -849,6 +903,53 @@ export default function AuditPage() {
           </div>
         )}
 
+        {/* ---- Type filter chips ────────────────────────────────
+            Lightweight inclusive whitelist over the record types
+            present on this topic. Only rendered when more than one
+            type exists, and an empty selection means "show all", so
+            single-type accounts — and anyone who never clicks a chip
+            — see exactly the same page as before. The 'Play' chip
+            controls the session cards; every other chip controls the
+            timeline entries below. ---- */}
+        {presentTypes.length > 1 && (
+          <div className="mb-6 flex flex-wrap items-center gap-2">
+            <span className="label-caps mr-1 text-muted/80">Filter:</span>
+            <button
+              type="button"
+              onClick={() => {
+                setShowAll(false);
+                setActiveTypes(new Set());
+              }}
+              aria-pressed={!filterActive}
+              className={`border-2 px-2 py-1 font-pixel text-[10px] uppercase tracking-wider transition-colors ${
+                !filterActive
+                  ? 'border-brand bg-brand/10 text-brand'
+                  : 'border-secondary bg-background text-muted hover:border-brand/50'
+              }`}
+            >
+              All
+            </button>
+            {presentTypes.map((t) => {
+              const on = activeTypes.has(t);
+              return (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => toggleType(t)}
+                  aria-pressed={on}
+                  className={`border-2 px-2 py-1 font-pixel text-[10px] uppercase tracking-wider transition-colors ${
+                    on
+                      ? `border-current ${badgeClasses(t)}`
+                      : 'border-secondary bg-background text-muted hover:border-brand/50'
+                  }`}
+                >
+                  {typeLabel(t)}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         {/* ---- v2 Session Cards ─────────────────────────────────
             Reconstructed play sessions from the HCS-20 v2 reader.
             One card per session, regardless of whether it's a v1
@@ -857,19 +958,19 @@ export default function AuditPage() {
             so users can scan top to bottom and verify the math.
             Click to expand for the per-pool breakdown.
             ---- */}
-        {orderedSessions.length > 0 && (
+        {filteredSessions.length > 0 && (
           <div className="mb-6 space-y-4">
             <h2 className="font-heading text-lg text-foreground">
-              Play sessions ({orderedSessions.length})
+              Play sessions ({filteredSessions.length})
             </h2>
-            {orderedSessions.map((s) => (
+            {filteredSessions.map((s) => (
               <SessionCard key={s.sessionId} session={s} explorerUrl={explorerUrl} />
             ))}
           </div>
         )}
 
         {/* ---- Timeline ---- */}
-        {orderedEntries.length > 0 ? (
+        {filteredEntries.length > 0 ? (
           <>
             <div className="space-y-4">
               {displayedEntries.map((entry) => (
@@ -1109,22 +1210,22 @@ export default function AuditPage() {
               ))}
             </div>
 
-            {/* Show more / less toggle — uses orderedEntries (post
-                play-filter) so the "show 20 more" count never
-                advertises hidden play entries the user can never
-                see anyway. */}
-            {orderedEntries.length > 20 && !showAll && (
+            {/* Show more / less toggle — counts off filteredEntries
+                (post play-filter AND post type-filter) so the "show
+                20 more" count never advertises entries the current
+                view can't show anyway. */}
+            {filteredEntries.length > 20 && !showAll && (
               <div className="mt-4 text-center">
                 <button
                   type="button"
                   onClick={() => setShowAll(true)}
                   className="text-sm text-brand transition-colors hover:text-brand/80"
                 >
-                  Show older entries ({orderedEntries.length - 20} more)
+                  Show older entries ({filteredEntries.length - 20} more)
                 </button>
               </div>
             )}
-            {showAll && orderedEntries.length > 20 && (
+            {showAll && filteredEntries.length > 20 && (
               <div className="mt-4 text-center">
                 <button
                   type="button"
@@ -1136,15 +1237,29 @@ export default function AuditPage() {
               </div>
             )}
           </>
-        ) : (
+        ) : nothingToShow ? (
           <div className="border border-secondary bg-[var(--color-panel)] px-5 py-6 text-center">
             <p className="text-sm text-muted">
               {isAdmin && selectedUser
                 ? `No on-chain records for ${selectedUser}.`
-                : 'No on-chain records yet. Records appear after the first deposit.'}
+                : filterActive
+                  ? 'No records match the selected type filter.'
+                  : 'No on-chain records yet. Records appear after the first deposit.'}
             </p>
+            {filterActive && (
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAll(false);
+                  setActiveTypes(new Set());
+                }}
+                className="mt-3 text-sm text-brand transition-colors hover:text-brand/80"
+              >
+                Clear filter
+              </button>
+            )}
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );

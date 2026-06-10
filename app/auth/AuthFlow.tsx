@@ -18,7 +18,7 @@ import {
   persistCharacterIdx,
   randomCharacterIdx,
 } from '../lib/characters';
-import { clearSession } from '../lib/session';
+import { clearSession, notifySessionChanged } from '../lib/session';
 import {
   CHAIN_IDS,
   PROJECT_IDS,
@@ -311,6 +311,10 @@ export function AuthFlow() {
       // unchanged.
       localStorage.setItem('lazylotto:mcpUrl', verified.mcpUrl);
       if (verified.expiresAt) localStorage.setItem('lazylotto:expiresAt', verified.expiresAt);
+
+      // Broadcast so the sidebar (account id + mascot) updates immediately,
+      // before the user navigates away from /auth.
+      notifySessionChanged();
 
       // 6. Complete — also update tier state so the post-verify CTA renders
       // the correct destination without reading localStorage during render.

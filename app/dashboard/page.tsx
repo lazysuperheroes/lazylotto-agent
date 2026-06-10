@@ -46,6 +46,28 @@ import type {
   PublicStats,
   StatusResponse,
 } from './types';
+import dynamic from 'next/dynamic';
+// Lightweight (no wallet deps) — static import is fine.
+import { RakeTutorialModal } from './RakeTutorialModal';
+
+// Dynamic-import the rake-holiday modal so the WalletConnect + Hedera SDK bundle
+// it pulls in only loads when the user opens it (keeps the dashboard light).
+const RakeHolidayModal = dynamic(
+  () => import('./RakeHolidayModal').then((m) => m.RakeHolidayModal),
+  { ssr: false },
+);
+
+/** Format a rake-holiday expiry (ISO) as a short local date for display. */
+function formatHolidayUntil(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      });
+}
 
 // ---------------------------------------------------------------------------
 // Dashboard page
@@ -127,6 +149,13 @@ export default function DashboardPage() {
   // collapsible. Triggered from the hero metadata "Top up" link
   // (when funded) or the empty-state ribbon's Step 01 (when not).
   const [topUpOpen, setTopUpOpen] = useState(false);
+  // Rake-holiday (x402) purchase modal.
+  const [showRakeHoliday, setShowRakeHoliday] = useState(false);
+  // Whether x402 payments are live — gates the rake-holiday CTAs so they only
+  // appear when actually payable (from /api/discover capabilities.x402Payments).
+  const [x402Enabled, setX402Enabled] = useState(false);
+  // First-run rake explainer (shown once per signed-in user).
+  const [showRakeTutorial, setShowRakeTutorial] = useState(false);
 
   // Prize claim state — populated from /api/user/prize-status. Null
   // until first fetch resolves; { available: false } if the dApp MCP
@@ -185,6 +214,38 @@ export default function DashboardPage() {
     document.title = 'Dashboard | LazyLotto Agent';
     setVisitCount(bumpVisitCount());
   }, []);
+
+  // Is the x402 rake-holiday gate live? Gates the "0% rake" CTAs (hero strip +
+  // first-run) so we never show a pay CTA that would 503. /api/discover is
+  // public + cached; one fetch on mount.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch('/api/discover');
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as {
+          capabilities?: Record<string, boolean>;
+        };
+        if (!cancelled) setX402Enabled(data.capabilities?.x402Payments === true);
+      } catch {
+        /* silent — the rake-holiday CTA just stays hidden */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // First-run rake explainer: pop once per signed-in user, after status loads,
+  // if they haven't seen it. The flag is cleared on sign-out (SESSION_KEYS) so
+  // each user gets it once. Independent of x402 — everyone should understand the
+  // rake so a deposit never feels like lost money.
+  useEffect(() => {
+    if (!status) return;
+    if (localStorage.getItem('lazylotto:seenRakeTutorial')) return;
+    setShowRakeTutorial(true);
+  }, [status]);
 
   // Listen for mascot reroll from the sidebar. Same-tab CustomEvent —
   // the localStorage storage event doesn't fire for the tab that
@@ -892,6 +953,10 @@ export default function DashboardPage() {
     ? Object.entries(status.balances.tokens)
     : [];
   const hasPlayableBalance = balanceEntries.some(([, e]) => e.available > 0);
+  // Active x402 rake holiday → effective rake is 0% on deposits until `until`.
+  // Drives all rake displays + suppresses the "buy a holiday" CTAs.
+  const rakeHolidayActive = !!status?.rakeHoliday?.active;
+  const rakeHolidayUntil = status?.rakeHoliday?.until ?? null;
   const agentClosed = publicStats?.acceptingOperations === false;
   const isFirstRun =
     !!status && sessions.length === 0 && !hasPlayableBalance;
@@ -1706,6 +1771,57 @@ export default function DashboardPage() {
                   // lands, the hero transitions to the funded state
                   // automatically on the next status refresh.
                   <div className="mt-6 border-t border-secondary/40 pt-5">
+                    {/* Rake-at-a-glance — a first-time user sees the fee up
+                        front (instead of hunting on /account) and can open the
+                        explainer. Shown regardless of x402. */}
+                    {status?.rakePercent != null && (
+                      <div className="mb-5 flex items-start justify-between gap-3 border-2 border-secondary bg-[var(--color-panel)] p-4">
+                        <div>
+                          <p className="label-caps text-muted">Your rake</p>
+                          {rakeHolidayActive ? (
+                            <p className="mt-1 type-caption text-muted">
+                              <span className="text-success">
+                                Rake holiday active
+                              </span>
+                              {rakeHolidayUntil && (
+                                <>
+                                  {' '}— 0% on deposits until{' '}
+                                  {formatHolidayUntil(rakeHolidayUntil)}
+                                </>
+                              )}
+                              . Your base {status.rakePercent}% rate resumes
+                              after.{' '}
+                              <button
+                                type="button"
+                                onClick={() => setShowRakeTutorial(true)}
+                                className="text-brand underline-offset-2 hover:underline"
+                              >
+                                What&apos;s this?
+                              </button>
+                            </p>
+                          ) : (
+                            <p className="mt-1 type-caption text-muted">
+                              Taken once on each deposit. It covers all network
+                              fees for your plays — you keep 100% of what you win.{' '}
+                              <button
+                                type="button"
+                                onClick={() => setShowRakeTutorial(true)}
+                                className="text-brand underline-offset-2 hover:underline"
+                              >
+                                What&apos;s this?
+                              </button>
+                            </p>
+                          )}
+                        </div>
+                        <span
+                          className={`shrink-0 font-heading text-2xl ${
+                            rakeHolidayActive ? 'text-success' : 'text-brand'
+                          }`}
+                        >
+                          {rakeHolidayActive ? '0%' : `${status.rakePercent}%`}
+                        </span>
+                      </div>
+                    )}
                     <p className="label-caps-brand mb-3">Get started</p>
                     <div className="space-y-4">
                       {/* Concrete inline action block — agent wallet
@@ -1769,6 +1885,43 @@ export default function DashboardPage() {
                         for wallet-specific instructions.
                       </p>
 
+                      {/* Rake-holiday upsell — shown in the first-run state
+                          because the BEST time to buy 0% rake is BEFORE you
+                          deposit (the holiday applies to deposits credited
+                          while it's active). Gated on x402 being live so it
+                          never offers a CTA that would 503. */}
+                      {x402Enabled && (
+                        <div className="border-t border-secondary/40 pt-3">
+                          {rakeHolidayActive ? (
+                            <div className="border-2 border-success/40 bg-success/5 px-4 py-2.5 text-sm font-semibold text-success">
+                              ✓ Rake holiday active
+                              {rakeHolidayUntil && (
+                                <>
+                                  {' '}— 0% on deposits until{' '}
+                                  {formatHolidayUntil(rakeHolidayUntil)}
+                                </>
+                              )}
+                            </div>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => setShowRakeHoliday(true)}
+                                className="w-full border-2 border-brand/40 bg-brand/5 px-4 py-2.5 text-sm font-semibold text-brand transition-colors hover:border-brand hover:bg-brand/10"
+                              >
+                                💎 Skip the rake — 0% on deposits for 30 days
+                              </button>
+                              <p className="mt-2 type-caption text-muted">
+                                Pay once (USDC or HBAR) and every deposit for the
+                                next 30 days is credited with{' '}
+                                <strong>no rake</strong>. Best bought before you
+                                fund.
+                              </p>
+                            </>
+                          )}
+                        </div>
+                      )}
+
                       {/* What happens after — mental model breadcrumb.
                           The old 3-step stepper taught "Fund → Play →
                           Withdraw" at a glance. Replacing it with just
@@ -1808,8 +1961,15 @@ export default function DashboardPage() {
               <span className="label-caps mr-2">Agent</span>
               <span className="text-foreground">{status.strategyName}</span>
               {' strategy · '}
-              <span className="text-foreground">{status.rakePercent}%</span>
-              {' rake · '}
+              {rakeHolidayActive ? (
+                <span className="text-success">0% rake (holiday)</span>
+              ) : (
+                <>
+                  <span className="text-foreground">{status.rakePercent}%</span>
+                  {' rake'}
+                </>
+              )}
+              {' · '}
               <span className="text-foreground">{totalDeposited}</span>
               {' deposited lifetime · '}
               <span className="text-foreground">{totalRakePaid}</span>
@@ -1821,9 +1981,32 @@ export default function DashboardPage() {
               >
                 Top up ↗
               </button>
+              {x402Enabled && (
+                <>
+                  {' · '}
+                  {rakeHolidayActive ? (
+                    <span className="text-success">
+                      💎 holiday active
+                      {rakeHolidayUntil
+                        ? ` until ${formatHolidayUntil(rakeHolidayUntil)}`
+                        : ''}
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setShowRakeHoliday(true)}
+                      className="text-brand underline-offset-2 transition-colors hover:text-foreground hover:underline"
+                    >
+                      💎 0% rake for 30 days ↗
+                    </button>
+                  )}
+                </>
+              )}
             </p>
             <p className="mt-1 type-caption text-muted">
-              Rake covers gas and infrastructure. The agent plays autonomously on a schedule — you can also nudge it manually from the hero above.
+              {rakeHolidayActive
+                ? 'A rake holiday is active — deposits are credited at 0% rake until it expires, then your base rate resumes. Rake covers gas and infrastructure.'
+                : 'Rake covers gas and infrastructure. The agent plays autonomously on a schedule — you can also nudge it manually from the hero above.'}
             </p>
           </div>
         )}
@@ -2197,6 +2380,27 @@ export default function DashboardPage() {
         onCheckDeposits={() => void handleCheckDeposits()}
         checking={depositsChecking}
       />
+      {showRakeHoliday && sessionToken && (
+        <RakeHolidayModal
+          token={sessionToken}
+          onClose={() => setShowRakeHoliday(false)}
+          onSuccess={() => {
+            // Refresh status so the active holiday reflects in the rake
+            // displays immediately (it carries status.rakeHoliday now).
+            void loadStatus({ Authorization: `Bearer ${sessionToken}` });
+          }}
+        />
+      )}
+      {showRakeTutorial && status && (
+        <RakeTutorialModal
+          rakePercent={status.rakePercent}
+          x402Enabled={x402Enabled}
+          onClose={() => {
+            localStorage.setItem('lazylotto:seenRakeTutorial', '1');
+            setShowRakeTutorial(false);
+          }}
+        />
+      )}
 
       {/* ── Withdraw modal ─────────────────────────────────────
           Self-contained component (extracted to ./WithdrawModal.tsx

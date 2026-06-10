@@ -55,7 +55,9 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Three deployment
 - src/hol/         — HOL registry integration (HCS-11 profile, UAID)
 - src/auth/        — Challenge-response authentication, session management, Redis client
 - src/cli/         — Interactive setup wizard, `check-protocols.ts` (MCP/A2A parity smoke test)
-- src/config/      — Strategy schema (Zod) and defaults, PRIZE_TRANSFER_RETRY gas ladder
+- src/config/      — Strategy schema (Zod) and defaults, PRIZE_TRANSFER_RETRY gas ladder, **features.ts** (opt-in chat + x402 flag config; pure env reads, CLI-safe, everything defaults OFF)
+- src/agent-kit/   — Hedera Agent Kit chat router: `toolkit.ts` (builds the `HederaAIToolkit` — read-only `*Query` plugins + custom plugin; mutating kit plugins NEVER loaded), `plugin.ts` (custom plugin wrapping audited MCP tools; the confirmed `multi_user_play` is opt-in via `CHAT_ALLOW_PLAY`), `mcpBridge.ts` (calls our own /api/mcp with strip-then-inject auth). Excluded from `tsconfig.cli.json`.
+- src/x402/        — x402-on-Hedera payment scheme: `scheme.ts` (`X402_VERSION = 2`, builds `PaymentRequirements`), `exchangeRate.ts` (mirror-node HBAR↔USD, USD-cents→tinybars/USDC-base-units). Excluded from `tsconfig.cli.json`.
 - src/scripts/     — Operator CLI tools: recover-stuck-prizes, verify-audit (standalone), audit-deposit-discrepancy, test-v2-reader
 - strategies/      — Versioned JSON strategy files
 - docs/            — Operational + user-facing material; bootstrap design lives under `docs/archive/`
@@ -63,8 +65,12 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Three deployment
 - app/             — Next.js frontend (auth, dashboards, API routes, MCP endpoint, A2A endpoint)
 - app/api/a2a/     — A2A JSON-RPC dispatcher (POST) + Agent Card (GET)
 - app/.well-known/agent-card.json/ — Standard A2A discovery path
-- app/api/_lib/    — Serverless singletons (store, hedera client, deposits, locks, MCP context)
+- app/api/_lib/    — Serverless singletons (store, hedera client, deposits, locks, MCP context), `composeBalances.ts`, **`x402Gate.ts`** (402-or-settle helper)
 - app/api/cron/    — Vercel Cron endpoints (reconcile)
+- app/api/chat/    — Flag-gated AI chat (`route.ts` dynamic-imports `_handler.ts` behind `CHAT_ENABLED`; scope-restricting prompt + cost caps)
+- app/api/premium/ — x402-gated paid capabilities (`rake-holiday/route.ts`)
+- app/chat/        — Chat UI (`page.tsx` + `ChatPanel.tsx`, auth-gated)
+- app/dashboard/   — User dashboard incl. `RakeHolidayModal.tsx` (WalletConnect x402 payment picker)
 - public/          — Static assets (favicon, robots.txt)
 
 ## Auth System
@@ -95,10 +101,22 @@ Autonomous AI agent that plays the LazyLotto lottery on Hedera. Three deployment
 ## Next.js Frontend
 
 - app/ directory with App Router
-- Pages: /auth (WalletConnect sign-in), /dashboard (user), /admin (operator), /audit (on-chain trail)
-- API routes: /api/auth/*, /api/user/*, /api/admin/*, /api/mcp, /api/discover
+- Pages: /auth (WalletConnect sign-in), /dashboard (user), /admin (operator), /audit (on-chain trail), /chat (AI assistant, flag-gated)
+- API routes: /api/auth/*, /api/user/*, /api/admin/*, /api/mcp, /api/discover, /api/chat (flag-gated), /api/premium/* (x402-gated)
+- Audit page (`/audit`) has a client-side **type filter** (chip row, empty = show all) that filters both the session cards (`play`) and the timeline entries; gentle/additive, no API change.
 - LSH branding: dark mode, Unbounded/Heebo fonts, LAZY Gold accents
 - Dual tsconfig: tsconfig.json (Next.js), tsconfig.cli.json (CLI)
+
+## Commerce Agent Surfaces (Hedera Agent Kit chat + x402) — all flag-gated OFF
+
+Added for the Hedera Commerce Agent work. EVERYTHING DEFAULTS OFF (`src/config/features.ts`); production runs untouched until a flag is flipped. Neither surface alters the audited HCS-20 settlement path.
+
+- **AI chat** (`CHAT_ENABLED`): `/chat` page + `/api/chat`. The route dynamic-imports `_handler.ts` ONLY when the flag is on, so the kit/AI-SDK graph never loads otherwise. Backed by `@hashgraph/hedera-agent-kit-ai-sdk` (`HederaAIToolkit`) — read-only Hedera `*Query` plugins + a custom plugin (`src/agent-kit/plugin.ts`) wrapping our audited MCP tools via `mcpBridge.ts`. The kit's MUTATING plugins are NEVER loaded (structural guarantee, locked by `src/agent-kit/toolkit.test.ts`). Cost guardrails: scope-restricting system prompt + per-turn output-token / input-char / history / step caps + a per-identity daily message cap. Chat-facing schemas use the `zod3` npm alias to match the kit's zod major.
+- **play-via-chat** (`CHAT_ALLOW_PLAY`, default off even when chat is on): the ONLY mutating chat tool. Two-step by construction — `multi_user_play` refuses unless `confirm === true`, returning a `confirmation_required` prompt; the system prompt instructs the model to set `confirm=true` only after explicit user yes. Still routes through the audited MCP path; withdrawals are never exposed to chat. Gate locked by `src/agent-kit/plugin.test.ts`.
+- **x402 payment gate** (`X402_ENABLED` + `X402_PAY_TO` → `isX402Active`): `@x402/core` + `@x402/hedera`. **`x402Version: 2`** (NOT 1 — load-bearing; Blocky402 + the x402-foundation stack use v2). CAIP-2 network `hedera:<net>`. The shipped capability is `POST /api/premium/rake-holiday`: pay a USD-priced "rake holiday" (USDC or live HBAR equiv via mirror-node rate, config slippage `minAcceptedFraction`) → 0% deposit rake for N days. Flow: `402` → buyer-signed Hedera transfer (facilitator is fee-payer) → `settleOrChallenge` (`app/api/_lib/x402Gate.ts`) verify+settle → grant. `uat-x402.ts` is the reference payer; `app/dashboard/RakeHolidayModal.tsx` is the WalletConnect picker.
+- **Rake holiday mechanism** (`src/custodial/rakeHoliday.ts`): the grant lives in auth-Redis (`KEY_PREFIX.rakeHoliday`, TTL = window), idempotent per settlement tx via the `withIdempotency` primitive. `getEffectiveRakePercent` is the SINGLE seam wired into the deposit path (`DepositWatcher`): it returns 0 during an active holiday, else the base rate, and the UNCHANGED `creditDeposit` receives it. A holiday is purely "which rate is passed in" — never a change to how rake is computed/recorded. **Display path:** `/api/user/status` returns `rakeHoliday: {active, until}` (best-effort) so the dashboard + `/account` show the EFFECTIVE rake (0% while active) and suppress the purchase CTA; `getRakeHoliday` MUST guard `typeof v === 'string' ? JSON.parse(v) : v` — Upstash auto-deserializes JSON so an unguarded `JSON.parse` returns null and silently shows the base rate while a holiday is active (`isRakeHolidayActive`, used by the deposit path, only checks key presence so accounting stays correct — masking the display bug). All holiday UI is gated on `x402Enabled` (CTAs) or `rakeHolidayActive` (an honored grant); the base rake display + first-run explainer (`app/dashboard/RakeTutorialModal.tsx`) always render — the rake is integral, the holiday upsell is opt-in.
+- **HCS-20 x402 receipt** (`X402_RECORD_TO_HCS20`): optional, best-effort, non-fatal. `AccountingService.recordX402RakeHoliday` anchors the grant on the topic via a new `control` event kind `x402_rake_holiday_granted` (added to `ControlEventKind` in hcs20-schema.ts). Non-balance-affecting (no `grossAmount`) — verify-audit ignores it (no switch case), the reader preserves it generically, settlement tx rides `idempotencyKey` (dedup) + `cause`. The grant in Redis is the source of truth; a topic-write failure never fails the user's paid purchase.
+- **Commerce advertisement**: when `isX402Active`, `/api/discover` adds a structured `commerce` block (endpoint, price, assets, facilitator, CAIP-2 net) + `capabilities.{chat,x402Payments}`, and the A2A Agent Card description names the capability. The paid capability is an HTTP route, NOT a `tools/call` skill — it is deliberately ABSENT from the Agent Card `skills[]` (adding it would break the MCP↔A2A parity gate `card.skills.length === ALL_REMOTE_TOOL_NAMES.length`).
 
 ## Serverless Architecture (Vercel)
 
@@ -177,7 +195,8 @@ npm run setup            — First-time wallet setup
 npm run status           — Check wallet balances
 npm run audit            — Configuration audit
 npm run wizard           — Interactive .env setup
-npm test                 — Run test suite (~750 tests)
+npm test                 — Run test suite (~770 tests)
+npm run typecheck        — Whole-program tsc --noEmit (incl. test files; catches what build:web's graph skips)
 npm run build            — Compile + shebang injection
 npm run build:web        — Next.js production build
 npm run smoke-test       — Auth flow smoke test
@@ -225,19 +244,31 @@ endpoint is documented in the separate LazyLotto dApp repo, not here.
 
 ## Pre-push checks (run these before `git push`)
 
-Both gates must be green. Running one without the other lets real
-deploy failures slip past — `npm test` and `npm run build:web` exercise
-different parts of the type system:
+All three gates must be green. Running one without the others lets real
+deploy failures slip past — they exercise different parts of the type
+system:
 
 ```
 npm test            # node:test via tsx — runtime behaviour, ~12s
-npm run build:web   # next build (which runs tsc whole-program) — ~30s
+npm run typecheck   # tsc --noEmit over BOTH tsconfigs (Next graph incl. tests + CLI graph), ~6s
+npm run build:web   # next build (which runs tsc whole-program over the build graph) — ~30s
 ```
 
-**Why both.** `tsx` (the loader behind `npm test`) does isolated module
-transpilation: each file compiles independently with no cross-file
-type-check. TypeScript errors in functions never touched by tests slip
-through silently. `next build` runs `tsc` whole-program, catching those.
+**Why all three.** `tsx` (the loader behind `npm test`) does isolated
+module transpilation: each file compiles independently with no
+cross-file type-check. TypeScript errors in functions never touched by
+tests slip through silently. `next build` runs `tsc` over its build
+graph, catching those — BUT it **excludes `*.test.ts`** (test files
+aren't part of the Next build graph), so a type error in a test fixture
+sails past both `npm test` AND `npm run build:web`. `npm run typecheck`
+runs `tsc` whole-program *including* test files and is the only gate
+that catches that class. It's cheap (~3s) — run it every push.
+
+This third gate was added 2026-06-09 after exactly that gap: two test
+fixtures in `src/lib/idempotency.test.ts` subclassed the abstract
+`PreserveClaimError` without implementing its abstract `transactionId`
+member. `npm test` passed (tsx strips types) and `npm run build:web`
+passed (test files excluded) — only a whole-program `tsc` flagged it.
 
 This was learned the hard way at 0.3.5 ship time: `npm test` was 748/748
 green but `npm run build:web` failed on 8 pre-existing type errors in
@@ -247,9 +278,10 @@ runs `npm run build:web` via `vercel.json:buildCommand`; a deploy with
 a `tsc` error fails at Vercel build, not at runtime. Always run both
 locally before push.
 
-If `npm run build:web` fails with a type error in a file you didn't
-touch this session, it's PRE-EXISTING — fix it in passing rather than
-pushing-and-fixing on Vercel. Build-clean is a per-commit invariant.
+If `npm run build:web` or `npm run typecheck` fails with a type error in
+a file you didn't touch this session, it's PRE-EXISTING — fix it in
+passing rather than pushing-and-fixing on Vercel. Build-clean is a
+per-commit invariant.
 
 ## Audit cycle status (closed at Phase-9.5, 2026-05-10)
 
@@ -298,5 +330,6 @@ audit-runs documents. Don't strip them — they're load-bearing as the
 - `lazy-wins.md` — product perspective on why this exists
 - `trust-by-design.md` — security perspective for skeptical Web3 audiences
 - `architecture-deep-dive.md` — engineering perspective on the build
+- `agentic-commerce.md` — commerce surfaces (Hedera Agent Kit chat + x402) added without reopening the audited core
 
 **Archive (`docs/archive/`):** see `docs/archive/README.md`.

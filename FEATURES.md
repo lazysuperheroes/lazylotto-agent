@@ -53,6 +53,20 @@ your Hedera wallet. That's the entire auth flow.
 **Web dashboard.** Connect, fund, play, withdraw, view history, see your
 character mascot, browse the audit trail. Dark mode, LAZY Gold accents.
 
+**Chat to your agent.** A scope-guarded assistant (where enabled) answers
+questions about your balance, how to deposit, and your play history in plain
+English — and politely declines anything off-topic. It can optionally start a
+play for you, but only after you explicitly confirm.
+
+**Buy a rake holiday.** Where the operator enables it, pay a one-off USD price
+— in USDC or the live HBAR equivalent — for **0% deposit rake for 30 days**.
+Payment settles on-chain via x402; the dashboard has a wallet-connected picker
+(with a testnet USDC faucet link on testnet).
+
+**Filter your audit trail.** The on-chain audit page has type chips — show only
+deposits, plays, rakes, withdrawals, refunds, etc. Default view is unchanged;
+the filter is there if you want it.
+
 ---
 
 ## For Developers
@@ -90,11 +104,37 @@ custom file in, set the env var, done.
 batch format and the current v2 sequence format from the same topic. Forward
 and backward compatibility live in one place.
 
-**Test suite + audit verifier + parity checker.** 380 tests including the
+**Test suite + audit verifier + parity checker.** 770+ tests including the
 regression that locks in per-token budget correctness, A2A adapter parity,
 and HCS-20 dual-shape parsing. Standalone audit verifier ships in
 `src/scripts/verify-audit.ts`. Standalone protocol parity checker ships in
 `src/cli/check-protocols.ts`.
+
+**Three-gate pre-push.** `npm test` (runtime via tsx), `npm run typecheck`
+(whole-program `tsc` over both tsconfigs — catches type errors in test files
+that `tsx` and `next build` skip), and `npm run build:web` (Next build). Each
+catches a class the others miss.
+
+**Hedera Agent Kit chat router.** The `/chat` interface is backed by
+`@hashgraph/hedera-agent-kit-ai-sdk`: read-only Hedera `*Query` plugins plus a
+custom plugin wrapping our existing audited MCP tools. The kit's MUTATING
+plugins are never loaded, so the chat LLM structurally has no kit tool that can
+move value — every value op flows through the custodial MCP path with per-user
+auth. Scope-guarded system prompt + per-turn token / input / history / step /
+daily caps keep it on-topic and on-budget.
+
+**x402-on-Hedera payment gate.** `@x402/core` + `@x402/hedera` resource-server
+gate at `/api/premium/rake-holiday`: `402` → buyer-signed Hedera transfer →
+facilitator `verify`/`settle` → capability unlock. USD-denominated, payable in
+USDC or the live HBAR equivalent (mirror-node exchange rate, config-driven
+slippage tolerance). Feature-flagged OFF by default; the deposit rake is never
+touched. Reference payment simulator in `uat-x402.ts`.
+
+**Machine-readable commerce advertisement.** When x402 is live, `/api/discover`
+exposes a `commerce` block (endpoint, price, accepted assets, facilitator,
+CAIP-2 network) and the A2A Agent Card description names the capability — so a
+connecting agent can discover and drive the payment loop without reading docs.
+Both are flag-gated; an x402-off deploy advertises nothing.
 
 ---
 
@@ -162,3 +202,14 @@ deployments; multi-user mode ignores it.
 (`redis: 'upstash' | 'memory'`), kill switch state, and version, all
 without auth. External uptime monitors can alert on backend-mode
 asymmetry without scraping logs.
+
+**Opt-in x402 commerce gate.** Sell capabilities for on-chain HBAR/USDC via
+the x402-on-Hedera scheme — entirely flag-gated (`X402_ENABLED` + `X402_PAY_TO`)
+and OFF by default, so it never interferes with the deposit-time rake. The
+shipped capability is a USD-priced "rake holiday" (0% rake for N days); the
+grant lives in Redis as the source of truth, and `X402_RECORD_TO_HCS20`
+optionally anchors each grant on the HCS-20 trail (a non-balance-affecting
+control event) so a topic-only auditor sees WHY a user's deposits were credited
+at 0% rake. The chat surface (`CHAT_ENABLED`, model + cost caps configurable)
+is independently flag-gated, with its mutating play tool a further opt-in
+(`CHAT_ALLOW_PLAY`).

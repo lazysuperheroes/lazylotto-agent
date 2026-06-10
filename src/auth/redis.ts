@@ -24,6 +24,10 @@ export const KEY_PREFIX = {
   session: `lla:${NET}:session:`,
   accountSessions: `lla:${NET}:account-sessions:`,
   rateLimit: `lla:${NET}:ratelimit:`,
+  // x402 rake-holiday (src/custodial/rakeHoliday.ts): per-user active-holiday
+  // key, TTL = the holiday window. Grant idempotency rides the canonical
+  // `withIdempotency` primitive (KEY_PREFIX.idempotency), not a hand-rolled claim.
+  rakeHoliday: `lla:${NET}:rake-holiday:`,
   // Distributed locks (src/lib/locks.ts)
   lockUser: `lla:${NET}:lock:user:`,
   lockOperator: `lla:${NET}:lock:operator:`,

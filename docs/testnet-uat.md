@@ -8,6 +8,10 @@ Operator validation guide for the deployed LazyLotto Agent at
 ## Prerequisites
 
 - [X] Agent wallet funded with testnet HBAR (check on [HashScan](https://hashscan.io/testnet))
+- [ ] Faucets: testnet **HBAR** from the [Hedera Portal faucet](https://portal.hedera.com/faucet);
+      for the x402 commerce gate, testnet **USDC** (token `0.0.429274`) from
+      [Circle's faucet](https://faucet.circle.com) → Hedera testnet. The receiving
+      account must associate the USDC token first — see `docs/uat-chat-x402.md`.
 - [X] Your operator wallet account ID is in `ADMIN_ACCOUNTS` env var on Vercel
 - [X] A second testnet wallet for user-role testing (HashPack or Blade)
 - [X] Claude Desktop installed

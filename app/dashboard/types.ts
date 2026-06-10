@@ -34,7 +34,12 @@ export interface StatusResponse {
   depositMemo: string;
   strategyName: string;
   strategyVersion: string;
+  /** The user's BASE rake rate. The EFFECTIVE rate is 0 while a rake holiday
+   *  is active — see `rakeHoliday` and prefer it when rendering the rake. */
   rakePercent: number;
+  /** Active x402 rake holiday, or null. When present the effective rake is 0%
+   *  on deposits until `until` (ISO 8601), after which `rakePercent` resumes. */
+  rakeHoliday?: { active: boolean; until: string } | null;
   balances: UserBalances;
   active: boolean;
   registeredAt: string;

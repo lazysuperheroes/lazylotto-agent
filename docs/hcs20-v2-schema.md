@@ -949,7 +949,7 @@ Operator control event — kill switch toggles, triage anchors, deposit-credit o
 | `p` | `"hcs-20"` (literal) | yes | HCS-20 protocol identifier |
 | `op` | `"control"` (literal) | yes | — |
 | `tick` | string | yes | — |
-| `event` | `"killswitch_enabled"` \| `"killswitch_disabled"` \| `"force_release_override"` \| `"force_release"` \| `"play_uncertain_success_pending_triage"` \| `"deposit_credit_flush_orphaned"` | yes | Control-event kind |
+| `event` | enum (7 values) | yes | Control-event kind |
 | `reason` | string \| null | no | — |
 | `by` | string | yes | Performing operator account id |
 | `uncertainTxId` | string | no | For force_release / play_uncertain_success_pending_triage: the dead-letter id |

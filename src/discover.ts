@@ -11,6 +11,32 @@
  *   - Self-hosted HTTP server  (src/mcp/server.ts /discover)
  */
 
+import { loadFeatureConfig, isX402Active } from './config/features.js';
+
+/**
+ * x402 "agentic commerce" advertisement. Present ONLY when the x402 gate is
+ * active (flag on + payTo configured). Tells a connecting agent it can pay
+ * programmatically for a capability, which endpoint, the price, and the
+ * accepted assets — everything needed to drive the 402 → pay → settle loop
+ * without reading our docs first.
+ */
+export interface CommerceAdvertisement {
+  protocol: 'x402';
+  /** CAIP-2 network id (e.g. "hedera:testnet"). */
+  network: string;
+  /** Facilitator base URL (verify + settle). */
+  facilitator: string;
+  description: string;
+  capabilities: Array<{
+    id: string;
+    endpoint: string;
+    method: 'POST';
+    description: string;
+    price: { usd: string; assets: string[] };
+    auth: string;
+  }>;
+}
+
 export interface DiscoveryResponse {
   // Identity
   name: string;
@@ -54,6 +80,9 @@ export interface DiscoveryResponse {
   // Capabilities
   capabilities: Record<string, boolean>;
 
+  // Agentic commerce (x402). Omitted when the gate is inactive.
+  commerce?: CommerceAdvertisement;
+
   // Deposits
   deposits: {
     acceptedTokens: string[];
@@ -76,6 +105,11 @@ export interface DiscoveryResponse {
  */
 export function buildDiscoveryResponse(baseUrl: string): DiscoveryResponse {
   const network = process.env.HEDERA_NETWORK ?? 'testnet';
+
+  // Opt-in commerce/chat surfaces (default OFF). Pure env reads — CLI-safe.
+  const features = loadFeatureConfig();
+  const x402Active = isX402Active(features);
+  const chatEnabled = features.chat.enabled;
 
   return {
     // ── Identity ──────────────────────────────────────────────
@@ -161,7 +195,40 @@ export function buildDiscoveryResponse(baseUrl: string): DiscoveryResponse {
       depositDetection: true,
       onChainAccounting: true,
       reconciliation: true,
+      // Opt-in surfaces (Hedera Commerce Agent work). Advertised only
+      // when actually live so discovery never promises a disabled path.
+      chat: chatEnabled,
+      x402Payments: x402Active,
     },
+
+    // ── Agentic commerce (x402) ───────────────────────────────
+    // Only present when the gate is active. JSON.stringify drops the
+    // `undefined`, so an x402-off deploy simply has no `commerce` key.
+    commerce: x402Active
+      ? {
+          protocol: 'x402',
+          network: features.x402.network,
+          facilitator: features.x402.facilitatorUrl,
+          description:
+            'HTTP-native paid capabilities via x402 on Hedera. A connecting ' +
+            'agent can pay programmatically (402 → sign Hedera transfer → ' +
+            'facilitator settles) to unlock a capability — no pre-funded ' +
+            'custodial balance required.',
+          capabilities: [
+            {
+              id: 'rake_holiday',
+              endpoint: `${baseUrl}/api/premium/rake-holiday`,
+              method: 'POST',
+              description: `Pay a one-off USD price to get 0% rake on deposits for ${features.x402.rakeHoliday.durationDays} days.`,
+              price: {
+                usd: `$${(features.x402.rakeHoliday.priceUsdCents / 100).toFixed(2)}`,
+                assets: ['HBAR', `USDC (${features.x402.usdcTokenId})`],
+              },
+              auth: 'Bearer session token (identifies whose rake holiday this is)',
+            },
+          ],
+        }
+      : undefined,
 
     // ── Deposits ──────────────────────────────────────────────
     deposits: {

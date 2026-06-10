@@ -18,6 +18,7 @@ import { getOperatorAccountId } from '~/hedera/wallet';
 import { withChecksum } from '~/utils/checksum';
 import { readVelocityStates } from '~/custodial/velocity';
 import { composeBalanceResponse } from '../../_lib/composeBalances';
+import { getRakeHoliday } from '~/custodial/rakeHoliday';
 
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -115,6 +116,21 @@ export const GET = withStore(async (request: Request) => {
     // (R11-FG-3 archetype). Phase-9 dissection §6 Cluster C.
     const { responseBalances, pendingAdjustments } = await composeBalanceResponse(user);
 
+    // Active x402 rake holiday (if any). Surfaced so the dashboard shows the
+    // EFFECTIVE rake (0% while active) instead of the stored base rate, and
+    // stops offering a purchase. Best-effort: the holiday lives in auth-Redis
+    // separate from the user record, and a blip here must never break the
+    // status hot path — `rakePercent` (the base) is always returned regardless.
+    let rakeHoliday: { active: true; until: string } | null = null;
+    try {
+      const grant = await getRakeHoliday(user.userId);
+      if (grant) {
+        rakeHoliday = { active: true, until: new Date(grant.untilMs).toISOString() };
+      }
+    } catch {
+      /* informational — leave null, dashboard shows base rate */
+    }
+
     return NextResponse.json(
       {
         userId: user.userId,
@@ -125,6 +141,7 @@ export const GET = withStore(async (request: Request) => {
         strategyName: user.strategyName,
         strategyVersion: user.strategyVersion,
         rakePercent: user.rakePercent,
+        rakeHoliday,
         balances: responseBalances,
         active: user.active,
         registeredAt: user.registeredAt,
