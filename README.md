@@ -11,12 +11,24 @@ winnings, and manages its budget -- all without human intervention.
 > Hedera wallet (Claude Desktop over stdio, no operator wallet in the
 > loop). Same code base, three configs.
 
+> **Agentic commerce on Hedera.** Beyond autonomous play, the agent is an
+> **auditable, HBAR-priced execution service**. A scope-guarded **chat interface**
+> — built on the [Hedera Agent Kit](https://github.com/hashgraph/hedera-agent-kit)
+> as a tool router — answers account questions and (optionally, behind an explicit
+> confirm) starts a play for the signed-in user. An **x402-on-Hedera payment gate**
+> sells a USD-priced *rake holiday* (pay in USDC or the live HBAR equivalent → 0%
+> deposit rake for 30 days): the agent reads a `402`, signs a Hedera transfer, the
+> facilitator settles on-chain, and the capability unlocks. Both surfaces are
+> **feature-flagged OFF by default** and never touch the audited HCS-20 settlement
+> path. See **[FEATURES.md](FEATURES.md)**, `docs/x402-payment-guide.md`, and the
+> machine-readable advertisement at `/api/discover`.
+
 > **New here?** This README is the engineering / operator entrypoint. If you're
 > a player who just wants to play the lottery without running anything, start
 > with **[PLAYERS.md](PLAYERS.md)** — the friendly version. For a feature
 > breakdown by audience, see **[FEATURES.md](FEATURES.md)**. The engineering
-> blog under **[docs/blog/](docs/blog/)** has the why, the how, and the security
-> story, written for three different audiences.
+> blog under **[docs/blog/](docs/blog/)** has the why, the how, the security
+> story, and the agentic-commerce build, written for four different audiences.
 
 The agent operates in **three deployment modes**:
 
@@ -522,6 +534,26 @@ npx @lazysuperheroes/lazylotto-agent
 
 **Legacy aliases:** `KV_REST_API_URL` and `KV_REST_API_TOKEN` are accepted as
 fallbacks for the Upstash variables.
+
+**Commerce surfaces (Hedera Agent Kit chat + x402 gate — all default OFF):**
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `CHAT_ENABLED` | No | `true` enables the `/chat` page + `/api/chat` route (Hedera Agent Kit tool router). Default off — the route 404s and the kit is never loaded. |
+| `CHAT_MODEL` | No | Chat model via `@ai-sdk/anthropic` (default `claude-haiku-4-5`). |
+| `CHAT_ALLOW_PLAY` | No | `true` lets the chat agent start a play for the signed-in user (the only mutating chat tool), behind a two-step confirm. Default off — chat is read-only. Routes through the audited MCP path; withdrawals stay on the dashboard. |
+| `ANTHROPIC_API_KEY` | If chat on | API key for the chat model. |
+| `X402_ENABLED` | No | `true` activates the x402 payment gate (needs `X402_PAY_TO`). Off → `/api/premium/*` returns 503; the deposit-time rake is untouched. |
+| `X402_PAY_TO` | If x402 on | Hedera account that receives x402 payments. |
+| `X402_FACILITATOR_URL` | No | Facilitator base URL (default Blocky402 testnet). |
+| `X402_FEE_PAYER` | No | Facilitator fee-payer that co-signs gas (testnet default `0.0.7162784`). |
+| `X402_USDC_TOKEN_ID` | No | USDC token id (testnet `0.0.429274`, mainnet `0.0.456858`). |
+| `X402_RAKE_HOLIDAY_PRICE_USD_CENTS` | No | Rake-holiday price in cents (default `500` = $5.00). |
+| `X402_RAKE_HOLIDAY_DAYS` | No | Holiday length in days (default `30`). |
+| `X402_RECORD_TO_HCS20` | No | `true` writes a flag-gated x402 receipt anchor to the HCS-20 trail (control event; non-balance-affecting). |
+
+See `.env.example` for the full annotated list and `docs/x402-payment-guide.md`
+for the payment walkthrough.
 
 ### Strategy Files
 
@@ -1126,7 +1158,7 @@ too, or they will diverge on Vercel.
 - **[PLAYERS.md](PLAYERS.md)** — friendly guide for players
 - **[FEATURES.md](FEATURES.md)** — feature breakdown by audience
 - **[CHANGELOG.md](CHANGELOG.md)** — release history
-- **[docs/blog/](docs/blog/)** — engineering blog (product, security, architecture)
+- **[docs/blog/](docs/blog/)** — engineering blog (product, security, architecture, agentic commerce)
 - **[docs/getting-started.md](docs/getting-started.md)** — three-modes setup runbook
 - **[docs/MULTI_USER.md](docs/MULTI_USER.md)** — custodial-mode reference
 - **[docs/testnet-user-guide.md](docs/testnet-user-guide.md)** — end-user dashboard + Claude flow

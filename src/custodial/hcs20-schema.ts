@@ -147,6 +147,13 @@ const ControlEventKind = z.enum([
   'force_release',
   'play_uncertain_success_pending_triage',
   'deposit_credit_flush_orphaned',
+  // x402 commerce: anchors a paid "rake holiday" grant on the topic so a
+  // topic-only auditor sees the CAUSE (the off-chain payment) of the 0%-rake
+  // deposits that follow. Non-balance-affecting (no grossAmount); the
+  // settlement tx rides `idempotencyKey` (dedup) + `cause` (human summary).
+  // Additive + flag-gated (X402_RECORD_TO_HCS20) — verify-audit ignores it
+  // (no switch case), the reader preserves it generically.
+  'x402_rake_holiday_granted',
 ]);
 
 // ── Prize entries (sub-schema) ──────────────────────────────

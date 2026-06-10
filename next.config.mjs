@@ -55,6 +55,19 @@ const config = {
         ...(Array.isArray(config.externals) ? config.externals : []),
         '@modelcontextprotocol/sdk',
         /^@modelcontextprotocol\/sdk\/.*/,
+        // Hedera Agent Kit (+ its bundled MCP SDK 1.27.1) — same
+        // minification hazard as the MCP SDK above; keep it loaded from
+        // node_modules rather than bundled/minified. Only exercised by the
+        // opt-in /api/chat route (CHAT_ENABLED), which dynamic-imports it.
+        '@hashgraph/hedera-agent-kit',
+        /^@hashgraph\/hedera-agent-kit\/.*/,
+        '@hashgraph/hedera-agent-kit-ai-sdk',
+        /^@hashgraph\/hedera-agent-kit-ai-sdk\/.*/,
+        // x402 payment SDK (only the opt-in rake-holiday route imports it).
+        '@x402/core',
+        /^@x402\/core\/.*/,
+        '@x402/hedera',
+        /^@x402\/hedera\/.*/,
       ];
     }
 

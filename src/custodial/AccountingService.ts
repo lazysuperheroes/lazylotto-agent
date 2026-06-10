@@ -424,7 +424,10 @@ export class AccountingService {
       // post-on-chain-deposit. Topic-only DR replay uses the
       // `grossAmount` field below to subtract the un-credited
       // amount from the user's reconstructed balance.
-      | 'deposit_credit_flush_orphaned',
+      | 'deposit_credit_flush_orphaned'
+      // x402 commerce: paid rake-holiday grant anchor (see
+      // `recordX402RakeHoliday` below). Non-balance-affecting.
+      | 'x402_rake_holiday_granted',
     details: {
       reason?: string;
       by: string;
@@ -503,6 +506,58 @@ export class AccountingService {
       timestamp: new Date().toISOString(),
     };
     await this.submitV2Message(message);
+  }
+
+  /**
+   * x402 commerce anchor: record a paid "rake holiday" grant on the HCS-20
+   * topic. Additive + flag-gated — the caller only invokes this when
+   * `X402_RECORD_TO_HCS20` is set. The grant itself lives in Redis (see
+   * src/custodial/rakeHoliday.ts) and is the source of truth; this is a
+   * topic-only audit anchor so an external auditor can see WHY the user's
+   * subsequent deposits were credited at 0% rake — the off-chain x402
+   * payment that bought the holiday.
+   *
+   * Mapped onto the existing `control` op (no new v2 op, no reader /
+   * verify-audit change): the settlement tx id rides `idempotencyKey` (so a
+   * replayed settlement de-dups to a single anchor in the reader) and is
+   * echoed in the human-readable `cause`. Non-balance-affecting — it carries
+   * NO grossAmount, so verify-audit's conservation math and per-user reducers
+   * ignore it (no switch case → falls through).
+   */
+  async recordX402RakeHoliday(details: {
+    /** User who received the holiday (Hedera account id). */
+    userAccountId: string;
+    /** Account recording the anchor (the agent/operator wallet). */
+    recordedBy: string;
+    /** On-chain x402 settlement tx id that paid for the holiday. */
+    settlementTxId: string;
+    /** 'HBAR' or the USDC token id paid. */
+    asset: string;
+    /** Atomic units paid (tinybars for HBAR, base units for USDC). */
+    amount: string;
+    /** USD price in cents at quote time. */
+    priceUsdCents: number;
+    /** Holiday length in days. */
+    durationDays: number;
+    /** ISO 8601 holiday expiry. */
+    untilIso: string;
+  }): Promise<void> {
+    // `cause` is capped at 500 chars by the schema — this stays well under.
+    const cause =
+      `rake_holiday days=${details.durationDays} ` +
+      `priceUsdCents=${details.priceUsdCents} ` +
+      `paid=${details.amount} asset=${details.asset} ` +
+      `settlementTx=${details.settlementTxId} until=${details.untilIso}`;
+    await this.recordControlEvent('x402_rake_holiday_granted', {
+      by: details.recordedBy,
+      userId: details.userAccountId,
+      token: details.asset,
+      // Settlement tx as the dedup key: a replayed settlement (the same
+      // on-chain payment) collapses to a single anchor in the reader.
+      idempotencyKey: details.settlementTxId,
+      cause,
+      reason: 'x402_rake_holiday',
+    });
   }
 
   /**

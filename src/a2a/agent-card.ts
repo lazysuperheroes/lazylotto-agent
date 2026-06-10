@@ -13,6 +13,7 @@
  */
 
 import type { AgentCard, AgentSkill } from '@a2a-js/sdk';
+import { loadFeatureConfig, isX402Active } from '../config/features.js';
 // R4-FG-56 (round-4 medium): import package.json's version field
 // directly. Pre-fix the chain `NEXT_PUBLIC_APP_VERSION ?? npm_package_version
 // ?? '0.2.0'` left production stuck on the '0.2.0' fallback because
@@ -189,6 +190,18 @@ export function buildAgentCard(): AgentCard {
     process.env.npm_package_version ??
     '0.0.0-unknown';
 
+  // Advertise the x402 commerce capability in the human-readable description
+  // ONLY when the gate is live. The paid rake-holiday is an HTTP-native x402
+  // capability (POST /api/premium/rake-holiday), NOT a `tools/call` skill, so
+  // it is deliberately absent from `skills[]` — adding it there would break the
+  // MCP↔A2A parity gate. Structured commerce metadata lives on /api/discover.
+  const cfg = loadFeatureConfig();
+  const commerceSentence = isX402Active(cfg)
+    ? ' Also exposes an x402-on-Hedera paid capability: pay a USD-priced ' +
+      '"rake holiday" (USDC or live HBAR equivalent) for 0% deposit rake — ' +
+      'see /api/discover → commerce.'
+    : '';
+
   return {
     name: 'LazyLotto Agent',
     description:
@@ -196,7 +209,8 @@ export function buildAgentCard(): AgentCard {
       'Plays LazyLotto pools on behalf of users — evaluates expected value, ' +
       'buys entries, rolls for prizes, and transfers winnings. ' +
       'Accepts deposits via memo-tagged transfers with configurable strategies ' +
-      'and full on-chain HCS-20 accounting.',
+      'and full on-chain HCS-20 accounting.' +
+      commerceSentence,
     url: `${baseUrl}/api/a2a`,
     version,
     protocolVersion: '0.2.5',

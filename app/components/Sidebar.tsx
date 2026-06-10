@@ -10,7 +10,7 @@ import {
   persistCharacterIdx,
   randomCharacterIdx,
 } from '../lib/characters';
-import { disconnect } from '../lib/session';
+import { disconnect, SESSION_CHANGED_EVENT } from '../lib/session';
 
 // ---------------------------------------------------------------------------
 // Inline SVG icons (16x16)
@@ -115,6 +115,24 @@ function UserIcon({ className }: { className?: string }) {
   );
 }
 
+function ChatIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M14 9a2 2 0 01-2 2H6l-3 3V4a2 2 0 012-2h7a2 2 0 012 2z" />
+    </svg>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Nav items
 // ---------------------------------------------------------------------------
@@ -127,12 +145,16 @@ function UserIcon({ className }: { className?: string }) {
 //
 // `authOnly: true` means the item only renders when a session token
 // is present (the Account page has nothing to show without auth).
+// `chatOnly: true` means the item only renders when the chat surface is enabled
+// (CHAT_ENABLED on the server, surfaced to the client via /api/discover
+// capabilities.chat — single source of truth, no duplicated NEXT_PUBLIC flag).
 const NAV_ITEMS = [
-  { label: 'Sign in', labelAuth: 'Sign out', href: '/auth', Icon: WalletIcon, adminOnly: false, authOnly: false },
-  { label: 'Dashboard', href: '/dashboard', Icon: GridIcon, adminOnly: false, authOnly: false },
-  { label: 'Account', href: '/account', Icon: UserIcon, adminOnly: false, authOnly: true },
-  { label: 'Audit Trail', href: '/audit', Icon: DocumentIcon, adminOnly: false, authOnly: false },
-  { label: 'Admin', href: '/admin', Icon: ShieldIcon, adminOnly: true, authOnly: false },
+  { label: 'Sign in', labelAuth: 'Sign out', href: '/auth', Icon: WalletIcon, adminOnly: false, authOnly: false, chatOnly: false },
+  { label: 'Dashboard', href: '/dashboard', Icon: GridIcon, adminOnly: false, authOnly: false, chatOnly: false },
+  { label: 'Chat', href: '/chat', Icon: ChatIcon, adminOnly: false, authOnly: true, chatOnly: true },
+  { label: 'Account', href: '/account', Icon: UserIcon, adminOnly: false, authOnly: true, chatOnly: false },
+  { label: 'Audit Trail', href: '/audit', Icon: DocumentIcon, adminOnly: false, authOnly: false, chatOnly: false },
+  { label: 'Admin', href: '/admin', Icon: ShieldIcon, adminOnly: true, authOnly: false, chatOnly: false },
 ];
 
 // ---------------------------------------------------------------------------
@@ -141,15 +163,26 @@ const NAV_ITEMS = [
 
 function UserContext() {
   const router = useRouter();
+  const pathname = usePathname();
   const [accountId, setAccountId] = useState<string | null>(null);
   const [hasSession, setHasSession] = useState(false);
   const [characterIdx, setCharacterIdx] = useState(0);
 
+  // Re-read session state on mount, on route change, AND on a same-tab
+  // session-changed broadcast (sign-in / disconnect / re-auth). Without this
+  // the bottom-left stays stale: the sidebar lives in the layout and never
+  // unmounts on navigation, so a mount-only read shows the previous user's
+  // account + mascot after a disconnect, and nothing after a fresh sign-in.
   useEffect(() => {
-    setAccountId(localStorage.getItem('lazylotto:accountId'));
-    setHasSession(!!localStorage.getItem('lazylotto:sessionToken'));
-    setCharacterIdx(loadOrPickCharacterIdx());
-  }, []);
+    const sync = () => {
+      setAccountId(localStorage.getItem('lazylotto:accountId'));
+      setHasSession(!!localStorage.getItem('lazylotto:sessionToken'));
+      setCharacterIdx(loadOrPickCharacterIdx());
+    };
+    sync();
+    window.addEventListener(SESSION_CHANGED_EVENT, sync);
+    return () => window.removeEventListener(SESSION_CHANGED_EVENT, sync);
+  }, [pathname]);
 
   const handleDisconnect = useCallback(() => {
     // Single source of truth — see app/lib/session.ts. Adding a new
@@ -311,15 +344,46 @@ export function Sidebar() {
   // to discover the refund flow until they went digging. Now the
   // sidebar shows the count next to Account on every page.
   const [stuckCount, setStuckCount] = useState(0);
+  // Whether the AI chat surface is enabled, for the conditional Chat nav item.
+  const [chatEnabled, setChatEnabled] = useState(false);
 
-  // Check auth state + admin status for conditional nav
+  // Source chat-enabled from /api/discover (capabilities.chat reflects the
+  // server CHAT_ENABLED flag) so the nav has ONE source of truth — no separate
+  // NEXT_PUBLIC flag that could drift from the server config. Runs once.
   useEffect(() => {
-    const hasToken = !!localStorage.getItem('lazylotto:sessionToken');
-    setIsAuthenticated(hasToken);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch('/api/discover');
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as {
+          capabilities?: Record<string, boolean>;
+        };
+        if (!cancelled) setChatEnabled(data.capabilities?.chat === true);
+      } catch {
+        /* silent — the Chat link just stays hidden if discovery fails */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-    const tier = localStorage.getItem('lazylotto:tier') ?? '';
-    setIsAdmin(hasToken && (tier === 'admin' || tier === 'operator'));
-  }, [pathname]); // Re-check on route change
+  // Check auth state + admin status for conditional nav. Re-checks on route
+  // change AND on a same-tab session-changed broadcast, so an in-page
+  // disconnect/sign-in (e.g. the /auth page's own buttons, which don't
+  // navigate) updates the nav immediately rather than on the next route change.
+  useEffect(() => {
+    const sync = () => {
+      const hasToken = !!localStorage.getItem('lazylotto:sessionToken');
+      setIsAuthenticated(hasToken);
+      const tier = localStorage.getItem('lazylotto:tier') ?? '';
+      setIsAdmin(hasToken && (tier === 'admin' || tier === 'operator'));
+    };
+    sync();
+    window.addEventListener(SESSION_CHANGED_EVENT, sync);
+    return () => window.removeEventListener(SESSION_CHANGED_EVENT, sync);
+  }, [pathname]);
 
   // Fetch stuck deposit count when authenticated. Lives here rather
   // than on /dashboard so the badge updates regardless of which page
@@ -464,6 +528,7 @@ export function Sidebar() {
           {NAV_ITEMS.filter((item) => {
             if (item.adminOnly && !isAdmin) return false;
             if (item.authOnly && !isAuthenticated) return false;
+            if (item.chatOnly && !chatEnabled) return false;
             return true;
           }).map((item) => {
             const isActive = pathname === item.href;

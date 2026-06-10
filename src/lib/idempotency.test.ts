@@ -175,6 +175,11 @@ describe('withIdempotency: PreserveClaim retention', () => {
       const { PreserveClaimError } = await import('../hedera/transfers.js');
 
       class CustomPreserveError extends PreserveClaimError {
+        // PreserveClaimError.transactionId is abstract (R6 Phase-1 →
+        // Phase-7): every concrete subclass MUST declare the on-chain
+        // tx id whose status is unknown. A non-empty string also keeps
+        // the runtime queueMicrotask guard quiet.
+        readonly transactionId = '0.0.1001@1700000000.000000001';
         constructor() {
           super('hypothetical post-submit failure');
           this.name = 'CustomPreserveError';
@@ -288,7 +293,13 @@ describe('isPreserveClaim guard', () => {
   it('returns true for any PreserveClaimError subclass', async () => {
     const { isPreserveClaim } = await import('./idempotency.js');
     const { PreserveClaimError } = await import('../hedera/transfers.js');
-    class Sub extends PreserveClaimError {}
+    // Must implement the abstract `transactionId` member (see the
+    // CustomPreserveError note above). The guard under test
+    // (`isPreserveClaim`) keys off `instanceof PreserveClaimError`,
+    // so any complete subclass instance qualifies.
+    class Sub extends PreserveClaimError {
+      readonly transactionId = '0.0.1002@1700000000.000000002';
+    }
     assert.equal(isPreserveClaim(new Sub()), true);
   });
 

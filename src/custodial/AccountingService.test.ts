@@ -17,6 +17,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { Client } from '@hashgraph/sdk';
 import { AccountingService } from './AccountingService.js';
+import { validateV2Message } from './hcs20-schema.js';
 
 const AGENT_ACCOUNT = '0.0.9999';
 
@@ -242,5 +243,69 @@ describe('R3-FG-19: nextAgentSeq cluster-wide seed-failed flag', () => {
     });
     // If we get here, no throw. Sanity-check we did consult Redis.
     // (Soft assertion — not the load-bearing one.)
+  });
+});
+
+describe('recordX402RakeHoliday: x402 commerce audit anchor', () => {
+  const prevNetwork = process.env.HEDERA_NETWORK;
+  beforeEach(() => {
+    process.env.HEDERA_NETWORK = 'testnet';
+  });
+  afterEach(() => {
+    uninstallRedisMock();
+    if (prevNetwork === undefined) delete process.env.HEDERA_NETWORK;
+    else process.env.HEDERA_NETWORK = prevNetwork;
+  });
+
+  // revert-proof: if 'x402_rake_holiday_granted' is removed from the
+  // ControlEventKind enum (hcs20-schema.ts), the strict writer schema rejects
+  // the message and `validateV2Message` below throws — failing this test. The
+  // anchor maps onto the existing `control` op, so this also guards that the
+  // settlement tx rides `idempotencyKey` (reader de-dup) and that the event is
+  // non-balance-affecting (no grossAmount).
+  it('emits a schema-valid control anchor that de-dups on the settlement tx', async () => {
+    installRedisMock();
+    const submitted: Record<string, unknown>[] = [];
+    const svc = new AccountingService({
+      client: {} as unknown as Client,
+      tick: 'LLCRED',
+      topicId: '0.0.123456',
+    });
+    (
+      svc as unknown as {
+        submitV2Message: (m: Record<string, unknown>) => Promise<void>;
+      }
+    ).submitV2Message = async (m) => {
+      submitted.push(m);
+    };
+
+    await svc.recordX402RakeHoliday({
+      userAccountId: '0.0.7777',
+      recordedBy: AGENT_ACCOUNT,
+      settlementTxId: '0.0.7162784@1781031765.000000001',
+      asset: 'HBAR',
+      amount: '6279000000',
+      priceUsdCents: 500,
+      durationDays: 30,
+      untilIso: '2026-07-09T00:00:00.000Z',
+    });
+
+    assert.equal(submitted.length, 1, 'exactly one control anchor emitted');
+    const msg = submitted[0]!;
+    assert.equal(msg.op, 'control');
+    assert.equal(msg.event, 'x402_rake_holiday_granted');
+    assert.equal(msg.userId, '0.0.7777');
+    assert.equal(msg.by, AGENT_ACCOUNT);
+    assert.equal(msg.token, 'HBAR');
+    // Settlement tx is the dedup key (reader collapses replays of the same
+    // on-chain payment to a single anchor).
+    assert.equal(msg.idempotencyKey, '0.0.7162784@1781031765.000000001');
+    assert.match(String(msg.cause), /settlementTx=0\.0\.7162784@1781031765\.000000001/);
+    // Non-balance-affecting: no grossAmount (verify-audit's reducers ignore it).
+    assert.equal(msg.grossAmount, undefined);
+    // Load-bearing: the strict writer schema must accept the new kind.
+    assert.doesNotThrow(() =>
+      validateV2Message(msg as Parameters<typeof validateV2Message>[0]),
+    );
   });
 });

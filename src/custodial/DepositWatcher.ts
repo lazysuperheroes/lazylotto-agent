@@ -5,6 +5,7 @@ import type { CustodialConfig } from './types.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
 import { getTokenMeta, getTokenMetaSync } from '../utils/math.js';
 import { logger } from '../lib/logger.js';
+import { getEffectiveRakePercent } from './rakeHoliday.js';
 
 interface CreditInfo {
   amount: number;
@@ -563,12 +564,19 @@ export class DepositWatcher {
       return false;
     }
 
-    // Credit the user's balance via the ledger (token-specific)
+    // Credit the user's balance via the ledger (token-specific). The rake is
+    // resolved through getEffectiveRakePercent so a user with an active, paid
+    // x402 "rake holiday" is charged 0%. creditDeposit itself is UNCHANGED —
+    // only the rate passed in differs. See src/custodial/rakeHoliday.ts.
+    const rakePercent = await getEffectiveRakePercent(
+      user.userId,
+      user.rakePercent,
+    );
     await this.ledger.creditDeposit(
       user.userId,
       credit.amount,
       tx.transaction_id,
-      user.rakePercent,
+      rakePercent,
       credit.token,
     );
 

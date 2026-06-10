@@ -42,6 +42,8 @@ interface StatusResponse {
   strategyName: string;
   strategyVersion: string;
   rakePercent: number;
+  /** Active x402 rake holiday → effective rake is 0% on deposits until `until`. */
+  rakeHoliday?: { active: boolean; until: string } | null;
   balances: { tokens: Record<string, TokenBalanceEntry> };
   active: boolean;
   registeredAt: string;
@@ -389,7 +391,29 @@ export default function AccountPage() {
                   <div>
                     <dt className="label-caps mb-1">Rake</dt>
                     <dd className="text-sm text-foreground">
-                      {status.rakePercent}%
+                      {status.rakeHoliday?.active ? (
+                        <>
+                          <span className="text-success">0%</span>{' '}
+                          <span className="text-muted">
+                            (holiday
+                            {(() => {
+                              const until = status.rakeHoliday?.until;
+                              if (!until) return '';
+                              const d = new Date(until);
+                              return Number.isNaN(d.getTime())
+                                ? ''
+                                : ` until ${d.toLocaleDateString(undefined, {
+                                    month: 'short',
+                                    day: 'numeric',
+                                    year: 'numeric',
+                                  })}`;
+                            })()}
+                            ; base {status.rakePercent}%)
+                          </span>
+                        </>
+                      ) : (
+                        `${status.rakePercent}%`
+                      )}
                     </dd>
                   </div>
                   <div>

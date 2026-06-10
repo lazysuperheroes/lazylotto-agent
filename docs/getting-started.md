@@ -45,6 +45,10 @@ strategy, the budget, and the prizes. No users, no fees, no web frontend.
 - That account's private key in DER hex format (starts with `302e` or `3030`)
 - The account funded with testnet HBAR (use https://portal.hedera.com/faucet)
 - Testnet LAZY tokens in the account (token ID: `0.0.8011209`)
+- *(Optional — only for the x402 commerce gate)* testnet **USDC** (token
+  `0.0.429274`) from [Circle's faucet](https://faucet.circle.com) → select
+  Hedera testnet. The receiving account must associate that token first; see
+  `docs/uat-chat-x402.md`.
 - Your personal wallet account ID (this is the owner -- where prizes go)
 
 ### Setup
