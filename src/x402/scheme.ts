@@ -45,8 +45,9 @@ export function getFacilitator(cfg: X402FeatureConfig): HTTPFacilitatorClient {
 /**
  * Build the accepted payment options for a USD-cent price: USDC (1:1) AND the
  * live HBAR equivalent (quoted from the mirror-node exchange rate). The client
- * picks one. The HBAR quote is locked at request time; the route applies the
- * configured slippage tolerance on settlement.
+ * picks one. The HBAR quote is locked at request time; the x402 gate
+ * (settleOrChallenge) enforces the configured slippage floor
+ * (rakeHoliday.minAcceptedFraction) at settlement — F4/F11.
  */
 /**
  * Human-readable token amount for DISPLAY only — the protocol `amount` stays in
