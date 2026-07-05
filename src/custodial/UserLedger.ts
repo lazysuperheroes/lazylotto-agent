@@ -1,7 +1,7 @@
 import type { IStore } from './IStore.js';
 import type { AccountingService } from './AccountingService.js';
 import type { UserAccount, UserBalances } from './types.js';
-import { InsufficientBalanceError, UserNotFoundError, UserInactiveError, emptyTokenEntry } from './types.js';
+import { InsufficientBalanceError, MaxUserBalanceExceededError, UserNotFoundError, UserInactiveError, emptyTokenEntry } from './types.js';
 import { roundForToken } from '../utils/math.js';
 import { acquireUserLock, releaseUserLock } from '../lib/locks.js';
 import { mintAuditOrphanId } from '../lib/orphanIds.js';
@@ -57,6 +57,13 @@ export class UserLedger {
     txId: string,
     rakePercent: number,
     token: string,
+    /**
+     * F18 (2026-07-05 custodial audit): optional per-user balance cap.
+     * When provided, it is re-checked UNDER the lock after refreshUser() to
+     * close the cross-Lambda TOCTOU where the watcher's pre-lock check reads
+     * a stale snapshot. Throws MaxUserBalanceExceededError on breach.
+     */
+    maxUserBalance?: number,
   ): Promise<UserBalances> {
     // 1. Atomic claim — returns true iff this caller is the first to
     //    claim this on-chain txId. Backed by Redis SADD on RedisStore
@@ -118,6 +125,26 @@ export class UserLedger {
       // 4. Validate user exists (post-refresh — deregistration may
       //    have happened concurrently).
       const user = this.getUserOrThrow(userId);
+
+      // F18 (2026-07-05 custodial audit): re-check the balance cap on the
+      // FRESH balance from refreshUser() above. The watcher's pre-lock check
+      // reads a stale cached snapshot, so two concurrent distinct-txId
+      // deposits for one user could both pass it and both credit, exceeding
+      // maxUserBalance. This atomic re-check (BEFORE recordDeposit) throws;
+      // the catch below releases the tx claim (recorded still false) and
+      // rethrows, and the watcher dead-letters it like the pre-lock skip.
+      if (maxUserBalance != null) {
+        const existingAvailable = user.balances?.tokens?.[token]?.available ?? 0;
+        if (existingAvailable + grossAmount > maxUserBalance) {
+          throw new MaxUserBalanceExceededError(
+            userId,
+            token,
+            existingAvailable,
+            grossAmount,
+            maxUserBalance,
+          );
+        }
+      }
 
       // Calculate rake split (rounded to token's decimal precision)
       const rakeAmount = roundForToken(grossAmount * (rakePercent / 100), token);

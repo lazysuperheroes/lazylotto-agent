@@ -167,6 +167,34 @@ describe('UserLedger', () => {
     assert.equal(balances.tokens.hbar.totalRake, 1);
   });
 
+  // revert-proof: reverting F18 (dropping the under-lock maxUserBalance
+  // re-check in creditDeposit) makes this over-cap deposit CREDIT instead of
+  // throw — assert.rejects then fails, and the balance cap (only enforced by
+  // the watcher's pre-lock check on a stale snapshot) is defeated by a race.
+  it('F18: creditDeposit re-checks the cap under the lock, throws + releases the claim', async () => {
+    // Default user already has available=100; with maxUserBalance=100 any
+    // further deposit exceeds it — the under-lock re-check must throw.
+    await assert.rejects(
+      () => ledger.creditDeposit('user-1', 10, 'tx-f18', 1, 'hbar', 100),
+      (err: Error) => {
+        assert.equal(err.name, 'MaxUserBalanceExceededError');
+        return true;
+      },
+    );
+    // Thrown BEFORE recordDeposit → the claim is released so a later retry
+    // (e.g. after the balance drops) can still credit.
+    assert.equal(store.isTransactionProcessed('tx-f18'), false);
+    // Nothing credited.
+    assert.equal(store.getUser('user-1')!.balances.tokens.hbar.available, 100);
+  });
+
+  // revert-proof: the cap must ONLY refuse when actually exceeded — a bug
+  // that always threw (or an off-by-one) would break every in-cap deposit.
+  it('F18: creditDeposit within the cap still credits normally', async () => {
+    const balances = await ledger.creditDeposit('user-1', 100, 'tx-f18-ok', 1, 'hbar', 1000);
+    assert.equal(balances.tokens.hbar.available, 199); // prior 100 + net 99
+  });
+
   it('creditDeposit credits operator platform balance', async () => {
     await ledger.creditDeposit('user-1', 200, 'tx-002', 2, 'hbar');
     // 2% rake on 200 = 4

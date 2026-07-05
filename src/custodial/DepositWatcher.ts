@@ -2,6 +2,7 @@ import { getTransactionsByAccount, type MirrorTransaction } from '../hedera/mirr
 import type { IStore } from './IStore.js';
 import type { UserLedger } from './UserLedger.js';
 import type { CustodialConfig } from './types.js';
+import { MaxUserBalanceExceededError } from './types.js';
 import { HBAR_TOKEN_KEY } from '../config/strategy.js';
 import { getTokenMeta, getTokenMetaSync } from '../utils/math.js';
 import { logger } from '../lib/logger.js';
@@ -572,13 +573,48 @@ export class DepositWatcher {
       user.userId,
       user.rakePercent,
     );
-    await this.ledger.creditDeposit(
-      user.userId,
-      credit.amount,
-      tx.transaction_id,
-      rakePercent,
-      credit.token,
-    );
+    try {
+      await this.ledger.creditDeposit(
+        user.userId,
+        credit.amount,
+        tx.transaction_id,
+        rakePercent,
+        credit.token,
+        // F18 (2026-07-05 custodial audit): the under-lock re-check closes
+        // the TOCTOU where the pre-lock check above passed on a stale
+        // snapshot and a concurrent deposit credited first.
+        this.config.maxUserBalance,
+      );
+    } catch (creditErr) {
+      if (creditErr instanceof MaxUserBalanceExceededError) {
+        // The pre-lock check passed on a stale snapshot but a concurrent
+        // deposit credited first; the under-lock re-check caught the race.
+        // Dead-letter like the pre-lock skip — funds stay in the wallet for
+        // manual handling; the user's own balance is simply not over-credited.
+        this.stats.skippedExceedsMaxBalance++;
+        logger.warn('deposit exceeds max balance (caught under lock — TOCTOU race)', {
+          component: 'DepositWatcher',
+          event: 'deposit_exceeds_max_under_lock',
+          userId: user.userId,
+          depositAmount: credit.amount,
+          token: credit.token,
+          max: this.config.maxUserBalance,
+          txId: tx.transaction_id,
+        });
+        const rateCheck = await shouldRateLimitDlForUser(user.userId);
+        if (!rateCheck.rateLimited) {
+          await this.store.upsertDeadLetter({
+            transactionId: tx.transaction_id,
+            timestamp: tx.consensus_timestamp,
+            error: `Deposit ${credit.amount} ${credit.token} would exceed max balance for user ${user.userId} under the credit lock (concurrent-deposit race, max: ${this.config.maxUserBalance}).`,
+            sender: this.extractSender(tx) ?? undefined,
+            memo,
+          });
+        }
+        return false;
+      }
+      throw creditErr;
+    }
 
     logger.info('deposit credited', {
       component: 'DepositWatcher',

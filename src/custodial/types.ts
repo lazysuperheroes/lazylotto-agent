@@ -335,6 +335,22 @@ export class UserNotFoundError extends Error {
   }
 }
 
+export class MaxUserBalanceExceededError extends Error {
+  constructor(
+    public userId: string,
+    public token: string,
+    public currentAvailable: number,
+    public grossAmount: number,
+    public maxUserBalance: number,
+  ) {
+    super(
+      `Deposit of ${grossAmount} ${token} would exceed maxUserBalance ${maxUserBalance} for ` +
+        `${userId} (current available ${currentAvailable}) — refused under the credit lock (F18 TOCTOU).`,
+    );
+    this.name = 'MaxUserBalanceExceededError';
+  }
+}
+
 export class UserInactiveError extends Error {
   constructor(public userId: string) {
     super(`User ${userId} is inactive (deregistered). Withdrawals only.`);
