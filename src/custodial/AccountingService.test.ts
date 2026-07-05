@@ -179,15 +179,23 @@ describe('R3-FG-46: recordPlayPoolResult oversize-message slim fallback', () => 
 
 describe('R3-FG-19: nextAgentSeq cluster-wide seed-failed flag', () => {
   const prevNetwork = process.env.HEDERA_NETWORK;
+  const prevAcctOptional = process.env.HCS20_ACCOUNTING_OPTIONAL;
 
   beforeEach(() => {
     process.env.HEDERA_NETWORK = 'testnet';
+    // F13 (2026-07-05): these tests use a topic-LESS service to exercise the
+    // agentSeq seed-failed path; opt out of the now fail-loud v2 write so
+    // recordPlaySessionOpen reaches nextAgentSeq without throwing on the
+    // (irrelevant here) missing topic.
+    process.env.HCS20_ACCOUNTING_OPTIONAL = 'true';
   });
 
   afterEach(() => {
     uninstallRedisMock();
     if (prevNetwork === undefined) delete process.env.HEDERA_NETWORK;
     else process.env.HEDERA_NETWORK = prevNetwork;
+    if (prevAcctOptional === undefined) delete process.env.HCS20_ACCOUNTING_OPTIONAL;
+    else process.env.HCS20_ACCOUNTING_OPTIONAL = prevAcctOptional;
   });
 
   // revert-proof: if the Redis-flag check at AccountingService.ts:646-675
@@ -231,8 +239,9 @@ describe('R3-FG-19: nextAgentSeq cluster-wide seed-failed flag', () => {
   it('does NOT throw when Redis flag is absent and no local flag', async () => {
     installRedisMock(/* no seed */);
     const svc = makeService();
-    // No topic + clean state → resolves cleanly (no v2 submit happens
-    // because submitV2Message early-returns on `!this.topicId`).
+    // No topic + clean state → resolves cleanly. submitV2Message no-ops
+    // here because HCS20_ACCOUNTING_OPTIONAL=true (set in beforeEach) —
+    // F13 made a missing topic FAIL-LOUD by default, so opt-out is explicit.
     await svc.recordPlaySessionOpen({
       sessionId: 's-2',
       user: '0.0.1234',
@@ -243,6 +252,93 @@ describe('R3-FG-19: nextAgentSeq cluster-wide seed-failed flag', () => {
     });
     // If we get here, no throw. Sanity-check we did consult Redis.
     // (Soft assertion — not the load-bearing one.)
+  });
+});
+
+describe('F8 / F13: HCS-20 audit-trail integrity (2026-07-05 custodial audit)', () => {
+  const prevNetwork = process.env.HEDERA_NETWORK;
+  const prevAcctOptional = process.env.HCS20_ACCOUNTING_OPTIONAL;
+
+  beforeEach(() => {
+    process.env.HEDERA_NETWORK = 'testnet';
+  });
+
+  afterEach(() => {
+    uninstallRedisMock();
+    if (prevNetwork === undefined) delete process.env.HEDERA_NETWORK;
+    else process.env.HEDERA_NETWORK = prevNetwork;
+    if (prevAcctOptional === undefined) delete process.env.HCS20_ACCOUNTING_OPTIONAL;
+    else process.env.HCS20_ACCOUNTING_OPTIONAL = prevAcctOptional;
+  });
+
+  // revert-proof: re-adding the `isFromUs` gate to the agentSeq scan makes
+  // the author-LESS pool_result (seq 7) invisible, so the scan recovers only
+  // the open's seq (5); this asserts the seeded value is the true max 7, not 5
+  // (seeding 5 → next INCR reuses 6, an already-on-chain seq).
+  it('F8: seeds agentSeq from author-less pool/close messages, not just the open', async () => {
+    installRedisMock();
+    delete process.env.HCS20_ACCOUNTING_OPTIONAL;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          messages: [
+            // desc order; the MAX seq (7) sits on an author-less pool_result
+            {
+              message: Buffer.from(
+                JSON.stringify({ op: 'play_pool_result', agentSeq: 7 }),
+              ).toString('base64'),
+            },
+            {
+              message: Buffer.from(
+                JSON.stringify({ op: 'play_session_open', agent: AGENT_ACCOUNT, agentSeq: 5 }),
+              ).toString('base64'),
+            },
+          ],
+          links: {},
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    try {
+      const svc = new AccountingService({
+        client: {} as unknown as Client,
+        tick: 'TEST',
+        topicId: '0.0.999',
+      });
+      await svc.initializeAgentSeq(AGENT_ACCOUNT);
+      const seeded = (
+        svc as unknown as { fallbackAgentSeqs: Map<string, number> }
+      ).fallbackAgentSeqs.get(AGENT_ACCOUNT);
+      assert.equal(
+        seeded,
+        7,
+        'must recover the true max seq (7) from the author-less pool_result, not the open (5)',
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // revert-proof: reverting F13 (silent no-op on a missing topic) makes
+  // recordPlaySessionOpen RESOLVE instead of reject — the assertion that it
+  // throws "HCS20_TOPIC_ID is not configured" then fails, and audit writes
+  // silently vanish while Redis balances mutate.
+  it('F13: throws (not silent no-op) on a missing topic without the opt-out', async () => {
+    installRedisMock();
+    delete process.env.HCS20_ACCOUNTING_OPTIONAL;
+    const svc = makeService(); // topic-less
+    await assert.rejects(
+      () =>
+        svc.recordPlaySessionOpen({
+          sessionId: 's-f13',
+          user: '0.0.1234',
+          agent: AGENT_ACCOUNT,
+          strategy: 'balanced',
+          boostBps: 0,
+          expectedPools: 1,
+        }),
+      /HCS20_TOPIC_ID is not configured/,
+    );
   });
 });
 

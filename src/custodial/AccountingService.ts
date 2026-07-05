@@ -720,8 +720,14 @@ export class AccountingService {
               : 'https://testnet.mirrornode.hedera.com/api/v1';
 
           let scanned = 0;
-          const maxScan = 500;
+          // F8 (2026-07-05 custodial audit): raised from 500. On a busy
+          // shared topic the last play session can sit behind a wall of
+          // deposit/rake messages; too small a window recovers nothing and
+          // seeds -1 → the next INCR returns 0 → reuses seqs from the start
+          // of history.
+          const maxScan = 2000;
           let attemptHighest = -1;
+          let reachedHead = false;
           let nextPath: string | null = `/topics/${this.topicId}/messages?limit=100&order=desc`;
           while (nextPath && scanned < maxScan) {
             const url = nextPath.startsWith('/api/v1')
@@ -739,12 +745,15 @@ export class AccountingService {
                 const payload = JSON.parse(
                   Buffer.from(m.message, 'base64').toString('utf-8'),
                 ) as Record<string, unknown>;
-                const isFromUs =
-                  payload.agent === agentAccountId ||
-                  payload.from === agentAccountId ||
-                  payload.performedBy === agentAccountId;
+                // F8: count ANY message carrying a numeric agentSeq. The
+                // topic is single-writer (the submit key is agent-only),
+                // and only `play_session_open` carries an author field —
+                // `play_pool_result` / `_close` / `_aborted` carry the
+                // agentSeq but NO author. The pre-fix `isFromUs` gate
+                // therefore never counted them, so the scan recovered the
+                // OPEN's (low) seq instead of the true max on the last
+                // pool/close, and the next INCR REUSED an on-chain seq.
                 if (
-                  isFromUs &&
                   typeof payload.agentSeq === 'number' &&
                   payload.agentSeq > attemptHighest
                 ) {
@@ -755,7 +764,22 @@ export class AccountingService {
               }
             }
             nextPath = data.links?.next ?? null;
+            if (nextPath === null) reachedHead = true;
+            // Once a seq is found, a further ~100-message window guards
+            // against minor consensus reordering; then stop.
             if (attemptHighest >= 0 && scanned > 100) break;
+          }
+          // F8: distinguish "topic genuinely has no play sessions yet"
+          // (reached the head → safe to seed -1) from "hit the scan bound
+          // without finding any agentSeq AND without reaching the head" (a
+          // busy topic may bury the last play beyond the window — seeding
+          // -1 would REUSE historical seqs). Refuse the latter so the retry
+          // ladder → seed-failed path fires instead of silently seeding -1.
+          if (attemptHighest === -1 && !reachedHead) {
+            throw new Error(
+              `agentSeq scan hit maxScan=${maxScan} without finding any agentSeq ` +
+                `or reaching the topic head; refusing to seed -1 (would reuse historical seqs)`,
+            );
           }
           highestSeq = attemptHighest;
           succeeded = true;
@@ -1251,27 +1275,35 @@ export class AccountingService {
   }
 
   /**
-   * Submit a v2 message. Unlike the legacy submitMessage() which
-   * silently no-ops when topicId is missing, this throws — v2
-   * writers are load-bearing for the audit trail and a missing
-   * topic in production is a configuration error that needs to
-   * surface, not be silently swallowed.
+   * Submit a v2 message. v2 writers are load-bearing for the audit trail
+   * (reconcile + disaster-recovery reconstruct from the topic), so a
+   * missing topic is FAIL-LOUD by default: this throws.
    *
-   * Local development without HCS-20 still works because
-   * MultiUserAgent only calls v2 writers when this.accounting is
-   * enabled. The throw lets us distinguish "intentionally off"
-   * from "broken in production".
+   * F13 (2026-07-05 custodial audit): the pre-fix code contradicted this
+   * docstring — it silently no-op'd + warned when topicId was null, so a
+   * misconfigured HCS20_TOPIC_ID in production dropped every audit write
+   * while Redis balances mutated (invisible to reconcile, which compares
+   * Redis vs the on-chain WALLET, not the topic). The silent no-op is now
+   * gated behind an EXPLICIT opt-out (HCS20_ACCOUNTING_OPTIONAL=true) for
+   * tests / pre-topic-deploy CLI; production sets HCS20_TOPIC_ID (enforced
+   * at boot) or the first write throws — and the callers' catch turns that
+   * into a visible audit_trail_orphaned dead-letter, not silent loss.
    */
   private async submitV2Message(payload: Hcs20WriterMessage): Promise<void> {
     if (!this.topicId) {
-      // Match legacy submitMessage() behavior to keep test envs
-      // working but log loudly so production misconfigs surface.
-      // Operator should set HCS20_TOPIC_ID for v2 to work.
-      console.warn(
-        `[AccountingService] V2 message ${payload.op} skipped — no HCS20_TOPIC_ID configured. ` +
-          `Audit trail will be incomplete.`,
+      if (process.env.HCS20_ACCOUNTING_OPTIONAL === 'true') {
+        console.warn(
+          `[AccountingService] V2 message ${payload.op} skipped — no HCS20_TOPIC_ID ` +
+            `(HCS20_ACCOUNTING_OPTIONAL=true). Audit trail will be incomplete.`,
+        );
+        return;
+      }
+      throw new Error(
+        `Cannot write v2 audit message '${payload.op}': HCS20_TOPIC_ID is not configured. ` +
+          `The audit trail is load-bearing (reconcile + disaster recovery reconstruct from the ` +
+          `topic). Set HCS20_TOPIC_ID, or set HCS20_ACCOUNTING_OPTIONAL=true to intentionally run ` +
+          `without on-chain accounting (dev / pre-deploy only).`,
       );
-      return;
     }
     // Phase-2 R7: validate the outbound payload against the canonical
     // Zod schema BEFORE serialization. Drift between writer and
