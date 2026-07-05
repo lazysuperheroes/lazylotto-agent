@@ -1293,10 +1293,37 @@ async function reconstructSession(
         }
       }
       if (observedRoot !== bucket.close.poolsRoot) {
-        warnings.push(
-          `poolsRoot mismatch: close claims ${bucket.close.poolsRoot}, observed ${observedRoot || '(refused legacy fallback post-cutoff)'}`,
-        );
-        status = 'corrupt';
+        // F12 (2026-07-05 custodial audit): the writer slims pool prizes
+        // (top-10 cap) before submit, but a LEGACY close computed its
+        // poolsRoot over the FULL prize set — so a truncated pool made the
+        // reader-recomputed root (over the on-chain slimmed prizes) disagree
+        // and falsely marked a legitimate high-prize session `corrupt`.
+        // Post-fix the writer computes the close root over the POST-slim
+        // prizes and stamps poolsRootV>=2; those MUST match (a mismatch IS
+        // tamper). A legacy close (no poolsRootV) whose pools were
+        // slim-TRUNCATED cannot be validated (the dropped prizes are gone)
+        // — downgrade to a warning; a legacy NON-truncated mismatch is
+        // still genuine tamper and stays `corrupt`.
+        const isV2Root =
+          typeof (bucket.close as { poolsRootV?: number }).poolsRootV === 'number' &&
+          (bucket.close as { poolsRootV?: number }).poolsRootV! >= 2;
+        const anyTruncated = bucket.pools.some((p) => {
+          const t = (p as unknown as { slim_truncated_prizes?: number }).slim_truncated_prizes;
+          return typeof t === 'number' && t > 0;
+        });
+        if (!isV2Root && anyTruncated) {
+          warnings.push(
+            `poolsRoot mismatch tolerated (legacy full-prize root over a slim-truncated session): ` +
+              `close claims ${bucket.close.poolsRoot}, observed ${observedRoot || '(refused)'}. ` +
+              `Tamper-evidence unavailable for this session — recompute value against the on-chain wallet.`,
+          );
+          status = 'closed_success';
+        } else {
+          warnings.push(
+            `poolsRoot mismatch: close claims ${bucket.close.poolsRoot}, observed ${observedRoot || '(refused legacy fallback post-cutoff)'}`,
+          );
+          status = 'corrupt';
+        }
       } else {
         if (usedLegacy) {
           warnings.push(

@@ -277,6 +277,16 @@ export const PlaySessionCloseSchema = z
       .describe(
         'sha256 over canonically-sorted pool tuples plus session/user/agent binding (R4-FG-23). Reader rejects close on mismatch.',
       ),
+    // F12 (2026-07-05 custodial audit): poolsRoot hash-scheme version.
+    // >=2 = computed over the POST-slim prize sets actually written
+    // on-chain, so the reader's recompute matches exactly (a mismatch is
+    // genuine tamper). Absent/1 = legacy full-prize root — the reader
+    // tolerates a mismatch on a slim-TRUNCATED session (the dropped prizes
+    // are gone, so the full-prize root cannot be reconstructed) rather than
+    // falsely marking a legitimate high-prize session `corrupt`.
+    poolsRootV: NonNegInt.optional().describe(
+      'poolsRoot hash-scheme version; >=2 = over post-slim prizes (F12).',
+    ),
     totalWins: NonNegInt,
     prizeTransfer: PrizeTransferSchema,
     strategyDeviation: StrategyDeviationSchema.optional(),

@@ -1072,6 +1072,11 @@ export class MultiUserAgent {
         // charged. Without it, a LAZY pool would show up on the
         // audit trail labelled 'HBAR' and break reconciliation
         // for any third party reading the topic.
+        // F12 (2026-07-05 custodial audit): capture the POST-slim prizes
+        // that each recordPlayPoolResult actually wrote on chain, so the
+        // close poolsRoot below is computed over exactly what a topic-only
+        // reader recomputes — not the full pre-slim set.
+        const writtenPrizesByPool: ReturnType<typeof convertPrizeDetailsToV2>[] = [];
         for (let i = 0; i < playedPools.length; i++) {
           const pool = playedPools[i]!;
           const prizes = convertPrizeDetailsToV2(pool.prizeDetails ?? []);
@@ -1088,7 +1093,7 @@ export class MultiUserAgent {
           // mode and breaking `closed_aborted` recovery semantics.
           v2WrittenPools++;
           try {
-            await this.accounting.recordPlayPoolResult({
+            const written = await this.accounting.recordPlayPoolResult({
               sessionId: session.sessionId,
               user: user.hederaAccountId,
               agent: agentAccountId,
@@ -1100,6 +1105,7 @@ export class MultiUserAgent {
               wins: pool.wins,
               prizes,
             });
+            writtenPrizesByPool[i] = written.prizes;
           } catch (poolErr) {
             // Best-effort: if submit definitely never reached the
             // network (pre-submit validation throw), decrement back
@@ -1121,12 +1127,15 @@ export class MultiUserAgent {
         // (or replay-window attacker) could swap a `play_session_close`
         // between sessions whose pool sequences happen to match.
         const poolsRoot = await computePoolsRoot(
-          playedPools.map((p) => ({
+          playedPools.map((p, i) => ({
             poolId: p.poolId,
             spent: p.amountSpent,
             spentToken: poolFeeTokenForAudit(p.feeTokenId),
             wins: p.wins,
-            prizes: convertPrizeDetailsToV2(p.prizeDetails ?? []),
+            // F12: hash the POST-slim prizes actually written on chain
+            // (fall back to full only if a pool write somehow returned
+            // nothing — shouldn't happen on the success path).
+            prizes: writtenPrizesByPool[i] ?? convertPrizeDetailsToV2(p.prizeDetails ?? []),
           })),
           {
             sessionId: session.sessionId,
@@ -1140,6 +1149,8 @@ export class MultiUserAgent {
           agent: agentAccountId,
           poolsPlayed: playedPools.length,
           poolsRoot,
+          // F12: the close root was computed over the post-slim prizes → v2.
+          poolsRootV: 2,
           totalWins: report.totalWins,
           prizeTransfer: mapPrizeTransferOutcome(transferOutcome),
         });

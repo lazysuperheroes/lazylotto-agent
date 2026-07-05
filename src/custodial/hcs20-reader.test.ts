@@ -1066,3 +1066,109 @@ describe('hcs20-reader: v1 token attribution', () => {
     );
   });
 });
+
+describe('F12: prize-slim poolsRoot desync (2026-07-05 custodial audit)', () => {
+  const sid = 'sess-f12';
+  const slimmedPrizes: PrizeEntry[] = [{ t: 'ft', tk: 'HBAR', amt: 100 }];
+  const fullPrizes: PrizeEntry[] = [
+    { t: 'ft', tk: 'HBAR', amt: 100 },
+    { t: 'ft', tk: 'HBAR', amt: 50 },
+    { t: 'ft', tk: 'HBAR', amt: 10 },
+  ];
+  // The pool message ACTUALLY on chain: slimmed to the top prize + the
+  // truncation marker (what slimPoolResult writes when prizes overflow).
+  function truncatedPool(seq: number): RawTopicMessage {
+    return {
+      sequence: seq,
+      timestamp: T0,
+      payload: {
+        p: 'hcs-20',
+        op: 'play_pool_result',
+        sessionId: sid,
+        user: USER,
+        agentSeq: seq,
+        poolId: 0,
+        seq: 1,
+        entries: 2,
+        spent: '10',
+        spentToken: 'HBAR',
+        wins: 1,
+        prizes: slimmedPrizes,
+        slim_truncated_prizes: 2,
+        ts: T0,
+      },
+    };
+  }
+
+  // revert-proof: reverting the reader's F12 tolerance makes a LEGACY
+  // (no poolsRootV) close whose full-prize root can't match the on-chain
+  // slimmed prizes fall to status='corrupt' — this asserts closed_success.
+  it('legacy full-prize root over a slim-truncated session is tolerated, not corrupt', async () => {
+    const fullPools = [{ poolId: 0, spent: 10, spentToken: 'HBAR', wins: 1, prizes: fullPrizes }];
+    const messages: RawTopicMessage[] = [
+      open(1, sid, 1),
+      truncatedPool(2),
+      await close(3, sid, 1, fullPools, 1), // root over FULL prizes, no poolsRootV
+    ];
+    const result = await parseAuditTopic(messages, NOW);
+    const session = result.sessions[0]!;
+    assert.equal(session.status, 'closed_success');
+    assert.ok(session.warnings.some((w) => w.includes('mismatch tolerated')));
+  });
+
+  // revert-proof: with the writer's post-slim root + poolsRootV=2, a FORGED
+  // root must STILL be corrupt — reverting the isV2Root strict branch would
+  // let a v2 tamper hide behind the "legacy truncated" tolerance.
+  it('a v2 (poolsRootV>=2) session with a forged root stays corrupt — tamper-evidence preserved', async () => {
+    const forgedClose: RawTopicMessage = {
+      sequence: 3,
+      timestamp: T0,
+      payload: {
+        p: 'hcs-20',
+        op: 'play_session_close',
+        sessionId: sid,
+        user: USER,
+        agentSeq: 3,
+        poolsPlayed: 1,
+        poolsRoot: 'sha256:FORGED',
+        poolsRootV: 2,
+        totalWins: 1,
+        prizeTransfer: { status: 'succeeded', txId: 'tx-1', attempts: 1, gasUsed: 5_450_000 },
+        ts: T0,
+      },
+    };
+    const messages: RawTopicMessage[] = [open(1, sid, 1), truncatedPool(2), forgedClose];
+    const result = await parseAuditTopic(messages, NOW);
+    const session = result.sessions[0]!;
+    assert.equal(session.status, 'corrupt');
+    assert.ok(session.warnings.some((w) => w.includes('poolsRoot mismatch')));
+  });
+
+  // revert-proof: the happy path — a v2 close whose root IS over the on-chain
+  // (slimmed) prizes validates cleanly; reverting the writer's post-slim root
+  // (back to full) would make this mismatch and go corrupt.
+  it('a v2 close whose root is over the on-chain slimmed prizes validates cleanly', async () => {
+    const slimPools = [{ poolId: 0, spent: 10, spentToken: 'HBAR', wins: 1, prizes: slimmedPrizes }];
+    const v2Close: RawTopicMessage = {
+      sequence: 3,
+      timestamp: T0,
+      payload: {
+        p: 'hcs-20',
+        op: 'play_session_close',
+        sessionId: sid,
+        user: USER,
+        agentSeq: 3,
+        poolsPlayed: 1,
+        poolsRoot: await computePoolsRoot(slimPools, { sessionId: sid, user: USER, agent: AGENT }),
+        poolsRootV: 2,
+        totalWins: 1,
+        prizeTransfer: { status: 'succeeded', txId: 'tx-1', attempts: 1, gasUsed: 5_450_000 },
+        ts: T0,
+      },
+    };
+    const messages: RawTopicMessage[] = [open(1, sid, 1), truncatedPool(2), v2Close];
+    const result = await parseAuditTopic(messages, NOW);
+    const session = result.sessions[0]!;
+    assert.equal(session.status, 'closed_success');
+  });
+});

@@ -1044,7 +1044,7 @@ export class AccountingService {
     wins: number;
     prizes: PrizeEntry[];
     strategyMeta?: { ev?: number; budgetRemaining?: number };
-  }): Promise<void> {
+  }): Promise<{ prizes: PrizeEntry[] }> {
     const agentSeq = await this.nextAgentSeq(details.agent);
     let message: PlayPoolResultMessage = {
       p: 'hcs-20',
@@ -1073,6 +1073,12 @@ export class AccountingService {
     // multi-NFT pools.
     message = slimPoolResult(message, 900);
     await this.submitV2Message(message);
+    // F12 (2026-07-05 custodial audit): return the ACTUALLY-written
+    // (post-slim) prizes so the caller computes the close poolsRoot over
+    // what's on chain, not the full pre-slim set — otherwise a truncated
+    // pool makes the reader's recompute disagree and falsely marks the
+    // session `corrupt`.
+    return { prizes: message.prizes };
   }
 
   /**
@@ -1104,6 +1110,12 @@ export class AccountingService {
      * which had only wired the aborted writer.
      */
     strategyDeviation?: { reason: string; field?: string };
+    /**
+     * F12 (2026-07-05 custodial audit): poolsRoot hash-scheme version.
+     * Pass 2 when `poolsRoot` was computed over the POST-slim prize sets
+     * (what recordPlayPoolResult actually wrote on chain).
+     */
+    poolsRootV?: number;
   }): Promise<void> {
     const agentSeq = await this.nextAgentSeq(details.agent);
     const message: PlaySessionCloseMessage = {
@@ -1114,6 +1126,7 @@ export class AccountingService {
       agentSeq,
       poolsPlayed: details.poolsPlayed,
       poolsRoot: details.poolsRoot,
+      ...(details.poolsRootV ? { poolsRootV: details.poolsRootV } : {}),
       totalWins: details.totalWins,
       prizeTransfer: details.prizeTransfer,
       ...(details.strategyDeviation ? { strategyDeviation: details.strategyDeviation } : {}),
