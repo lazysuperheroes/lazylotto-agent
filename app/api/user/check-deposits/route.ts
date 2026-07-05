@@ -35,14 +35,25 @@ export async function OPTIONS() {
 
 export const POST = withStore(async (request: Request) => {
   try {
-    // Check-deposits hits the mirror node — limit to a reasonable
-    // background refresh rate (don't let a misbehaving client hammer it)
-    if (!(await checkRateLimit({ request, action: 'check-deposits', limit: 12, windowSec: 60 }))) {
-      return rateLimitResponse(60);
-    }
-
     const auth = await requireTier(request, 'user');
     if (isErrorResponse(auth)) return auth;
+
+    // F14 (2026-07-05 custodial audit): rate-limit AFTER auth, keyed on the
+    // resolved account. Pre-fix it ran BEFORE requireTier with no identity,
+    // so it bucketed on the 16-char bearer prefix — a token rotation reset
+    // the per-account cap, and each admitted call runs an all-user mirror
+    // poll. Check-deposits hits the mirror node; keep the background cap.
+    if (
+      !(await checkRateLimit({
+        request,
+        action: 'check-deposits',
+        limit: 12,
+        windowSec: 60,
+        identity: auth.accountId,
+      }))
+    ) {
+      return rateLimitResponse(60);
+    }
 
     const { multiUser, store } = await getAgentContext();
 

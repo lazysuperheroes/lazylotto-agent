@@ -194,7 +194,27 @@ export async function applyPendingLedgerForUser(
   // R10-FG-11 / Phase-9 Cluster E: LLEN short-circuit. withUserLock
   // calls this on every play / withdraw / register / status; the
   // empty-queue case now exits after one cheap LLEN round-trip.
-  const len = await redis.llen(LIST_KEY).catch(() => 0);
+  // F19 (2026-07-05 custodial audit): do NOT silently collapse a transient
+  // LLEN error into "empty" — that would hide a drain-probe failure (a
+  // queued refund debit skipped, so a withdrawal could reserve against an
+  // un-debited balance). Behavior is unchanged (proceed → self-heals on the
+  // next withUserLock drain or the hourly reconcile), but log LOUDLY so a
+  // real occurrence is visible instead of invisible.
+  let len: number;
+  try {
+    len = await redis.llen(LIST_KEY);
+  } catch (e) {
+    logger.warn(
+      'pendingLedger drain: LLEN probe failed — treating as empty (self-heals on next drain)',
+      {
+        component: 'PendingLedger',
+        event: 'pending_ledger_llen_probe_failed',
+        userId,
+        error: e instanceof Error ? e.message : String(e),
+      },
+    );
+    return { applied: 0, failed: 0 };
+  }
   if (len === 0) return { applied: 0, failed: 0 };
 
   const rawEntries = await redis
