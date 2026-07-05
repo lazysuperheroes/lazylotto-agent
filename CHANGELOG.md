@@ -2,6 +2,88 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.1] - 2026-07-05
+
+> **Security hardening release.** An off-chain adversarial security audit of the
+> custodial core — multi-tenant fund accounting, auth/tier isolation, cross-Lambda
+> concurrency, HCS-20 ledger integrity, x402 payments, and operator alerting —
+> surfaced 19 findings; all 19 were fixed, each locked by a regression test. A
+> focused re-audit of the fix diff then caught 3 more (two of them introduced by
+> the fixes themselves); those were fixed too, and a fix-verify pass confirmed
+> closure. The commerce surfaces are untouched and remain flag-gated OFF. Full
+> per-finding evidence + fixes: `docs/security-remediation.md`.
+
+### Security
+
+- **Refund correctness (F2 / F3 / F15 / F-R1).** Refunds now debit the NET amount
+  the user was credited (not the gross on-chain amount — the previous behavior
+  over-debited and manufactured a false operator surplus that hid insolvency from
+  reconcile), refresh the user + operator balances UNDER the per-user lock before
+  mutating (closing a cross-Lambda lost-update), and floor the operator rake
+  reversal at 0 while also reversing `totalRakeCollected`. Applied across ALL
+  THREE refund code paths (in-flight, uncertain-refund verifier, admin
+  force-release) plus the standalone `verify-audit` reconstruction.
+- **Cross-tenant isolation (F1 / F-R3).** The shared-wallet prize sweep
+  (`transferPendingPrizes(owner, MaxUint256)`) now REFUSES when the agent wallet
+  holds more pending prizes than the current session won — a prior tenant's
+  stranded prizes can no longer be swept to the current player; a blocked sweep
+  dead-letters for operator recovery. The guard is scoped to custodial
+  (shared-wallet) mode, so single-user deployments still auto-forward the sole
+  owner's own prizes.
+- **Auth & tier isolation (F5 / F6 / F7).** Per-request tier de-escalation — an
+  offboarded operator drops to `user` immediately, even on a locked session, and
+  the tier can never auto-escalate; unauthenticated rate limits are keyed by IP so
+  a forged `Bearer` can't reset the bucket; the serverless operator fail-open is
+  refused in multi-user mode; new admin `POST /api/admin/revoke-sessions`.
+- **Audit-trail integrity (F8 / F12 / F13 / F-R2).** agentSeq seeding counts
+  author-less messages (closing a sequence-reuse bug), fails loud on a missing
+  topic instead of silently dropping every audit write, and now skips the
+  redundant cold-start mirror scan when the cluster counter is already seeded
+  (closing a fail-closed play DoS the fail-loud change could otherwise trigger on
+  a busy topic). The play-session close `poolsRoot` is versioned and computed over
+  the post-slim prize set, so prize-heavy sessions no longer false-alarm as
+  `corrupt` in the reader / DR reconstruction.
+- **x402 payment gate (F4 / F11).** `settleOrChallenge` now validates the client
+  payment against the SERVER's own requirements (scheme / network / asset / payTo
+  + `x402Version`) and enforces the configured slippage floor before verify/settle
+  — a spoofed or underpaid request is rejected instead of trusting the
+  client-echoed amount. (Gate still behind `X402_ENABLED`.)
+- **Alerting & monitoring (F16 / F17 / F19).** The operator-paging dedup claim is
+  released on any webhook delivery failure (network / timeout / non-2xx) so a
+  single transient blip can't suppress a critical page for 6h; the reconcile cron
+  writes a freshness watermark surfaced at `/api/health` as a dead-man's-switch;
+  the pending-ledger drain probe no longer silently collapses a transient error
+  into "empty".
+- **Deposit cap (F18).** `maxUserBalance` is re-checked under the credit lock on
+  the fresh post-refresh balance, closing a cross-Lambda TOCTOU where two
+  concurrent deposits could both pass a stale pre-lock check.
+- **Production boot guard (F9 / F10).** A consolidated `isProductionDeploy()`
+  keys the production assertions off more than `NODE_ENV`; a **mainnet** deploy
+  now FAILS CLOSED if `HCS20_TOPIC_ID`, `OPERATOR_WITHDRAW_ADDRESS`, or
+  `CRON_SECRET` are unset (testnet only warns).
+
+### Added
+
+- `IStore.peekAgentSeq` — read the HCS-20 agentSeq counter without incrementing
+  (implemented by RedisStore + PersistentStore).
+- `POST /api/admin/revoke-sessions` — admin force-revoke of all sessions for an
+  account.
+- `/api/health` gains a `reconcile: { lastRunAt, staleSeconds }` freshness block
+  (surfaces the reconcile dead-man's-switch; not a solvency verdict — the endpoint
+  is unauthenticated).
+- `src/auth/tiers.ts` — SDK-free tier resolution + `deEscalateTier`.
+- `MaxUserBalanceExceededError`.
+
+### Notes
+
+- ⚠️ **Mainnet deploys now require** `HCS20_TOPIC_ID`, `OPERATOR_WITHDRAW_ADDRESS`,
+  and `CRON_SECRET`, or boot fails by design. Testnet warns only, so existing
+  testnet deploys are unaffected.
+- Shipped as 12 commits on `testnet` (`dc7c5a3..2f6bce9`). The re-audit found that
+  two of the fixes (F8, F1) had introduced regressions of their own — the value of
+  running an adversarial pass over a large security-critical diff, since a green
+  test suite structurally can't catch that class.
+
 ## [0.4.0] - 2026-06-10
 
 > **Hedera Commerce Agent release.** Two opt-in, flag-gated commerce surfaces
