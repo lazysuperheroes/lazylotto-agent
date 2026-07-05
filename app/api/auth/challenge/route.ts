@@ -24,8 +24,11 @@ export async function OPTIONS() {
 // scenario this guard exists for.
 export const POST = withStore(async (request: Request) => {
   try {
-    // Rate limit: 10 challenges per IP per 5 minutes
-    if (!(await checkRateLimit({ request, action: 'challenge', limit: 10, windowSec: 300 }))) {
+    // Rate limit: 10 challenges per IP per 5 minutes. F6: `ignoreBearer`
+    // keys strictly on the edge IP — this route is unauthenticated, so a
+    // caller-supplied bearer must NOT be trusted as the bucket (an
+    // attacker would rotate fake tokens to get unlimited attempts).
+    if (!(await checkRateLimit({ request, action: 'challenge', limit: 10, windowSec: 300, ignoreBearer: true }))) {
       return rateLimitResponse(300);
     }
 

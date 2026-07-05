@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { identityFor } from './rateLimit';
+import { identityFor, ipIdentity } from './rateLimit';
 
 function makeRequest(headers: Record<string, string>): Request {
   return new Request('https://example.com/api/test', {
@@ -68,5 +68,30 @@ describe('identityFor', () => {
     expect(identityFor(req)).toBe('203.0.113.42');
     const body = await req.json();
     expect(body.accountId).toBe('0.0.attacker');
+  });
+});
+
+describe('ipIdentity — F6: unauthenticated routes ignore the bearer', () => {
+  // revert-proof: dropping the ignoreBearer/ipIdentity path (reverting to
+  // identityFor on challenge/verify) lets an anonymous caller rotate fake
+  // bearer tokens for a fresh bucket per token — these equality assertions
+  // (same IP → same bucket regardless of token) fail.
+  it('keys on the edge IP and IGNORES the Authorization header — cycling fake bearers cannot fan out', () => {
+    const a = makeRequest({ authorization: 'Bearer sk_fake_0000000000001', 'x-forwarded-for': '203.0.113.42' });
+    const b = makeRequest({ authorization: 'Bearer sk_fake_0000000000002', 'x-forwarded-for': '203.0.113.42' });
+    expect(ipIdentity(a)).toBe('ip:203.0.113.42');
+    expect(ipIdentity(a)).toBe(ipIdentity(b)); // distinct fake tokens → same bucket
+    expect(ipIdentity(a)).not.toBe(identityFor(a)); // and NOT the bearer-slice bucket
+  });
+
+  // revert-proof: the `ip:` prefix keeps IP buckets from colliding with the
+  // 16-char bearer slices identityFor returns; removing it would merge an
+  // authenticated token bucket with an IP bucket — the not.toBe below fails.
+  it("prefixes 'ip:' (no bearer-slice collision) and falls back to 'ip:unknown'", () => {
+    const spoof = makeRequest({ 'x-forwarded-for': 'sk_token_abc1234' });
+    expect(ipIdentity(spoof)).toBe('ip:sk_token_abc1234');
+    expect(ipIdentity(spoof)).not.toBe(identityFor(spoof));
+    const noIp = makeRequest({ authorization: 'Bearer sk_whatever_1234567890' });
+    expect(ipIdentity(noIp)).toBe('ip:unknown');
   });
 });

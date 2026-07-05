@@ -32,7 +32,9 @@ export interface EscalateUncertainDlInput {
     /** R4-FG-5: HCS-20 recordRake anchor failed after operator-rake credit landed. */
     | 'rake_anchor_failed'
     /** R5-FG-48: withIdempotency RELEASE_SCRIPT eval AND plain DEL fallback both failed; claim wedged. */
-    | 'idempotency_release_failed';
+    | 'idempotency_release_failed'
+    /** F1 (2026-07-04): contamination-block dead-letter write failed — recovery anchor lost. */
+    | 'prize_transfer_blocked_contamination';
   /** The submitted on-chain tx whose status is unknown. */
   uncertainTxId: string;
   /** Affected userId (omit for operator-fee). */
@@ -113,9 +115,19 @@ export async function escalateUncertainDlFailure(
     .update(rawCauseMsg.slice(0, 256))
     .digest('hex')
     .slice(0, 16)}`;
+  // F17 (2026-07-04 custodial audit): hoist the dedup key + redis handle
+  // out of the claim `try` so the webhook-failure catch below can RELEASE
+  // the claim. The 6h claim is taken BEFORE the POST; without release, a
+  // single transient webhook failure suppresses every retry of this
+  // one-shot critical page for 6h — the held reserve/claim then silently
+  // double-spends on TTL-expiry. `redisForDedup` is set ONLY after a
+  // durable claim lands, so the fail-open (Redis-down) path never attempts
+  // a bogus release.
+  let dedupKey: string | null = null;
+  let redisForDedup: Awaited<ReturnType<typeof getRedis>> | null = null;
   try {
     const redis = await getRedis();
-    const dedupKey = `${KEY_PREFIX.escalated}${input.kind}:${input.uncertainTxId}:${causeFingerprint}`;
+    dedupKey = `${KEY_PREFIX.escalated}${input.kind}:${input.uncertainTxId}:${causeFingerprint}`;
     const claimed = await redis.set(dedupKey, '1', {
       nx: true,
       ex: ESCALATION_DEDUP_TTL_SEC,
@@ -124,6 +136,7 @@ export async function escalateUncertainDlFailure(
       // Already escalated within the window for this same cause class.
       return;
     }
+    redisForDedup = redis;
   } catch (e) {
     // Redis unavailable — fail open and page anyway. Better duplicate
     // pages than silent loss when the alerting backbone is the only
@@ -187,13 +200,40 @@ export async function escalateUncertainDlFailure(
     `Manual triage required — verify the tx on the mirror node and ` +
     `reconstruct the dead-letter row by hand.`;
 
+  // F17 (2026-07-04 custodial audit): on ANY delivery failure (network
+  // throw, 5s timeout, OR a non-2xx response) release the dedup claim so
+  // the NEXT escalation pass re-pages instead of being suppressed for 6h.
+  // Best-effort — a failed release just falls back to the 6h TTL. Only a
+  // durably-claimed key is released (redisForDedup non-null), so the
+  // fail-open Redis-down path is untouched. This may re-page if the POST
+  // actually landed but its response was lost; a duplicate page is
+  // strictly better than a swallowed critical one.
+  const releaseDedupClaim = async (): Promise<void> => {
+    if (!redisForDedup || !dedupKey) return;
+    try {
+      await redisForDedup.del(dedupKey);
+    } catch {
+      /* best-effort — the 6h TTL will eventually clear the claim */
+    }
+  };
+
   try {
-    await fetch(url, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text, allowed_mentions: { parse: [] } }),
       signal: AbortSignal.timeout(5_000),
     });
+    if (!res.ok) {
+      logger.error('escalateUncertainDlFailure: webhook returned non-2xx', {
+        component: 'Escalation',
+        event: 'uncertain_dl_escalation_webhook_failed',
+        kind: input.kind,
+        uncertainTxId: input.uncertainTxId,
+        status: res.status,
+      });
+      await releaseDedupClaim();
+    }
   } catch (err) {
     // Last resort — log it. There is nothing left to escalate to.
     logger.error('escalateUncertainDlFailure: webhook fire failed', {
@@ -203,5 +243,6 @@ export async function escalateUncertainDlFailure(
       uncertainTxId: input.uncertainTxId,
       error: err instanceof Error ? err.message : String(err),
     });
+    await releaseDedupClaim();
   }
 }

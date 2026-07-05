@@ -113,4 +113,48 @@ describe('escalateUncertainDlFailure', () => {
     const body = JSON.parse(calls[0]!.init.body as string) as { text: string };
     assert.ok(body.text.length > 0, 'must produce a non-empty payload');
   });
+
+  // revert-proof: without the F17 claim-release, a delivery failure leaves
+  // the 6h dedup claim set, so the second (retry) escalation is suppressed
+  // and never re-pages — `second.calls.length` would be 0 instead of 1.
+  it('F17: a delivery failure (network error or non-2xx) releases the claim so the next attempt re-pages', async () => {
+    process.env.RECONCILE_FAILURE_WEBHOOK_URL = 'https://hooks.example.com/xyz';
+    const { escalateUncertainDlFailure } = await import('./escalation.js');
+    for (const [mode, txId] of [['throw', 'tx-f17-throw'], ['reject', 'tx-f17-5xx']] as const) {
+      const input = {
+        kind: 'withdrawal_uncertain' as const,
+        uncertainTxId: txId,
+        userId: 'u-f17',
+        cause: new Error(`transient-outage-${txId}`),
+      };
+      // First attempt fails (throw or 5xx) → the claim must be released.
+      const first = installFetch(mode);
+      await escalateUncertainDlFailure(input);
+      assert.equal(first.calls.length, 1, `${mode}: first attempt tried the webhook`);
+      // Second attempt (same incident): the released claim lets it re-page.
+      const second = installFetch('ok');
+      await escalateUncertainDlFailure(input);
+      assert.equal(second.calls.length, 1, `${mode}: re-pages after the released claim`);
+    }
+  });
+
+  // revert-proof: the F17 release must fire ONLY on failure — a successful
+  // page must still suppress a repeat within the 6h window (R3-FG-48
+  // alert-fatigue dedup). If the release leaked onto the success path,
+  // `second.calls.length` would be 1 instead of 0.
+  it('F17: a successful page still dedups a repeat within the window', async () => {
+    process.env.RECONCILE_FAILURE_WEBHOOK_URL = 'https://hooks.example.com/xyz';
+    const { escalateUncertainDlFailure } = await import('./escalation.js');
+    const input = {
+      kind: 'refund_uncertain' as const,
+      uncertainTxId: 'tx-f17-dedup',
+      cause: new Error('same-cause-f17-dedup'),
+    };
+    const firstDedup = installFetch('ok');
+    await escalateUncertainDlFailure(input);
+    assert.equal(firstDedup.calls.length, 1, 'first page fires');
+    const secondDedup = installFetch('ok');
+    await escalateUncertainDlFailure(input);
+    assert.equal(secondDedup.calls.length, 0, 'repeat within 6h is suppressed');
+  });
 });

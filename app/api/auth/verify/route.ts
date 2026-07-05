@@ -23,8 +23,10 @@ export async function OPTIONS() {
 // user staring at an opaque error wall.
 export const POST = withStore(async (request: Request) => {
   try {
-    // Rate limit: 5 verify attempts per IP per 5 minutes
-    if (!(await checkRateLimit({ request, action: 'verify', limit: 5, windowSec: 300 }))) {
+    // Rate limit: 5 verify attempts per IP per 5 minutes. F6: `ignoreBearer`
+    // keys strictly on the edge IP — unauthenticated route, so a
+    // caller-supplied bearer must NOT set the bucket.
+    if (!(await checkRateLimit({ request, action: 'verify', limit: 5, windowSec: 300, ignoreBearer: true }))) {
       return rateLimitResponse(300);
     }
 

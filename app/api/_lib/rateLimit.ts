@@ -58,6 +58,18 @@ export interface RateLimitOptions {
    * rotation, blowing past the documented per-account cap.
    */
   identity?: string;
+  /**
+   * F6 (2026-07-04 custodial audit): for UNAUTHENTICATED routes
+   * (challenge / verify) that never validate the token, key the limit
+   * strictly on the edge-set IP and IGNORE any client-supplied
+   * `Authorization` header. Without this, `identityFor` buckets on the
+   * bearer-token prefix whenever ANY `Authorization` header is present —
+   * so an anonymous attacker cycling fake `Bearer sk_…N` tokens gets a
+   * fresh counter per token, silently defeating the mirror-node-DoS and
+   * signature-guessing caps. Mutually exclusive with `identity` (which
+   * is for POST-`requireTier` routes).
+   */
+  ignoreBearer?: boolean;
 }
 
 /**
@@ -106,12 +118,26 @@ export function identityFor(request: Request): string {
 }
 
 /**
+ * IP-only identity for UNAUTHENTICATED routes (see `ignoreBearer`).
+ * Derives the bucket from the edge-set `x-forwarded-for` ONLY, never the
+ * caller-supplied `Authorization` header. Prefixed `ip:` so it can never
+ * collide with the 16-char bearer-token slices `identityFor` returns for
+ * authenticated routes. F6 (2026-07-04 custodial audit).
+ */
+export function ipIdentity(request: Request): string {
+  const xff = request.headers.get('x-forwarded-for');
+  const ip = xff ? (xff.split(',')[0]?.trim() ?? 'unknown') : 'unknown';
+  return `ip:${ip}`;
+}
+
+/**
  * Check and increment the rate limit counter.
  * Returns true if the request is within the limit, false if exceeded.
  */
 export async function checkRateLimit(options: RateLimitOptions): Promise<boolean> {
-  const { request, action, limit, windowSec, identity: identityOverride } = options;
-  const identity = identityOverride ?? identityFor(request);
+  const { request, action, limit, windowSec, identity: identityOverride, ignoreBearer } = options;
+  const identity =
+    identityOverride ?? (ignoreBearer ? ipIdentity(request) : identityFor(request));
   const redis = await getRedis();
   const key = `${KEY_PREFIX.rateLimit}${action}:${identity}`;
 
