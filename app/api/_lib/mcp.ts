@@ -94,6 +94,20 @@ async function requireAuthCheck(providedToken?: string): Promise<AuthResult> {
     process.env.UPSTASH_REDIS_REST_URL;
 
   if (!hasAuthConfig) {
+    // F5 (2026-07-05 custodial audit): the no-auth-config fail-open to
+    // operator tier is a SINGLE-USER-CLI convenience. On a hosted /
+    // multi-user surface it is an unauthenticated-operator backdoor (any
+    // request → operator_withdraw_fees / operator_refund). Refuse it
+    // whenever multi-user mode is enabled, INDEPENDENT of NODE_ENV — the
+    // assertProductionRedis backstop keys on NODE_ENV and misses a hosted
+    // non-production deploy. Mirrors the CLI multi-user boot guard.
+    if (process.env.MULTI_USER_ENABLED === 'true') {
+      return {
+        error: errorResult(
+          'Authentication required. This hosted agent does not permit unauthenticated access.',
+        ),
+      };
+    }
     return { auth: { tier: 'operator', accountId: 'local' } };
   }
 

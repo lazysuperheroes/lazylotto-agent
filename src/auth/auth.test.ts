@@ -648,6 +648,65 @@ describe('resolveWalletTier', () => {
 });
 
 // ═════════════════════════════════════════════════════════════
+// deEscalateTier — F7 per-request tier de-escalation
+// ═════════════════════════════════════════════════════════════
+
+describe('deEscalateTier (F7: per-request tier de-escalation)', () => {
+  const ORIGINAL_OPERATOR = process.env.OPERATOR_ACCOUNTS;
+  const ORIGINAL_ADMIN = process.env.ADMIN_ACCOUNTS;
+
+  beforeEach(() => {
+    delete process.env.OPERATOR_ACCOUNTS;
+    delete process.env.ADMIN_ACCOUNTS;
+  });
+
+  process.on('exit', () => {
+    if (ORIGINAL_OPERATOR !== undefined) process.env.OPERATOR_ACCOUNTS = ORIGINAL_OPERATOR;
+    if (ORIGINAL_ADMIN !== undefined) process.env.ADMIN_ACCOUNTS = ORIGINAL_ADMIN;
+  });
+
+  // revert-proof: without the min(baked, current) de-escalation, an
+  // offboarded operator (removed from OPERATOR_ACCOUNTS) keeps operator
+  // tier on every request — this asserts the drop to 'user'.
+  it('drops an operator whose account left OPERATOR_ACCOUNTS to user', async () => {
+    const { deEscalateTier } = await import('./tiers.js');
+    assert.equal(deEscalateTier('operator', '0.0.500'), 'user');
+  });
+
+  // revert-proof: an offboarded admin (incl. a locked, no-TTL session —
+  // same code path, tier comes from env not the session) must de-escalate.
+  it('drops an admin whose account left ADMIN_ACCOUNTS to user', async () => {
+    const { deEscalateTier } = await import('./tiers.js');
+    assert.equal(deEscalateTier('admin', '0.0.111'), 'user');
+  });
+
+  // revert-proof: de-escalation must take the LOWER tier and NEVER
+  // auto-escalate — a stored 'user' now in ADMIN_ACCOUNTS must stay 'user'
+  // (raising tier requires a fresh signed challenge, not an env edit).
+  it('never auto-escalates: stored user + now-admin env stays user', async () => {
+    process.env.ADMIN_ACCOUNTS = '0.0.111';
+    const { deEscalateTier } = await import('./tiers.js');
+    assert.equal(deEscalateTier('user', '0.0.111'), 'user');
+  });
+
+  // revert-proof: an account still env-listed keeps its tier — the guard
+  // must not spuriously drop a still-valid operator.
+  it('keeps the tier when the account is still env-listed', async () => {
+    process.env.OPERATOR_ACCOUNTS = '0.0.500';
+    const { deEscalateTier } = await import('./tiers.js');
+    assert.equal(deEscalateTier('operator', '0.0.500'), 'operator');
+  });
+
+  // revert-proof: synthetic CLI/local accounts are never env-listed;
+  // de-escalating them by env would break single-user operator access.
+  it('leaves synthetic local/local-owner accounts untouched', async () => {
+    const { deEscalateTier } = await import('./tiers.js');
+    assert.equal(deEscalateTier('operator', 'local'), 'operator');
+    assert.equal(deEscalateTier('operator', 'local-owner'), 'operator');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════
 // satisfiesTier
 // ═════════════════════════════════════════════════════════════
 

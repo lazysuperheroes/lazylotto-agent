@@ -11,7 +11,13 @@ import { PublicKey } from '@hashgraph/sdk';
 import * as proto from '@hashgraph/proto';
 import { getRedis, KEY_PREFIX } from './redis.js';
 import { createSession, revokeAllForAccount } from './session.js';
+import { resolveWalletTier } from './tiers.js';
 import type { AuthChallenge, AuthTier } from './types.js';
+
+// F7 (2026-07-05): resolveWalletTier moved to ./tiers.ts (SDK-free) so the
+// hot-path auth middleware can re-resolve tiers without importing this
+// module's Hedera SDK deps. Re-exported for back-compat with existing importers.
+export { resolveWalletTier };
 
 /**
  * R9-FG-5 / Phase-7 Cluster C: typed sentinel for signature-validation
@@ -29,35 +35,6 @@ export class SignatureValidationError extends Error {
     super(message);
     this.name = 'SignatureValidationError';
   }
-}
-
-/**
- * Resolve a Hedera account ID to its wallet-bound auth tier.
- *
- * Tier hierarchy is explicit (operator > admin > user > public). Each tier
- * maps to a comma-separated env list of Hedera account IDs:
- *   - OPERATOR_ACCOUNTS — fees, reconcile, health, kill switch, fee withdrawal
- *   - ADMIN_ACCOUNTS    — refunds, dead-letter queue, all-user views
- *
- * Operator is a strict superset (membership in OPERATOR_ACCOUNTS
- * short-circuits the admin check). Operators inherit every admin
- * capability via the `tierLevel` ordering in middleware.ts.
- *
- * No env-list match → 'user' tier (the authenticated wallet owner).
- *
- * Exported as a pure function so the tier-resolution invariant is
- * unit-testable without forging mirror-node signatures.
- */
-export function resolveWalletTier(accountId: string): AuthTier {
-  const parseList = (raw: string | undefined): string[] =>
-    (raw ?? '').split(',').map((a) => a.trim()).filter(Boolean);
-
-  const operatorAccounts = parseList(process.env.OPERATOR_ACCOUNTS);
-  const adminAccounts    = parseList(process.env.ADMIN_ACCOUNTS);
-
-  if (operatorAccounts.includes(accountId)) return 'operator';
-  if (adminAccounts.includes(accountId))    return 'admin';
-  return 'user';
 }
 
 /**

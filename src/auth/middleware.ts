@@ -23,6 +23,7 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { getSession } from './session.js';
+import { deEscalateTier } from './tiers.js';
 import type { AuthContext, AuthTier } from './types.js';
 
 /**
@@ -45,8 +46,13 @@ export async function resolveAuth(token?: string): Promise<AuthContext | null> {
     const session = await getSession(token);
     if (!session) return null;
 
+    // F7 (2026-07-05 custodial audit): re-resolve the tier from the CURRENT
+    // env on every request and take the LOWER of (baked, current). An
+    // account removed from OPERATOR_ACCOUNTS / ADMIN_ACCOUNTS is
+    // de-escalated immediately — even for a locked (no-TTL) session, and
+    // without a re-auth. Never auto-escalates above the baked tier.
     return {
-      tier: session.tier,
+      tier: deEscalateTier(session.tier, session.accountId),
       accountId: session.accountId,
       userId: session.userId,
       token,

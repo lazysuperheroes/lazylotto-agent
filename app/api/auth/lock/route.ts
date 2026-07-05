@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { lockSession } from '~/auth/session';
+import { getSession, lockSession } from '~/auth/session';
 import { checkRateLimit, rateLimitResponse } from '../../_lib/rateLimit';
 import { staticCorsHeaders } from '../../_lib/cors';
 import { withStore } from '../../_lib/withStore';
@@ -48,6 +48,22 @@ export const POST = withStore(async (request: Request) => {
       return NextResponse.json(
         { error: 'Lock requires the Bearer token to match the body sessionToken (proof of ownership).' },
         { status: 401, headers: CORS_HEADERS },
+      );
+    }
+
+    // F7 (2026-07-05 custodial audit): privileged (admin/operator) sessions
+    // must NOT be made permanent. Locking strips the TTL, so a leaked or
+    // offboarded operator credential would otherwise live forever. Keep the
+    // 7-day expiry — combined with resolveAuth's per-request de-escalation,
+    // a privileged token cannot outlive both its TTL and its env membership.
+    const session = await getSession(sessionToken);
+    if (session && (session.tier === 'admin' || session.tier === 'operator')) {
+      return NextResponse.json(
+        {
+          error:
+            'Admin/operator sessions cannot be locked — they retain the 7-day expiry so privileged credentials cannot become permanent. Re-authenticate to refresh.',
+        },
+        { status: 403, headers: CORS_HEADERS },
       );
     }
 
