@@ -88,7 +88,42 @@ export type PrizeTransferOutcome =
        * re-submitting.
        */
       lastSubmittedTxId?: string;
+    }
+  | {
+      /**
+       * F1 (2026-07-04 custodial audit): cross-user contamination guard.
+       * The shared agent wallet held MORE pending prizes than this
+       * session won — a PRIOR session's prizes are stranded in it. Since
+       * transferPendingPrizes(owner, MaxUint256) sweeps ALL pending
+       * prizes to ONE owner, transferring now would misappropriate the
+       * prior user's prizes to the current player. We REFUSE the sweep
+       * and dead-letter for operator recovery instead of stealing.
+       */
+      status: 'blocked';
+      reason: string;
+      pendingPrizesCount: number;
+      expectedFromThisSession: number;
+      ownerEoa: string;
     };
+
+/**
+ * F1 (2026-07-04 custodial audit): is the shared-wallet prize sweep
+ * contaminated? Returns true when the agent wallet holds MORE pending
+ * prizes than THIS session won — i.e. a prior user's prizes are stranded
+ * in the shared wallet, and an all-or-nothing `transferPendingPrizes(owner,
+ * MaxUint256)` would misappropriate them to the current player.
+ *
+ * The COMPLETE decision lives here (there is NO extra `expectedFromThisSession
+ * > 0` gate — the pre-fix bug was exactly such a guard, which made the
+ * pure-theft case, where the sweeping user won nothing, silent) so the
+ * boundary is unit-testable without the full play + MCP + contract stack.
+ */
+export function isPrizeSweepContaminated(
+  pendingPrizesCount: number,
+  expectedFromThisSession: number,
+): boolean {
+  return pendingPrizesCount > expectedFromThisSession;
+}
 
 // ── Prerequisite shape returned by MCP check_prerequisites ────
 
@@ -817,28 +852,34 @@ export class LottoAgent {
       return { status: 'skipped', reason: 'no pending prizes' };
     }
 
-    // Defensive cross-user contamination check (Task E):
+    // F1 (2026-07-04 custodial audit): cross-user contamination GUARD.
     // The contract's transferPendingPrizes(owner, MaxUint256) reassigns
-    // ALL of the agent wallet's currently-pending prizes to `owner`.
-    // If a previous user's transfer failed and their prizes are still
-    // in the agent's pending list, this call would incorrectly send
-    // them to the current user. We don't have a way to selectively
-    // transfer per-user from the contract, but we can at least DETECT
-    // and log if the count looks larger than expected.
-    //
-    // The check: if the dApp reports more pending prizes than this
-    // session won, log a structured warning so operators can spot it
-    // in Vercel logs.
+    // ALL of the agent wallet's currently-pending prizes to `owner`. In
+    // multi-user custodial mode every user shares ONE agent wallet, so
+    // if a PRIOR user's transfer failed and their prizes are still
+    // pending, sweeping now would send THEM to the current player —
+    // cross-tenant theft. We CANNOT subset-transfer per user (MaxUint256
+    // is all-or-nothing), so when the wallet holds MORE pending prizes
+    // than THIS session won, we REFUSE the sweep and dead-letter for
+    // operator recovery. Pre-fix this was a non-blocking console.warn
+    // gated on `> 0`, which was SILENT in the pure-theft case (a user
+    // who won nothing sweeping a prior user's stranded prizes).
     const expectedFromThisSession = this.reportGenerator.getCurrentWinCount();
-    if (
-      expectedFromThisSession > 0 &&
-      state.pendingPrizesCount > expectedFromThisSession
-    ) {
-      console.warn(
-        `  ⚠ CROSS-USER WARNING: agent pending prizes (${state.pendingPrizesCount}) > this session's wins (${expectedFromThisSession}). ` +
-          `Old stranded prizes may be transferred to ${ownerAddress}. ` +
-          `Run reconciliation against play history.`,
+    if (isPrizeSweepContaminated(state.pendingPrizesCount, expectedFromThisSession)) {
+      console.error(
+        `  ⛔ CROSS-USER CONTAMINATION: agent pending prizes ` +
+          `(${state.pendingPrizesCount}) > this session's wins ` +
+          `(${expectedFromThisSession}). Refusing to sweep — a prior ` +
+          `user's stranded prizes would be sent to ${ownerAddress}. ` +
+          `Dead-lettering for operator recovery.`,
       );
+      return {
+        status: 'blocked',
+        reason: 'cross_user_contamination',
+        pendingPrizesCount: state.pendingPrizesCount,
+        expectedFromThisSession,
+        ownerEoa: ownerAddress,
+      };
     }
 
     console.log(

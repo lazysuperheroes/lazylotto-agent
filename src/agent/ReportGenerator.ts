@@ -79,6 +79,19 @@ export type PrizeTransferOutcomeReport =
        * effect before re-submit.
        */
       lastSubmittedTxId?: string;
+    }
+  | {
+      /**
+       * F1 (2026-07-04 custodial audit): cross-user contamination guard.
+       * Mirrors the same-named `blocked` variant on `PrizeTransferOutcome`
+       * in `agent/LottoAgent.ts` — the shared-wallet sweep was refused
+       * because a prior user's prizes are stranded in the agent wallet.
+       */
+      status: 'blocked';
+      reason: string;
+      pendingPrizesCount: number;
+      expectedFromThisSession: number;
+      ownerEoa: string;
     };
 
 export interface SessionReport {

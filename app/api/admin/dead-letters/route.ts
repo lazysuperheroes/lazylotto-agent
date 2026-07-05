@@ -91,6 +91,10 @@ export async function GET(request: Request) {
       play_uncertain: 70,
       refund_uncertain: 70,
       deposit_credit_flush_failed: 60,
+      // F1 (2026-07-04): a blocked contamination is a cross-tenant risk
+      // that was PREVENTED but needs prompt per-user recovery — rank it
+      // just above a routine prize-transfer failure.
+      prize_transfer_blocked_contamination: 55,
       prize_transfer_failed: 50,
     };
     const byKind: Record<string, { count: number; unresolved: number; rank: number }> = {};

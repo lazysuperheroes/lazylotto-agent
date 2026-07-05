@@ -122,6 +122,13 @@ function mapPrizeTransferOutcome(
         error: string;
         attemptsLog: { attempt: number; gas: number; error?: string }[];
       }
+    | {
+        status: 'blocked';
+        reason: string;
+        pendingPrizesCount: number;
+        expectedFromThisSession: number;
+        ownerEoa: string;
+      }
     | undefined,
 ): {
   status: 'succeeded' | 'skipped' | 'failed' | 'recovered';
@@ -138,6 +145,18 @@ function mapPrizeTransferOutcome(
       txId: outcome.contractTxId,
       attempts: outcome.attempt,
       gasUsed: outcome.gasUsed,
+    };
+  }
+  // F1 (2026-07-04): a contamination-blocked sweep did NOT transfer the
+  // prizes — record it on the audit trail as a non-transfer ('failed' is
+  // the closest existing wire status; the distinct recovery detail lives
+  // in the prize_transfer_blocked_contamination dead-letter).
+  if (outcome.status === 'blocked') {
+    return {
+      status: 'failed',
+      lastError:
+        `blocked_cross_user_contamination: ${outcome.pendingPrizesCount} pending ` +
+        `> ${outcome.expectedFromThisSession} won this session`,
     };
   }
   // failed
@@ -939,6 +958,64 @@ export class MultiUserAgent {
             sessionId,
             error: deadLetterErr instanceof Error ? deadLetterErr.message : String(deadLetterErr),
           });
+        }
+      }
+
+      // F1 (2026-07-04 custodial audit): contamination BLOCK. The
+      // shared-wallet sweep was refused because the agent wallet held
+      // MORE pending prizes than this session won — a prior user's
+      // prizes are stranded in it (see LottoAgent.transferAllPrizes).
+      // Dead-letter so the operator runs per-user recovery; BOTH this
+      // session's prizes AND the prior stranded prizes remain pending.
+      if (transferOutcome?.status === 'blocked') {
+        try {
+          await this.store.upsertDeadLetter({
+            transactionId: sessionId,
+            timestamp: new Date().toISOString(),
+            error:
+              `cross-user contamination: ${transferOutcome.pendingPrizesCount} pending prize(s) ` +
+              `> ${transferOutcome.expectedFromThisSession} won this session`,
+            sender: user.hederaAccountId,
+            kind: 'prize_transfer_blocked_contamination',
+            details: {
+              userId,
+              sessionId,
+              prizesByToken: report.prizesByToken,
+              pendingPrizesCount: transferOutcome.pendingPrizesCount,
+              expectedFromThisSession: transferOutcome.expectedFromThisSession,
+              ownerEoa: transferOutcome.ownerEoa,
+            },
+          });
+          logger.error('prize transfer BLOCKED — cross-user contamination', {
+            component: 'MultiUserAgent',
+            event: 'prize_transfer_blocked_contamination',
+            userId,
+            sessionId,
+            pendingPrizesCount: transferOutcome.pendingPrizesCount,
+            expectedFromThisSession: transferOutcome.expectedFromThisSession,
+          });
+        } catch (deadLetterErr) {
+          // The recovery anchor could not be persisted — page the
+          // operator (F17 made this escalation reliable). Without it a
+          // contamination event is invisible and the stranded prizes sit
+          // until the reconcile cron notices.
+          logger.error('failed to dead-letter contamination block — paging', {
+            component: 'MultiUserAgent',
+            event: 'dead_letter_write_failed',
+            userId,
+            sessionId,
+            error: deadLetterErr instanceof Error ? deadLetterErr.message : String(deadLetterErr),
+          });
+          try {
+            await escalateUncertainDlFailure({
+              kind: 'prize_transfer_blocked_contamination',
+              uncertainTxId: sessionId,
+              userId,
+              cause: deadLetterErr,
+            });
+          } catch {
+            /* escalation is best-effort; the logger.error above is the floor */
+          }
         }
       }
 
@@ -2225,13 +2302,49 @@ export class MultiUserAgent {
     const allDeadLetters = this.store.getDeadLetters();
     const affectedEntries = allDeadLetters.filter(
       (e) =>
-        e.kind === 'prize_transfer_failed' &&
+        (e.kind === 'prize_transfer_failed' ||
+          // F1 (2026-07-04): a play whose sweep was blocked for
+          // contamination also stranded THIS user's prizes — resolve
+          // those dead-letters on recovery too.
+          e.kind === 'prize_transfer_blocked_contamination') &&
         e.details?.userId === userId &&
         !e.resolvedAt,
     );
     const affectedSessions = affectedEntries
       .map((e) => e.details?.sessionId)
       .filter((s): s is string => typeof s === 'string');
+
+    // F1 (2026-07-04 custodial audit): contamination signal. If OTHER
+    // users also have unresolved stranded-prize dead-letters, the shared
+    // wallet may hold their prizes too — and this all-or-nothing sweep
+    // would send them to `userId`. Surface it LOUDLY so the operator
+    // reconciles per user (or knowingly accepts the assignment). We do
+    // NOT hard-refuse: the operator is explicitly asserting ownership by
+    // targeting this user, and can preview the totals via dryRun first.
+    const otherUsersStranded = allDeadLetters.filter(
+      (e) =>
+        (e.kind === 'prize_transfer_failed' ||
+          e.kind === 'prize_transfer_blocked_contamination') &&
+        e.details?.userId !== userId &&
+        !e.resolvedAt,
+    );
+    if (otherUsersStranded.length > 0) {
+      logger.warn(
+        'prize recovery: OTHER users have stranded prizes — this all-or-nothing sweep may misassign their prizes to the target user',
+        {
+          component: 'MultiUserAgent',
+          event: 'prize_recovery_contamination_warning',
+          targetUserId: userId,
+          otherAffectedUsers: Array.from(
+            new Set(
+              otherUsersStranded
+                .map((e) => e.details?.userId)
+                .filter((u): u is string => typeof u === 'string'),
+            ),
+          ),
+        },
+      );
+    }
 
     // 4. Nothing to do?
     if (agentState.pendingPrizesCount === 0) {

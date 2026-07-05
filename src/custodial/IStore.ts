@@ -81,7 +81,12 @@ export type DeadLetterEntry = {
     | 'refund_uncertain'
     | 'withdrawal_uncertain'
     | 'operator_fee_withdraw_uncertain'
-    | 'play_uncertain';
+    | 'play_uncertain'
+    // F1 (2026-07-04 custodial audit): a play's prize sweep was REFUSED
+    // because the shared agent wallet held a prior user's stranded
+    // prizes (transferPendingPrizes is all-or-nothing). No theft
+    // occurred; needs per-user operator recovery.
+    | 'prize_transfer_blocked_contamination';
   /**
    * Free-form details specific to the failure kind. For prize
    * transfer failures, this carries the userId, sessionId, prize
