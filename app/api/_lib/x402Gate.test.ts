@@ -29,14 +29,15 @@ const cfg: X402FeatureConfig = {
   rakeHoliday: { priceUsdCents: 500, durationDays: 30, minAcceptedFraction: 0.97 },
 };
 
-const serverReq: PaymentRequirements = {
+const serverReq = {
   scheme: 'exact',
   network: NET,
   asset: '0.0.7777',
   amount: '5000000', // $5.00 USDC (6 decimals)
   payTo: '0.0.5000',
   maxTimeoutSeconds: 120,
-} as PaymentRequirements;
+  extra: { feePayer: '0.0.6000' },
+} as unknown as PaymentRequirements;
 
 const accepts: PaymentRequirements[] = [serverReq];
 

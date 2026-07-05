@@ -263,8 +263,27 @@ export function getRedisBackendMode(): 'upstash' | 'memory' {
  * Throws an Error whose `message` starts with `PRODUCTION_REDIS_REQUIRED:`
  * for grep-ability in Vercel function logs.
  */
+/**
+ * F10 (2026-07-05 custodial audit): production-deploy intent signal.
+ * assertProductionRedis previously keyed every guard on
+ * NODE_ENV==='production' ALONE — a hosted deploy that forgot or mis-set
+ * NODE_ENV silently skipped ALL of them (in-memory fallback, missing
+ * webhook / audience / mcp-url, etc.). Recognize the reliable platform
+ * signals too so the guards fire whenever this is a real deployment.
+ * Testnet-as-network is NOT a production signal by itself (local dev runs
+ * testnet); a Vercel / mainnet / explicit REQUIRE_PROD_ENV signal is needed.
+ */
+export function isProductionDeploy(): boolean {
+  return (
+    process.env.NODE_ENV === 'production' ||
+    process.env.VERCEL_ENV === 'production' ||
+    process.env.HEDERA_NETWORK === 'mainnet' ||
+    process.env.REQUIRE_PROD_ENV === 'true'
+  );
+}
+
 export function assertProductionRedis(): void {
-  if (process.env.NODE_ENV === 'production' && !isUpstashConfigured()) {
+  if (isProductionDeploy() && !isUpstashConfigured()) {
     throw new Error(
       'PRODUCTION_REDIS_REQUIRED: Upstash Redis credentials missing in production. ' +
       'Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN (or the legacy ' +
@@ -280,7 +299,7 @@ export function assertProductionRedis(): void {
   // mainnet deploy that forgets the env reads/writes the testnet
   // namespace silently — sessions, locks, deposit-claim sets, agentSeq
   // counters all collide with testnet state. Hard-fail at boot.
-  if (process.env.NODE_ENV === 'production') {
+  if (isProductionDeploy()) {
     const network = process.env.HEDERA_NETWORK;
     if (network !== 'mainnet' && network !== 'testnet') {
       throw new Error(
@@ -298,7 +317,7 @@ export function assertProductionRedis(): void {
   // uncertain-tx escalation path becomes a logger.warn that nobody
   // sees. Boot-fail rather than ship that. (Local dev / testnet are
   // exempt because the webhook is operationally optional there.)
-  if (process.env.NODE_ENV === 'production') {
+  if (isProductionDeploy()) {
     const webhook = process.env.RECONCILE_FAILURE_WEBHOOK_URL;
     if (!webhook || webhook.trim() === '') {
       throw new Error(
@@ -371,6 +390,40 @@ export function assertProductionRedis(): void {
         `production. Pre-fix this only failed at first tool call (not at ` +
         `boot), so an operator deploying with a typo'd env saw a cryptic ` +
         `error in function logs only after the first user request.`,
+      );
+    }
+  }
+
+  // F9 / F13 / F16 (2026-07-05 custodial audit): consolidated env
+  // enforcement — the BOOT halves of the "fail-open on an unenforced
+  // misconfig" cluster:
+  //   - HCS20_TOPIC_ID (F13): without it every v2 audit write is dropped
+  //     (silent audit-trail loss; DR reconstruction yields nothing).
+  //   - OPERATOR_WITHDRAW_ADDRESS (F9): without it operator_withdraw_fees
+  //     accepts a caller-controlled recipient (rake-float drain to any acct).
+  //   - CRON_SECRET (F16): without it the reconcile cron self-disables (401)
+  //     and insolvency detection silently stops.
+  // On MAINNET these FAIL CLOSED. On a production TESTNET deploy we only WARN
+  // so an existing testnet deployment is not bricked — but the operator
+  // should set them there too (then this can be tightened to all-production).
+  if (isProductionDeploy()) {
+    const required: Array<[string, string | undefined, string]> = [
+      ['HCS20_TOPIC_ID', process.env.HCS20_TOPIC_ID, 'v2 audit writes are dropped (silent audit-trail loss)'],
+      ['OPERATOR_WITHDRAW_ADDRESS', process.env.OPERATOR_WITHDRAW_ADDRESS, 'operator fee withdrawals accept a caller-controlled recipient'],
+      ['CRON_SECRET', process.env.CRON_SECRET, 'the reconcile cron self-disables and insolvency detection stops'],
+    ];
+    const missing = required.filter(([, v]) => !v || v.trim() === '');
+    if (missing.length > 0) {
+      const detail = missing.map(([k, , why]) => `${k} (else ${why})`).join('; ');
+      if (process.env.HEDERA_NETWORK === 'mainnet') {
+        throw new Error(
+          `PRODUCTION_ENV_REQUIRED: missing required mainnet env(s): ${detail}. ` +
+            `Set them or accept the boot failure.`,
+        );
+      }
+      console.warn(
+        `[Auth] PRODUCTION_ENV_RECOMMENDED (non-mainnet): missing ${detail}. ` +
+          `These FAIL CLOSED on mainnet — set them before promoting.`,
       );
     }
   }

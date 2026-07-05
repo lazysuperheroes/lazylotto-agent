@@ -855,10 +855,17 @@ describe('assertProductionRedis: HEDERA_NETWORK guard (security finding #7)', ()
     const origW = env.RECONCILE_FAILURE_WEBHOOK_URL;
     const origAud = env.AUTH_PAGE_ORIGIN;
     const origMcp = env.LAZYLOTTO_MCP_URL;
+    const origTopic = env.HCS20_TOPIC_ID;
+    const origWithdraw = env.OPERATOR_WITHDRAW_ADDRESS;
+    const origCron = env.CRON_SECRET;
     env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
     env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
     env.RECONCILE_FAILURE_WEBHOOK_URL = 'https://hooks.example.com/test'; // F22
     env.LAZYLOTTO_MCP_URL = 'https://dapp.example.com/api/mcp'; // R3-FG-80
+    // F9 / F13 / F16 (2026-07-05): consolidated mainnet boot-env requirements.
+    env.HCS20_TOPIC_ID = '0.0.999999';
+    env.OPERATOR_WITHDRAW_ADDRESS = '0.0.5000';
+    env.CRON_SECRET = 'test-cron-secret';
     env.NODE_ENV = 'production';
     try {
       env.HEDERA_NETWORK = 'mainnet';
@@ -876,6 +883,58 @@ describe('assertProductionRedis: HEDERA_NETWORK guard (security finding #7)', ()
       else env.RECONCILE_FAILURE_WEBHOOK_URL = origW;
       if (origAud === undefined) delete env.AUTH_PAGE_ORIGIN; else env.AUTH_PAGE_ORIGIN = origAud;
       if (origMcp === undefined) delete env.LAZYLOTTO_MCP_URL; else env.LAZYLOTTO_MCP_URL = origMcp;
+      if (origTopic === undefined) delete env.HCS20_TOPIC_ID; else env.HCS20_TOPIC_ID = origTopic;
+      if (origWithdraw === undefined) delete env.OPERATOR_WITHDRAW_ADDRESS;
+      else env.OPERATOR_WITHDRAW_ADDRESS = origWithdraw;
+      if (origCron === undefined) delete env.CRON_SECRET; else env.CRON_SECRET = origCron;
+    }
+  });
+
+  // revert-proof: reverting the F9/F13/F16 consolidated boot guard removes
+  // the mainnet requirement for OPERATOR_WITHDRAW_ADDRESS (+ HCS20_TOPIC_ID /
+  // CRON_SECRET), so a mainnet deploy missing them would boot silently — this
+  // asserts assertProductionRedis THROWS PRODUCTION_ENV_REQUIRED instead.
+  it('F9/F13/F16: THROWS on mainnet when a required boot env is missing', () => {
+    const env2 = process.env as Record<string, string | undefined>;
+    const saved = {
+      NODE_ENV: env2.NODE_ENV,
+      HEDERA_NETWORK: env2.HEDERA_NETWORK,
+      W: env2.RECONCILE_FAILURE_WEBHOOK_URL,
+      AUD: env2.AUTH_PAGE_ORIGIN,
+      MCP: env2.LAZYLOTTO_MCP_URL,
+      TOPIC: env2.HCS20_TOPIC_ID,
+      WD: env2.OPERATOR_WITHDRAW_ADDRESS,
+      CRON: env2.CRON_SECRET,
+    };
+    env2.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
+    env2.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+    env2.RECONCILE_FAILURE_WEBHOOK_URL = 'https://hooks.example.com/test';
+    env2.LAZYLOTTO_MCP_URL = 'https://dapp.example.com/api/mcp';
+    env2.AUTH_PAGE_ORIGIN = 'https://dapp.lazysuperheroes.com';
+    env2.NODE_ENV = 'production';
+    env2.HEDERA_NETWORK = 'mainnet';
+    // Provide two of the three; omit OPERATOR_WITHDRAW_ADDRESS.
+    env2.HCS20_TOPIC_ID = '0.0.999999';
+    env2.CRON_SECRET = 'test-cron-secret';
+    delete env2.OPERATOR_WITHDRAW_ADDRESS;
+    try {
+      assert.throws(() => assertProductionRedis(), /PRODUCTION_ENV_REQUIRED/);
+    } finally {
+      delete env2.UPSTASH_REDIS_REST_URL;
+      delete env2.UPSTASH_REDIS_REST_TOKEN;
+      for (const [k, v] of Object.entries({
+        NODE_ENV: saved.NODE_ENV,
+        HEDERA_NETWORK: saved.HEDERA_NETWORK,
+        RECONCILE_FAILURE_WEBHOOK_URL: saved.W,
+        AUTH_PAGE_ORIGIN: saved.AUD,
+        LAZYLOTTO_MCP_URL: saved.MCP,
+        HCS20_TOPIC_ID: saved.TOPIC,
+        OPERATOR_WITHDRAW_ADDRESS: saved.WD,
+        CRON_SECRET: saved.CRON,
+      })) {
+        if (v === undefined) delete env2[k];
+        else env2[k] = v;
+      }
     }
   });
 });

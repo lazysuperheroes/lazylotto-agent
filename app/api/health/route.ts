@@ -87,6 +87,33 @@ export async function GET() {
     killSwitch = { state: 'unknown' };
   }
 
+  // F16 (2026-07-05 custodial audit): reconcile liveness (dead-man's-switch).
+  // A stale/absent watermark means the reconcile cron stopped running, so
+  // insolvency alerting is dark (the webhook only fires inside a run). Expose
+  // the STALENESS only — never the solvency verdict, since /api/health is
+  // unauthenticated and publishing insolvency would hand attackers a window.
+  let reconcile: { lastRunAt: string | null; staleSeconds: number | null } = {
+    lastRunAt: null,
+    staleSeconds: null,
+  };
+  try {
+    const { getRedis } = await import('~/auth/redis');
+    const redis = await getRedis();
+    const net = process.env.HEDERA_NETWORK ?? 'testnet';
+    const raw = await redis.get<string>(`lla:${net}:reconcile-watermark`);
+    if (raw) {
+      const wm = (typeof raw === 'string' ? JSON.parse(raw) : raw) as { at?: string };
+      if (typeof wm.at === 'string') {
+        reconcile = {
+          lastRunAt: wm.at,
+          staleSeconds: Math.round((Date.now() - new Date(wm.at).getTime()) / 1000),
+        };
+      }
+    }
+  } catch {
+    /* best-effort — leave nulls so a monitor treats "unknown" as needs-attention */
+  }
+
   return NextResponse.json(
     {
       status: 'ok',
@@ -99,6 +126,7 @@ export async function GET() {
       redis: redisMode,
       auth_backend: redisMode,
       kill_switch: killSwitch,
+      reconcile,
     },
     {
       headers: {

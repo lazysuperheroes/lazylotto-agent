@@ -245,6 +245,31 @@ export const GET = withStore(async (request: Request) => {
     });
   }
 
+  // F16 (2026-07-05 custodial audit): write a reconcile watermark so a
+  // STOPPED cron (paused / crashed / CRON_SECRET unset → 401) is detectable
+  // — the insolvency webhook only fires INSIDE a successful run, so without
+  // this a dead cron silently stops alerting. /api/health exposes the
+  // STALENESS (not the solvency verdict, which stays private) for an
+  // external monitor to alert on. Best-effort.
+  try {
+    const { getRedis } = await import('~/auth/redis');
+    const redis = await getRedis();
+    const net = process.env.HEDERA_NETWORK ?? 'testnet';
+    await redis.set(
+      `lla:${net}:reconcile-watermark`,
+      JSON.stringify({
+        at: new Date().toISOString(),
+        solvent: result.solvent,
+        orphanCount: orphans.count,
+      }),
+    );
+  } catch (watermarkErr) {
+    console.warn(
+      '[cron/reconcile] watermark write failed:',
+      watermarkErr instanceof Error ? watermarkErr.message : watermarkErr,
+    );
+  }
+
   // Return 200 on solvent (with orphan count in body), 503 on
   // insolvent. The body is the same shape either way plus the
   // orphan signal so the monitor can alert on either independently.
