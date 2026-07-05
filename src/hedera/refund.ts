@@ -217,6 +217,17 @@ export async function processRefund(
   try {
   if (options?.store && depositRecord) {
 
+    // F2 (2026-07-04 custodial audit): refresh the local cache from
+    // Redis UNDER the outer lock before the guard read and the ledger
+    // debit. getUser() returns the in-process cache and updateBalance()
+    // write-throughs the whole user object; without a refresh a warm
+    // Lambda whose cache predates a concurrent play settlement would
+    // overwrite that settlement (cross-Lambda lost update). withUserLock
+    // and creditDeposit both refresh under the lock — this path was the
+    // outlier. Operator is refreshed too for the rake reversal below.
+    await options.store.refreshUser?.(depositRecord.userId);
+    await options.store.refreshOperator?.();
+
     // F7 + R2-FG-19 (round-2 G-01 / F7 caveat): consumed-balance
     // guard. Pre-fix used `available + reserved >= netAmount` — a
     // deposit fully reserved by an active play passed the guard, the
@@ -927,7 +938,15 @@ export async function processRefund(
         options.store.updateBalance(user.userId, (b) => {
           const entry = b.tokens[tokenKey];
           if (!entry) return b;
-          entry.available = Math.max(0, entry.available - humanRefundAmount);
+          // F3 (2026-07-04 custodial audit): debit the NET the user was
+          // credited at deposit, NOT the gross on-chain refund amount.
+          // creditDeposit credits `available += netAmount` and the
+          // operator `+= rakeAmount`; the operator rake reversal below
+          // accounts for the rake leg. Debiting gross here would remove
+          // `net + 2*rake` of internal liability for a `net + rake`
+          // outflow — over-debiting the user's other same-token funds,
+          // which reconcile reads as a false surplus (hiding the loss).
+          entry.available = Math.max(0, entry.available - depositRecord!.netAmount);
           return b;
         });
         ledgerAdjusted = user.userId;
@@ -939,11 +958,20 @@ export async function processRefund(
         // with no on-chain backing — every refunded deposit
         // drives a persistent insolvency signal.
         if (depositRecord.rakeAmount > 0) {
+          // F15 (2026-07-04 custodial audit): floor the reversal at 0
+          // (matches pendingLedger's drain) so refunding an older raked
+          // deposit after the operator has withdrawn fees below that
+          // rake cannot drive the operator balance negative. Reverse
+          // totalRakeCollected too, for parity with the queued path.
           options.store.updateOperator((op) => ({
             ...op,
             balances: {
               ...op.balances,
-              [tokenKey]: (op.balances[tokenKey] ?? 0) - depositRecord!.rakeAmount,
+              [tokenKey]: Math.max(0, (op.balances[tokenKey] ?? 0) - depositRecord!.rakeAmount),
+            },
+            totalRakeCollected: {
+              ...op.totalRakeCollected,
+              [tokenKey]: Math.max(0, (op.totalRakeCollected[tokenKey] ?? 0) - depositRecord!.rakeAmount),
             },
           }));
           rakeReversed = depositRecord.rakeAmount;
@@ -1631,10 +1659,15 @@ export async function verifyUncertainRefunds(
           details.tokenKey &&
           typeof details.humanAmount === 'number' &&
           Number.isFinite(details.humanAmount) &&
-          details.humanAmount >= 0
+          details.humanAmount >= 0 &&
+          Number.isFinite(depositRecordForVerifier.netAmount) &&
+          depositRecordForVerifier.netAmount >= 0
         ) {
           const tokenKey = details.tokenKey;
-          const humanAmount = details.humanAmount;
+          // F3 (2026-07-04 custodial audit): debit NET (the deposit's
+          // recorded net credit), not the gross `details.humanAmount`.
+          // See the in-flight path in processRefund for the rationale.
+          const netAmount = depositRecordForVerifier.netAmount;
           let lockToken: string | null = null;
           const backoffMs = [50, 100, 200, 500, 1000];
           for (const delay of backoffMs) {
@@ -1644,12 +1677,17 @@ export async function verifyUncertainRefunds(
           }
           if (lockToken) {
             try {
+              // F2 (2026-07-04 custodial audit): refresh under the lock
+              // before the write-through, same rationale as the
+              // in-flight path in processRefund.
+              await store.refreshUser?.(user.userId);
+              await store.refreshOperator?.();
               store.updateBalance(user.userId, (b) => {
                 const tokEntry = b.tokens[tokenKey];
                 if (!tokEntry) return b;
                 tokEntry.available = Math.max(
                   0,
-                  tokEntry.available - humanAmount,
+                  tokEntry.available - netAmount,
                 );
                 return b;
               });
@@ -1658,13 +1696,26 @@ export async function verifyUncertainRefunds(
               // F9: rake reversal — same conditions as the in-flight
               // path (see processRefund).
               if (depositRecordForVerifier.rakeAmount > 0 && store.updateOperator) {
+                // F15 (2026-07-04 custodial audit): floor at 0 + reverse
+                // totalRakeCollected, matching the in-flight and queued
+                // paths.
                 store.updateOperator((op) => ({
                   ...op,
                   balances: {
                     ...op.balances,
-                    [tokenKey]:
+                    [tokenKey]: Math.max(
+                      0,
                       (op.balances[tokenKey] ?? 0) -
-                      depositRecordForVerifier.rakeAmount,
+                        depositRecordForVerifier.rakeAmount,
+                    ),
+                  },
+                  totalRakeCollected: {
+                    ...op.totalRakeCollected,
+                    [tokenKey]: Math.max(
+                      0,
+                      (op.totalRakeCollected[tokenKey] ?? 0) -
+                        depositRecordForVerifier.rakeAmount,
+                    ),
                   },
                 }));
                 rakeReversedHere = depositRecordForVerifier.rakeAmount;
@@ -1696,7 +1747,7 @@ export async function verifyUncertainRefunds(
             await queuePendingLedgerAdjustment({
               userId: user.userId,
               tokenKey,
-              amount: humanAmount,
+              amount: netAmount,
               reason: 'refund',
               sourceTx: originalTxId,
               createdAt: new Date().toISOString(),

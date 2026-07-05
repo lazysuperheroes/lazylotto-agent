@@ -24,6 +24,9 @@ interface FakeStoreState {
   operator: {
     balances: Record<string, number>;
     totalWithdrawnByOperator: Record<string, number>;
+    // F15 (2026-07-04 custodial audit): the refund rake reversal now also
+    // reverses totalRakeCollected (real OperatorState always has it).
+    totalRakeCollected: Record<string, number>;
   };
   withdrawals: Array<{ userId: string; amount: number; tokenId: string | null; recipientAccountId: string; transactionId: string; timestamp: string }>;
   deposits: Map<string, {
@@ -45,6 +48,7 @@ function makeContext(initialState: Partial<FakeStoreState> = {}) {
     operator: initialState.operator ?? {
       balances: {},
       totalWithdrawnByOperator: {},
+      totalRakeCollected: {},
     },
     withdrawals: initialState.withdrawals ?? [],
     deposits: initialState.deposits ?? new Map(),
@@ -325,6 +329,7 @@ describe('F12: applyForceRelease — operator_fee_withdraw_uncertain', () => {
       operator: {
         balances: { hbar: 100 },
         totalWithdrawnByOperator: {},
+        totalRakeCollected: {},
       },
     });
 
@@ -356,6 +361,7 @@ describe('F12: applyForceRelease — operator_fee_withdraw_uncertain', () => {
       operator: {
         balances: { hbar: 100 },
         totalWithdrawnByOperator: {},
+        totalRakeCollected: {},
       },
     });
 
@@ -516,6 +522,10 @@ describe('F12 + F8 + F9 + F10: applyForceRelease — refund_uncertain', () => {
       timestamp: new Date().toISOString(),
       error: 'x',
       kind: 'refund_uncertain',
+      // Real refund_uncertain DLs carry `sender` (the refund recipient); the
+      // SUCCESS audit anchor needs it (or a resolvable hederaAccountId). This
+      // fixture was missing it, so the anchor returned 400 (pre-existing).
+      sender: '0.0.6001',
       details: {
         claimKey,
         originalTxId: 'original-tx-r1',
@@ -546,6 +556,7 @@ describe('F12 + F8 + F9 + F10: applyForceRelease — refund_uncertain', () => {
       operator: {
         balances: { hbar: 5 }, // rake credit on the deposit
         totalWithdrawnByOperator: {},
+        totalRakeCollected: { hbar: 5 },
       },
     });
     redisStore.set(claimKey, 'pending');
@@ -663,6 +674,7 @@ describe('F12 + F8 + F9 + F10: applyForceRelease — refund_uncertain', () => {
       timestamp: new Date().toISOString(),
       error: 'x',
       kind: 'refund_uncertain',
+      sender: '0.0.6001', // see the note in the SUCCESS-debit test above
       details: {
         claimKey,
         originalTxId: 'original-tx-r2fg11',
@@ -754,6 +766,7 @@ describe('F12 + F8 + F9 + F10: applyForceRelease — refund_uncertain', () => {
       timestamp: new Date().toISOString(),
       error: 'x',
       kind: 'refund_uncertain',
+      sender: '0.0.6001', // see the note in the SUCCESS-debit test above
       details: {
         claimKey,
         originalTxId: 'original-tx-r3fg23',

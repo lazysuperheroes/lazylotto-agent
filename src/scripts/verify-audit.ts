@@ -199,7 +199,7 @@ interface PerUserLedger {
   totalPrizeValueByToken: Record<string, number>;
   totalNftPrizes: number;
   /**
-   * Derived: deposited - rake - spent - withdrawn - refunded - held - flushOrphaned.
+   * Derived: deposited - rake - spent - withdrawn - refunded + rakeReversed - held - flushOrphaned.
    *
    * R10-FG-9 / Phase-9 Cluster B: aggregate formula now matches the
    * per-token formula. Pre-Phase-9 the docstring AND the computation
@@ -1426,7 +1426,7 @@ async function main() {
     });
   }
 
-  // Derive ledger balance per user (deposited - rake - spent - withdrawn - refunded - held - flushOrphaned).
+  // Derive ledger balance per user (deposited - rake - spent - withdrawn - refunded + rakeReversed - held - flushOrphaned).
   //
   // R9-FG-1 / R9-FG-2 / Phase-7 Cluster B: Phase-6 added the
   // `heldByToken` and `depositCreditFlushOrphanedByToken` accumulators
@@ -1454,8 +1454,18 @@ async function main() {
     );
     const totalFlushOrphaned = Object.values(led.depositCreditFlushOrphanedByToken)
       .reduce((a, b) => a + b, 0);
+    // F3 (2026-07-04 custodial audit): add back rake reversed via
+    // refunds. `totalRefunded` is the GROSS on-chain refund amount, but
+    // only NET was ever the user's custodial share (deposit records
+    // gross, rake is a separate op → deposited - rake = net). Subtracting
+    // gross over-debits the user by the rake; the paired `rakeReversed`
+    // (which also reduces the operator balance) restores the user to the
+    // NET debit that the corrected refund ledger now applies, keeping the
+    // topic reconstruction consistent with Redis.
+    const totalRakeReversed = Object.values(led.totalRakeReversedByToken)
+      .reduce((a, b) => a + b, 0);
     led.ledgerBalance =
-      led.totalDeposited - led.totalRake - led.totalSpent - led.totalWithdrawn - led.totalRefunded - totalHeld - totalFlushOrphaned;
+      led.totalDeposited - led.totalRake - led.totalSpent - led.totalWithdrawn - led.totalRefunded + totalRakeReversed - totalHeld - totalFlushOrphaned;
 
     // Per-token balance
     const allTokens = new Set<string>([
@@ -1464,6 +1474,7 @@ async function main() {
       ...Object.keys(led.totalSpentByToken),
       ...Object.keys(led.totalWithdrawnByToken),
       ...Object.keys(led.totalRefundedByToken),
+      ...Object.keys(led.totalRakeReversedByToken),
       // Phase-7 Cluster B: pull held + flush-orphan tokens into the
       // derivation set so per-token balance reflects them even when
       // the user has no other activity in that token.
@@ -1476,9 +1487,12 @@ async function main() {
       const sp = led.totalSpentByToken[token] ?? 0;
       const wd = led.totalWithdrawnByToken[token] ?? 0;
       const rf = led.totalRefundedByToken[token] ?? 0;
+      // F3 (2026-07-04 custodial audit): see aggregate note above — add
+      // back the token's rake reversed so a refund debits NET, not gross.
+      const rr = led.totalRakeReversedByToken[token] ?? 0;
       const held = led.heldByToken[token] ?? 0;
       const flushOrphaned = led.depositCreditFlushOrphanedByToken[token] ?? 0;
-      const balance = dep - rk - sp - wd - rf - held - flushOrphaned;
+      const balance = dep - rk - sp - wd - rf + rr - held - flushOrphaned;
       // Round to 4 decimals
       led.ledgerBalanceByToken[token] = Math.round(balance * 10000) / 10000;
     }

@@ -1264,9 +1264,12 @@ describe('verifyUncertainRefunds dispatch', () => {
       },
       updateBalance() { return {} as never; },
       updateOperator(
-        fn: (op: { balances: Record<string, number> }) => { balances: Record<string, number> },
+        fn: (op: { balances: Record<string, number>; totalRakeCollected: Record<string, number> }) => { balances: Record<string, number> },
       ) {
-        const op = { balances: { hbar: operatorBalance } };
+        // F15 (2026-07-04 custodial audit): the refund verifier now also
+        // reverses `totalRakeCollected`, so the operator mock must carry
+        // it (real OperatorState always does).
+        const op = { balances: { hbar: operatorBalance }, totalRakeCollected: { hbar: operatorBalance } };
         const next = fn(op);
         operatorBalance = next.balances.hbar ?? operatorBalance;
         return next as never;
@@ -1501,6 +1504,134 @@ describe('verifyUncertainRefunds dispatch', () => {
       );
     } finally {
       mock.sadd = originalSadd;
+      teardown();
+    }
+  });
+
+  // ── F2/F3/F15 (2026-07-04 custodial audit): refund conservation ──
+  // The in-flight processRefund happy path can't be unit-driven here
+  // (the fakeClient can't produce a successful on-chain receipt — see
+  // the file docstring), but the refund VERIFIER does its ledger
+  // bookkeeping after a mirror-confirmed refund with NO on-chain
+  // submit, so it exercises the same net-debit (F3) + floored-reversal
+  // (F15) logic under the same per-user lock (F2 refresh).
+  type TokenEntry = { available: number; reserved: number; totalDeposited: number; totalWithdrawn: number; totalRake: number };
+  type FakeUser = { userId: string; balances: { tokens: Record<string, TokenEntry> } };
+  type FakeOperator = { balances: Record<string, number>; totalRakeCollected: Record<string, number> };
+  type FakeDl = { transactionId: string; timestamp: string; error: string; kind: 'refund_uncertain'; details: Record<string, unknown>; resolvedAt?: string };
+
+  function makeLedgerStore(
+    user: FakeUser,
+    operator: FakeOperator,
+    dls: FakeDl[],
+    deposit: { userId: string; grossAmount: number; rakeAmount: number; netAmount: number },
+  ) {
+    const originalTxId = String(dls[0]!.details.originalTxId);
+    return {
+      async refreshDeadLetters() {},
+      getDeadLetters() { return dls; },
+      async upsertDeadLetter(entry: FakeDl) {
+        const i = dls.findIndex((d) => d.transactionId === entry.transactionId);
+        if (i >= 0) dls[i] = entry; else dls.push(entry);
+      },
+      async flush() {},
+      getUserByMemo() { return undefined; },
+      async getDepositByTxId(txId: string) {
+        return txId === originalTxId
+          ? { transactionId: txId, tokenId: null, memo: 'm', timestamp: '2026-05-01T00:00:00Z', ...deposit }
+          : undefined;
+      },
+      getUser(id: string) { return id === user.userId ? user : undefined; },
+      updateBalance(id: string, updater: (b: FakeUser['balances']) => FakeUser['balances']) {
+        if (id === user.userId) user.balances = updater(user.balances);
+        return user.balances;
+      },
+      getOperator() { return operator; },
+      updateOperator(updater: (op: FakeOperator) => FakeOperator) {
+        const next = updater(operator);
+        operator.balances = next.balances;
+        operator.totalRakeCollected = next.totalRakeCollected;
+        return operator;
+      },
+    };
+  }
+
+  const fakeClient = { operatorAccountId: { toString: () => '0.0.9999' } } as unknown as import('@hashgraph/sdk').Client;
+
+  // revert-proof: reverting the net-debit (refund.ts:930 / :1650 back to the
+  // gross `humanRefundAmount`) over-debits the user by `rake` and leaves a
+  // false solvency surplus — the `available === 90` assertion below fails.
+  it('F3: refund verifier debits NET, not gross — conserves float', async () => {
+    // Deposit split gross=100, rake=10, net=90. User holds TWO deposits'
+    // NET (available=180); operator holds both rakes (20). Refunding ONE
+    // deposit debits the user by NET (→90). Debiting gross would leave 80
+    // — stealing 10 of the user's OTHER same-token funds and producing a
+    // false solvency surplus that reconcile would read as "solvent".
+    installMirror(new Map([['refund-tx-conserve', { status: 200, result: 'SUCCESS' }]]));
+    const { state } = installRedis();
+    const claimKey = 'lla:testnet:refunded:orig-conserve';
+    state.set(claimKey, 'pending');
+
+    const user: FakeUser = {
+      userId: 'u-conserve',
+      balances: { tokens: { hbar: { available: 180, reserved: 0, totalDeposited: 200, totalWithdrawn: 0, totalRake: 20 } } },
+    };
+    const operator: FakeOperator = { balances: { hbar: 20 }, totalRakeCollected: { hbar: 20 } };
+    const dls: FakeDl[] = [{
+      transactionId: 'refund-tx-conserve',
+      timestamp: new Date().toISOString(),
+      error: 'receipt timeout',
+      kind: 'refund_uncertain',
+      details: { originalTxId: 'orig-conserve', refundTxId: 'refund-tx-conserve', humanAmount: 100, tokenKey: 'hbar', claimKey },
+    }];
+    const store = makeLedgerStore(user, operator, dls, { userId: 'u-conserve', grossAmount: 100, rakeAmount: 10, netAmount: 90 });
+
+    try {
+      const { verifyUncertainRefunds } = await import('./refund.js');
+      await verifyUncertainRefunds(fakeClient as never, store as never);
+      assert.equal(user.balances.tokens.hbar.available, 90, 'user debited NET (90), not gross (100) — F3');
+      assert.equal(operator.balances.hbar, 10, 'operator rake reversed by exactly the rake — F9/F15');
+      assert.equal(
+        user.balances.tokens.hbar.available + operator.balances.hbar,
+        100,
+        'conservation: internal liability dropped by the on-chain gross (100)',
+      );
+    } finally {
+      teardown();
+    }
+  });
+
+  // revert-proof: dropping the Math.max(0) floor on the operator rake
+  // reversal (refund.ts:946 / :1666) drives operator.balances negative — the
+  // `operator.balances.hbar === 0` assertion below fails.
+  it('F15: operator rake reversal floors at 0 (never negative)', async () => {
+    // Operator already withdrew fees below this deposit's rake:
+    // balances.hbar=5, rake=10. The reversal must floor at 0, not -5.
+    installMirror(new Map([['refund-tx-floor', { status: 200, result: 'SUCCESS' }]]));
+    const { state } = installRedis();
+    const claimKey = 'lla:testnet:refunded:orig-floor';
+    state.set(claimKey, 'pending');
+
+    const user: FakeUser = {
+      userId: 'u-floor',
+      balances: { tokens: { hbar: { available: 90, reserved: 0, totalDeposited: 100, totalWithdrawn: 0, totalRake: 10 } } },
+    };
+    const operator: FakeOperator = { balances: { hbar: 5 }, totalRakeCollected: { hbar: 5 } };
+    const dls: FakeDl[] = [{
+      transactionId: 'refund-tx-floor',
+      timestamp: new Date().toISOString(),
+      error: 'receipt timeout',
+      kind: 'refund_uncertain',
+      details: { originalTxId: 'orig-floor', refundTxId: 'refund-tx-floor', humanAmount: 100, tokenKey: 'hbar', claimKey },
+    }];
+    const store = makeLedgerStore(user, operator, dls, { userId: 'u-floor', grossAmount: 100, rakeAmount: 10, netAmount: 90 });
+
+    try {
+      const { verifyUncertainRefunds } = await import('./refund.js');
+      await verifyUncertainRefunds(fakeClient as never, store as never);
+      assert.equal(operator.balances.hbar, 0, 'operator balance floored at 0, not -5 — F15');
+      assert.equal(operator.totalRakeCollected.hbar, 0, 'totalRakeCollected also floored — F15');
+    } finally {
       teardown();
     }
   });

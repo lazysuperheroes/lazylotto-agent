@@ -1067,6 +1067,12 @@ async function handleRefund(
   if (!progress.ledgerAdjustedAt && depositRecord) {
     const tokenKey = details.tokenKey;
     const humanAmount = details.humanAmount;
+    // F3 (2026-07-04 custodial audit): debit the NET the user was credited
+    // at deposit, NOT the gross on-chain refund amount (details.humanAmount).
+    // The operator rake reversal below accounts for the rake leg. This is
+    // the force-release sibling of the processRefund + verifier fixes;
+    // humanAmount stays the on-chain/audit amount.
+    const netAmount = depositRecord.netAmount;
     // R2-FG-1: serialize the user-balance debit + operator rake
     // reversal against active in-band withdraw / play / refund. The
     // verifier's refund SUCCESS branch (refund.ts:1015 area) acquires
@@ -1084,7 +1090,7 @@ async function handleRefund(
       const userView = ctx.store.getUser?.(depositRecord.userId);
       const tokEntry = userView?.balances?.tokens?.[tokenKey];
       const availableNow = tokEntry?.available ?? 0;
-      if (availableNow < humanAmount) {
+      if (availableNow < netAmount) {
         // Release the lock before returning.
         await releaseUserLock(depositRecord.userId, userToken);
         return {
@@ -1092,23 +1098,29 @@ async function handleRefund(
           status: 409,
           error:
             `Cannot force-release: insufficient AVAILABLE balance for ` +
-            `${depositRecord.userId} on ${tokenKey} (have ${availableNow}, need ${humanAmount}). ` +
+            `${depositRecord.userId} on ${tokenKey} (have ${availableNow}, need ${netAmount}). ` +
             `Reserved funds are committed against in-flight plays and cannot be refunded.`,
         };
       }
       ctx.store.updateBalance(depositRecord.userId, (b) => {
         const tokEntry = b.tokens[tokenKey];
         if (!tokEntry) return b;
-        tokEntry.available = Math.max(0, tokEntry.available - humanAmount);
+        tokEntry.available = Math.max(0, tokEntry.available - netAmount);
         return b;
       });
-      // F9: rake reversal.
+      // F9 + F15 (2026-07-04 custodial audit): rake reversal, floored at 0
+      // and reversing totalRakeCollected too — matching processRefund and
+      // the verifier so the three refund sites stay identical.
       if (depositRecord.rakeAmount > 0) {
         ctx.store.updateOperator((op) => ({
           ...op,
           balances: {
             ...op.balances,
-            [tokenKey]: (op.balances[tokenKey] ?? 0) - depositRecord.rakeAmount,
+            [tokenKey]: Math.max(0, (op.balances[tokenKey] ?? 0) - depositRecord.rakeAmount),
+          },
+          totalRakeCollected: {
+            ...op.totalRakeCollected,
+            [tokenKey]: Math.max(0, (op.totalRakeCollected[tokenKey] ?? 0) - depositRecord.rakeAmount),
           },
         }));
         rakeReversed = depositRecord.rakeAmount;
