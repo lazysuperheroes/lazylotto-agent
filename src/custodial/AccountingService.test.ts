@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import { Client } from '@hashgraph/sdk';
 import { AccountingService } from './AccountingService.js';
 import { validateV2Message } from './hcs20-schema.js';
+import type { IStore } from './IStore.js';
 
 const AGENT_ACCOUNT = '0.0.9999';
 
@@ -339,6 +340,98 @@ describe('F8 / F13: HCS-20 audit-trail integrity (2026-07-05 custodial audit)', 
         }),
       /HCS20_TOPIC_ID is not configured/,
     );
+  });
+
+  // revert-proof: removing the F-R2 peek-skip fast-path in initializeAgentSeq
+  // makes it ALWAYS run the mirror scan even when the cluster counter is
+  // already seeded. On a play-starved / deposit-heavy topic that scan hits the
+  // F8 `attemptHighest===-1 && !reachedHead` throw, which flags seed-failure
+  // cluster-wide and dead-letters every subsequent v2 write across ALL Lambdas
+  // — a fail-closed play DoS. This pins that the scan (fetch) is NOT performed
+  // when the counter is already seeded (peekAgentSeq returns a value).
+  it('F-R2: skips the mirror scan when the cluster counter is already seeded', async () => {
+    installRedisMock();
+    let fetchCount = 0;
+    let reSeeded = false;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      fetchCount++;
+      return new Response(JSON.stringify({ messages: [], links: {} }), {
+        status: 200,
+      });
+    }) as typeof fetch;
+    const store = {
+      async peekAgentSeq() {
+        return 42;
+      },
+      async seedAgentSeq() {
+        reSeeded = true;
+      },
+      async nextAgentSeq() {
+        return 43;
+      },
+    } as unknown as IStore;
+    try {
+      const svc = new AccountingService({
+        client: {} as unknown as Client,
+        tick: 'TEST',
+        topicId: '0.0.999',
+        store,
+      });
+      await svc.initializeAgentSeq(AGENT_ACCOUNT);
+      assert.equal(
+        fetchCount,
+        0,
+        'no mirror scan when the counter is already seeded',
+      );
+      assert.equal(
+        reSeeded,
+        false,
+        'no re-seed on the skip path (SETNX would discard it anyway)',
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // revert-proof: the companion — proves the skip is CONDITIONAL. A genuine
+  // cold counter (peekAgentSeq === null) still triggers the scan, so first-boot
+  // seeding is unaffected. Without this, the test above could pass for the
+  // wrong reason (scan disabled entirely rather than skipped-when-seeded).
+  it('F-R2: still runs the scan on a genuine cold counter (peek null)', async () => {
+    installRedisMock();
+    let fetchCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      fetchCount++;
+      return new Response(JSON.stringify({ messages: [], links: {} }), {
+        status: 200,
+      });
+    }) as typeof fetch;
+    const store = {
+      async peekAgentSeq() {
+        return null;
+      },
+      async seedAgentSeq() {},
+      async nextAgentSeq() {
+        return 0;
+      },
+    } as unknown as IStore;
+    try {
+      const svc = new AccountingService({
+        client: {} as unknown as Client,
+        tick: 'TEST',
+        topicId: '0.0.999',
+        store,
+      });
+      await svc.initializeAgentSeq(AGENT_ACCOUNT);
+      assert.ok(
+        fetchCount >= 1,
+        'a cold counter (peek null) still triggers the scan',
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 

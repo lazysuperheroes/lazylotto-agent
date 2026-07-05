@@ -692,6 +692,27 @@ export class AccountingService {
         else this.fallbackAgentSeqs.set(agentAccountId, -1);
         return;
       }
+      // F-R2 (2026-07-05 re-audit of the F8 fix): if the cluster counter is
+      // ALREADY seeded (by a sibling Lambda or an earlier cold-start on this
+      // one), the mirror scan is redundant — `seedAgentSeq` is SETNX so its
+      // result would be discarded anyway. Skip it. This ALSO closes the
+      // fail-closed DoS the F8 throw introduced: on a play-starved /
+      // deposit-heavy topic the scan can walk `maxScan` messages without
+      // seeing an agentSeq and THROW, which flags seed-failure cluster-wide
+      // and dead-letters every subsequent v2 write across ALL Lambdas. With a
+      // counter already in Redis we never reach that throw. The scan runs
+      // ONLY on a genuine cold counter (peek === null). A peek error (Redis
+      // blip) falls through to the scan, which has its own retry ladder.
+      if (this.store?.peekAgentSeq) {
+        try {
+          const existing = await this.store.peekAgentSeq(agentAccountId);
+          if (existing !== null && existing !== undefined) {
+            return;
+          }
+        } catch {
+          /* peek failed — fall through to the authoritative scan */
+        }
+      }
       // 0.3.4 hardening: retry the mirror scan up to 3 times with
       // exponential backoff before falling back. Pre-fix a single
       // transient mirror-node hiccup seeded at -1, so the next INCR

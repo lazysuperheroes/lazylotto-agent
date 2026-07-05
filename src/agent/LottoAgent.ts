@@ -125,6 +125,30 @@ export function isPrizeSweepContaminated(
   return pendingPrizesCount > expectedFromThisSession;
 }
 
+/**
+ * Whether to REFUSE the all-or-nothing prize sweep for cross-tenant safety.
+ *
+ * F-R3 (2026-07-05 re-audit of the F1 fix): the contamination guard is
+ * meaningful ONLY on a SHARED (custodial / multi-user) agent wallet, where a
+ * prior tenant's stranded pending prizes would be swept to the CURRENT tenant
+ * by `transferPendingPrizes(owner, MaxUint256)`. In single-user mode the
+ * wallet is dedicated to ONE owner, so ALL pending prizes are legitimately
+ * theirs and sweeping them is always correct — there, `pending > thisSession`
+ * (e.g. a prior session's transient transfer failure) is a FALSE positive that
+ * would permanently strand the owner's own prizes (single-user has no
+ * dead-letter / recovery wiring). So the block applies only when `sharedWallet`.
+ */
+export function shouldBlockContaminatedSweep(
+  sharedWallet: boolean,
+  pendingPrizesCount: number,
+  expectedFromThisSession: number,
+): boolean {
+  return (
+    sharedWallet &&
+    isPrizeSweepContaminated(pendingPrizesCount, expectedFromThisSession)
+  );
+}
+
 // ── Prerequisite shape returned by MCP check_prerequisites ────
 
 interface Prerequisite {
@@ -154,9 +178,16 @@ export class LottoAgent {
   private reportGenerator: ReportGenerator;
   private systemInfo: SystemInfo | null = null;
   private _playing = false;
+  /**
+   * F-R3: true only when this agent runs against a SHARED custodial wallet
+   * (set by MultiUserAgent). Gates the cross-tenant prize-sweep contamination
+   * guard, which is a false positive on a single-user dedicated wallet.
+   */
+  private sharedWallet: boolean;
 
-  constructor(strategy: Strategy) {
+  constructor(strategy: Strategy, options: { sharedWallet?: boolean } = {}) {
     this.client = createClient();
+    this.sharedWallet = options.sharedWallet ?? false;
     // Inject OWNER_EOA from env if strategy doesn't specify an ownerAddress
     if (!strategy.playStyle.ownerAddress && process.env.OWNER_EOA) {
       strategy = {
@@ -865,7 +896,13 @@ export class LottoAgent {
     // gated on `> 0`, which was SILENT in the pure-theft case (a user
     // who won nothing sweeping a prior user's stranded prizes).
     const expectedFromThisSession = this.reportGenerator.getCurrentWinCount();
-    if (isPrizeSweepContaminated(state.pendingPrizesCount, expectedFromThisSession)) {
+    if (
+      shouldBlockContaminatedSweep(
+        this.sharedWallet,
+        state.pendingPrizesCount,
+        expectedFromThisSession,
+      )
+    ) {
       console.error(
         `  ⛔ CROSS-USER CONTAMINATION: agent pending prizes ` +
           `(${state.pendingPrizesCount}) > this session's wins ` +

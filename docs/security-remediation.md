@@ -153,6 +153,29 @@ The topic is the disaster-recovery source of truth; these three let it silently 
 
 ---
 
+## Re-audit round (2026-07-05): fix-verification pass
+
+After all 19 findings shipped, a **focused adversarial re-audit** of the remediation diff (`8bdd916..7dec88b`) ran to (a) verify each closure holds against the shipped code and (b) hunt for fix-induced regressions. 7 domain finders → 3 skeptic verifiers per finding. **All 17 checked closures held.** Three NEW findings were confirmed and fixed in the same pass:
+
+- [x] **F-R1 — Force-release refund handler (third refund copy) skips `refreshUser`/`refreshOperator` under the lock.** *(SHIPPED 2026-07-05: added `refreshUser`/`refreshOperator` under the lock in `handlers.ts` before the balance read, matching the F2 fix in `refund.ts`'s in-flight + verifier copies. Revert-proof test in `force-release/route.test.ts`.)*
+  **Class:** cross-Lambda lost-update (the F2 archetype, in a copy F2's fix missed). **Introduced by the fix:** no — pre-existing gap the F2 fix should have covered.
+  **Evidence:** `handlers.ts` acquires the user lock, then reads `ctx.store.getUser(...)` on a possibly-stale warm-Lambda cache; the `availableNow` guard passes on stale data and `updateBalance`'s write-through reverts a sibling Lambda's concurrent deposit-credit / settlement.
+  **Fix:** `await ctx.store.refreshUser?.(userId); await ctx.store.refreshOperator?.();` immediately after acquiring the lock.
+
+- [x] **F-R2 — F8's throw turns a redundant cold-start scan into a self-reinforcing fail-closed play DoS.** *(SHIPPED 2026-07-05: `initializeAgentSeq` now peeks the cluster counter via the new `IStore.peekAgentSeq` and SKIPS the mirror scan when it is already seeded — the scan's result would be SETNX-discarded anyway. The scan (and its F8 throw) runs only on a genuine cold counter. Revert-proof tests in `AccountingService.test.ts`.)*
+  **Class:** fail-closed DoS. **Introduced by the fix:** yes — F8's `attemptHighest===-1 && !reachedHead` throw.
+  **Evidence:** `initializeAgentSeq` runs the scan on every cold Lambda (guarded only by the per-process promise Map; no already-seeded check). On a play-starved / deposit-heavy topic (>2000 author-less messages at the head since the last v2 message) the scan finds no agentSeq, never reaches head, and throws → the else-branch flags seed-failure cluster-wide (10–60 min TTL) → every v2 write across ALL Lambdas dead-letters as `audit_trail_orphaned`. Self-reinforcing: blocked v2 writes push the last agentSeq message ever deeper.
+  **Fix:** peek Redis before scanning; skip when the counter exists. Preserves F8's protection on genuine cold-start (peek `null`).
+
+- [x] **F-R3 — F1's contamination guard fires in single-user mode, permanently stranding the sole owner's own prizes.** *(SHIPPED 2026-07-05: the guard is now gated behind a `sharedWallet` flag (`shouldBlockContaminatedSweep`), set true only by `MultiUserAgent`. Single-user `LottoAgent` (dedicated wallet, one owner) sweeps normally. Revert-proof tests in `prize-sweep-guard.test.ts`.)*
+  **Class:** false-positive fail-closed. **Introduced by the fix:** yes — F1's unconditional `isPrizeSweepContaminated` gate.
+  **Evidence:** in single-user mode (`LottoAgent` instantiated directly, no `MultiUserAgent`) ALL pending prizes belong to the one owner, so `pending > thisSession` (e.g. a prior session's transient transfer failure) is never cross-tenant — but the guard blocks the sweep, and single-user mode has no dead-letter/recovery wiring, so the owner's prizes never auto-forward.
+  **Fix:** gate the block on `sharedWallet` (custodial mode only); `MultiUserAgent` passes `{ sharedWallet: true }` so F1's cross-tenant protection is unchanged there.
+
+**Gates:** `npm test` 802 · `npm run typecheck` clean · `npm run test:web` 149 · `npm run build:web` ✓.
+
+---
+
 ## Re-running the audit
 
 After landing fixes, re-run the workflow to confirm closure and catch regressions:

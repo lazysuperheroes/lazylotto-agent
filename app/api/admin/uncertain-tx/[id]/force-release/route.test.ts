@@ -578,6 +578,77 @@ describe('F12 + F8 + F9 + F10: applyForceRelease — refund_uncertain', () => {
     expect(redisStore.get(claimKey)).toBe('refund-tx-r1');
   });
 
+  // revert-proof: F-R1 (re-audit of the F2 fix). Reverting the
+  // `refreshUser`/`refreshOperator` calls added UNDER the lock in
+  // handlers.ts makes this handler read the STALE cached balance (50) — the
+  // insufficient-balance guard then 409s the legitimate 95 debit (result.ok
+  // false, refreshUser never called). The fix refreshes under the lock, sees
+  // the sibling-Lambda-committed 95, and completes the debit. This is the
+  // third copy of the refund path; refund.ts's in-flight + verifier copies
+  // already refresh — this force-release sibling was the gap.
+  it('F-R1: refreshes the user under the lock so a stale cache cannot block the debit', async () => {
+    const claimKey = 'lla:testnet:refunded:original-tx-fr1';
+    const entry: DeadLetterEntry = {
+      transactionId: 'refund-tx-fr1',
+      timestamp: new Date().toISOString(),
+      error: 'x',
+      kind: 'refund_uncertain',
+      sender: '0.0.6001',
+      details: {
+        claimKey,
+        originalTxId: 'original-tx-fr1',
+        refundTxId: 'refund-tx-fr1',
+        humanAmount: 95,
+        tokenKey: 'hbar',
+        agentAccountId: '0.0.9999',
+      },
+    };
+    const { ctx, state, redisStore } = makeContext({
+      dls: new Map([[entry.transactionId, entry]]),
+      // STALE warm-Lambda cache: only 50 available. A naive read 409s the 95
+      // debit even though a sibling Lambda already committed a deposit taking
+      // the real balance to 95.
+      balances: new Map([['u-bob', makeBalance('hbar', 50, 0)]]),
+      deposits: new Map([
+        [
+          'original-tx-fr1',
+          {
+            transactionId: 'original-tx-fr1',
+            userId: 'u-bob',
+            grossAmount: 100,
+            rakeAmount: 5,
+            netAmount: 95,
+            tokenId: null,
+            memo: 'memo-bob',
+            timestamp: '2026-05-01T00:00:00Z',
+          },
+        ],
+      ]),
+      operator: {
+        balances: { hbar: 5 },
+        totalWithdrawnByOperator: {},
+        totalRakeCollected: { hbar: 5 },
+      },
+    });
+    redisStore.set(claimKey, 'pending');
+    // The store's authoritative (fresh) state has the concurrent deposit; the
+    // fix MUST refreshUser under the lock to observe it.
+    let refreshUserCalled = false;
+    (
+      ctx.store as unknown as { refreshUser: (uid: string) => Promise<void> }
+    ).refreshUser = async (uid) => {
+      refreshUserCalled = true;
+      state.balances.set(uid, makeBalance('hbar', 95, 0));
+    };
+
+    const result = await applyForceRelease(entry, 'SUCCESS', ctx);
+
+    expect(refreshUserCalled).toBe(true);
+    expect(result.ok).toBe(true);
+    // Debited from the FRESH 95 (→ 0), not blocked on the stale 50.
+    expect(state.balances.get('u-bob')!.tokens.hbar!.available).toBe(0);
+  });
+
   it('F10: FAILED overwrites claim with failed:<refundTxId> instead of DEL', async () => {
     const claimKey = 'lla:testnet:refunded:original-tx-r2';
     const entry: DeadLetterEntry = {

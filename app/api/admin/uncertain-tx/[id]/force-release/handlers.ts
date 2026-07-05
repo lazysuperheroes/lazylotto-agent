@@ -1080,6 +1080,18 @@ async function handleRefund(
     const userToken = await tryAcquireUserLockWithBackoff(depositRecord.userId);
     if (!userToken) return USER_LOCK_CONTENTION;
     try {
+      // F-R1 (2026-07-05 re-audit of the F2 fix): refresh user + operator
+      // from the store UNDER the lock before reading the balance. A warm
+      // Lambda can hold a STALE cached user from an earlier request; without
+      // this refresh the availableNow guard below reads stale data and the
+      // updateBalance write-through (RedisStore write-throughs the WHOLE user
+      // object) silently REVERTS a deposit-credit / settlement that a sibling
+      // Lambda committed concurrently — a cross-Lambda lost update. This is
+      // the THIRD copy of the refund path; refund.ts's in-flight + verifier
+      // copies got the F2 refresh-under-lock, this force-release sibling was
+      // missed. Optional-chained to tolerate partial test doubles.
+      await ctx.store.refreshUser?.(depositRecord.userId);
+      await ctx.store.refreshOperator?.();
       // R3-FG-24 (round-3 P3-DS-001): mirror the F7+R2-FG-19 guard
       // that processRefund applies upfront. Pre-fix used the silent
       // `Math.max(0, ...)` clamp below; underflow scenarios (user

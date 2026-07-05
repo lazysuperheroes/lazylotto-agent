@@ -523,6 +523,13 @@ export class PersistentStore implements IStore {
     return next;
   }
 
+  /** Peek without increment; `null` when never seeded (F-R2 scan-skip). */
+  async peekAgentSeq(agentAccountId: string): Promise<number | null> {
+    return this.agentSeqs.has(agentAccountId)
+      ? this.agentSeqs.get(agentAccountId)!
+      : null;
+  }
+
   // ── Private helpers ──────────────────────────────────────────
 
   private path(file: string): string {

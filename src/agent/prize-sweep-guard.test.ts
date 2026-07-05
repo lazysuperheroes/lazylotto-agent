@@ -10,7 +10,10 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { isPrizeSweepContaminated } from './LottoAgent.js';
+import {
+  isPrizeSweepContaminated,
+  shouldBlockContaminatedSweep,
+} from './LottoAgent.js';
 
 describe('F1: cross-user prize-sweep contamination guard', () => {
   // revert-proof: reverting to the pre-fix `expectedFromThisSession > 0 &&
@@ -39,5 +42,30 @@ describe('F1: cross-user prize-sweep contamination guard', () => {
   // the no-false-positive floor.
   it('allows when nothing is pending', () => {
     assert.equal(isPrizeSweepContaminated(0, 0), false);
+  });
+});
+
+describe('F-R3: contamination guard applies only to a shared custodial wallet', () => {
+  // revert-proof: dropping the `sharedWallet` gate (reverting to a bare
+  // isPrizeSweepContaminated call in transferAllPrizes) makes this
+  // single-user case block — permanently stranding the SOLE owner's own
+  // prizes after a transient transfer failure, which single-user mode has no
+  // dead-letter/recovery path to clear. This pins the gate.
+  it('does NOT block in single-user mode even when pending > this session', () => {
+    assert.equal(shouldBlockContaminatedSweep(false, 3, 1), false);
+  });
+
+  // revert-proof: if the gate ever hard-coded false (disabling the guard for
+  // everyone), this multi-user contaminated case would sweep a prior tenant's
+  // stranded prizes to the current player — re-opening F1's cross-tenant
+  // theft. This pins that the guard STAYS active on a shared wallet.
+  it('blocks in multi-user (shared-wallet) mode when pending > this session', () => {
+    assert.equal(shouldBlockContaminatedSweep(true, 3, 1), true);
+  });
+
+  // revert-proof: pins that a shared wallet with exactly this session's own
+  // prizes is NOT blocked (the guard is `>` not `>=`, even with the gate on).
+  it('allows a shared wallet to sweep exactly this session\'s prizes', () => {
+    assert.equal(shouldBlockContaminatedSweep(true, 2, 2), false);
   });
 });

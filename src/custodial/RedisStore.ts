@@ -868,6 +868,18 @@ export class RedisStore implements IStore {
     return await this.redis.incr(k('agentSeq', agentAccountId));
   }
 
+  /**
+   * Peek the cluster counter without INCR. `null` when the key is unset
+   * (never seeded). See IStore.peekAgentSeq — used to skip the redundant
+   * (and, post-F8, fail-closed) cold-start mirror scan (F-R2).
+   */
+  async peekAgentSeq(agentAccountId: string): Promise<number | null> {
+    const v = await this.redis.get<number | string>(k('agentSeq', agentAccountId));
+    if (v === null || v === undefined) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
   // ── Rotation ─────────────────────────────────────────────────
 
   /**

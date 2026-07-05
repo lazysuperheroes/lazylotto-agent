@@ -741,8 +741,10 @@ export class MultiUserAgent {
         },
       };
 
-      // Create a fresh LottoAgent with user's strategy
-      const agent = new LottoAgent(userStrategy);
+      // Create a fresh LottoAgent with user's strategy. sharedWallet:true
+      // activates the F1 cross-tenant prize-sweep contamination guard — this
+      // is the ONE shared custodial wallet every user plays through (F-R3).
+      const agent = new LottoAgent(userStrategy, { sharedWallet: true });
       const report: SessionReport = await agent.play();
 
       // R10-FG-2 / Phase-9 Cluster C: store.getUser now returns

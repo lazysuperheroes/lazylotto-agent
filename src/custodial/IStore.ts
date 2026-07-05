@@ -298,6 +298,19 @@ export interface IStore {
    */
   nextAgentSeq(agentAccountId: string): Promise<number>;
 
+  /**
+   * Peek the current agentSeq counter WITHOUT incrementing. Returns the
+   * last seeded / last-INCR'd value, or `null` if the counter has never
+   * been seeded on this store. Used by `AccountingService.initializeAgentSeq`
+   * to SKIP the cold-start mirror scan when a sibling Lambda already seeded
+   * the cluster counter — the scan's result would be SETNX-discarded anyway,
+   * and on a play-starved / deposit-heavy topic the scan can otherwise walk
+   * `maxScan` messages without seeing an agentSeq and throw (F8), flagging
+   * seed-failure cluster-wide → a fail-closed play DoS (F-R2). Optional so
+   * legacy test doubles need not implement it (callers guard with `?.`).
+   */
+  peekAgentSeq?(agentAccountId: string): Promise<number | null>;
+
   // ── Rotation ───────────────────────────────────────────────────
   rotateRecords(): Promise<void>;
 
